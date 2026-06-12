@@ -5,6 +5,9 @@ Run: streamlit run app.py
 
 import sys
 
+import json
+import os
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -15,7 +18,7 @@ from plotly.subplots import make_subplots
 sys.path.insert(0, "src")
 
 from backtest import BacktestEngine
-from config import BACKTEST_CONFIG, BENCHMARK, ETF_UNIVERSE, STRATEGY_CONFIG
+from config import BACKTEST_CONFIG, BENCHMARK, ETF_UNIVERSE, STRATEGY_CONFIG, FACTOR_CONFIG, build_config
 from database import ETFDatabase
 from strategy import StrategyEngine
 
@@ -112,6 +115,40 @@ def normalize_weights(raw_weights):
     return {k: v / total for k, v in raw_weights.items()}, total
 
 
+def load_presets():
+    """加载参数预设"""
+    preset_path = os.path.join(os.path.dirname(__file__), "presets", "strategy_presets.json")
+    if os.path.exists(preset_path):
+        with open(preset_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "v1.0 原始参数": {
+            "weights": {"trend": 0.30, "confirm": 0.20, "momentum": 0.25, "volume": 0.15, "volatility": 0.10},
+            "min_trend_score": 15, "min_confirm_score": 4, "min_total_score": 40,
+            "max_holdings": 5, "max_position_per_etf": 0.15, "stop_loss": -0.08,
+        },
+        "保守型": {
+            "weights": {"trend": 0.40, "confirm": 0.30, "momentum": 0.15, "volume": 0.10, "volatility": 0.05},
+            "min_trend_score": 20, "min_confirm_score": 8, "min_total_score": 50,
+            "max_holdings": 3, "max_position_per_etf": 0.10, "stop_loss": -0.05,
+        },
+        "激进型": {
+            "weights": {"trend": 0.20, "confirm": 0.10, "momentum": 0.40, "volume": 0.20, "volatility": 0.10},
+            "min_trend_score": 10, "min_confirm_score": 2, "min_total_score": 35,
+            "max_holdings": 7, "max_position_per_etf": 0.20, "stop_loss": -0.12,
+        },
+    }
+
+
+def save_presets(presets):
+    """保存参数预设"""
+    preset_dir = os.path.join(os.path.dirname(__file__), "presets")
+    os.makedirs(preset_dir, exist_ok=True)
+    preset_path = os.path.join(preset_dir, "strategy_presets.json")
+    with open(preset_path, "w", encoding="utf-8") as f:
+        json.dump(presets, f, ensure_ascii=False, indent=2)
+
+
 def build_sidebar_config():
     st.sidebar.title("⚙️ 策略控制台")
     st.sidebar.caption("参数变更会触发页面重算，回测需点击按钮重新运行。")
@@ -138,6 +175,48 @@ def build_sidebar_config():
         stop_loss = st.slider("止损线(%)", -20, -1, int(STRATEGY_CONFIG["stop_loss"] * 100)) / 100
         use_timing = st.checkbox("启用大盘择时", STRATEGY_CONFIG["market_timing"])
 
+    # ========== 因子参数 (v1.2 新增) ==========
+    with st.sidebar.expander("⚡ 因子参数", expanded=False):
+        st.caption("调仓频率、冷静期、动态止盈等可调因子")
+        
+        # 调仓频率
+        freq_options = {"每周": "weekly", "双周": "biweekly", "月度": "monthly"}
+        freq_display = list(freq_options.keys())
+        freq_default = list(freq_options.keys())[list(freq_options.values()).index(FACTOR_CONFIG["rebalance_freq"])]
+        freq_selected = st.selectbox("调仓频率", freq_display, index=freq_display.index(freq_default))
+        rebalance_freq = freq_options[freq_selected]
+        
+        # 调仓日
+        weekday_options = ["周一", "周二", "周三", "周四", "周五"]
+        rebalance_weekday = st.selectbox("调仓日", weekday_options, index=FACTOR_CONFIG["rebalance_weekday"])
+        rebalance_weekday = weekday_options.index(rebalance_weekday)
+        
+        # 冷静期
+        cooling_period = st.slider("冷静期(交易日)", 0, 20, FACTOR_CONFIG["cooling_period"])
+        cooling_score_boost = st.slider("冷静期评分提升", 0, 30, FACTOR_CONFIG["cooling_score_boost"])
+        
+        # 动态止盈
+        st.divider()
+        st.caption("动态止盈")
+        trailing_mode_options = {"不启用": "none", "单一阈值": "simple", "分档止盈": "tiered"}
+        trailing_display = list(trailing_mode_options.keys())
+        trailing_default = list(trailing_mode_options.keys())[list(trailing_mode_options.values()).index(FACTOR_CONFIG["trailing_stop_mode"])]
+        trailing_selected = st.selectbox("动态止盈模式", trailing_display, index=trailing_display.index(trailing_default))
+        trailing_stop_mode = trailing_mode_options[trailing_selected]
+        
+        trailing_stop = None
+        if trailing_stop_mode == "simple":
+            trailing_stop = st.slider("回撤止盈阈值(%)", -20, -1, -10) / 100
+        elif trailing_stop_mode == "tiered":
+            st.caption("分档参数（盈利门槛 / 回撤容忍）")
+            tier_1_pnl = st.slider("1档盈利门槛(%)", 2, 10, int(FACTOR_CONFIG["tier_1_pnl"] * 100)) / 100
+            tier_1_drawdown = st.slider("1档回撤容忍(%)", -10, -2, int(FACTOR_CONFIG["tier_1_drawdown"] * 100)) / 100
+            tier_2_pnl = st.slider("2档盈利门槛(%)", 10, 25, int(FACTOR_CONFIG["tier_2_pnl"] * 100)) / 100
+            tier_2_drawdown = st.slider("2档回撤容忍(%)", -15, -5, int(FACTOR_CONFIG["tier_2_drawdown"] * 100)) / 100
+            tier_3_pnl = st.slider("3档盈利门槛(%)", 20, 50, int(FACTOR_CONFIG["tier_3_pnl"] * 100)) / 100
+            tier_3_drawdown = st.slider("3档回撤容忍(%)", -20, -8, int(FACTOR_CONFIG["tier_3_drawdown"] * 100)) / 100
+
+    # 构建策略配置
     cfg = STRATEGY_CONFIG.copy()
     cfg["weights"] = weights
     cfg["min_trend_score"] = min_trend
@@ -147,6 +226,29 @@ def build_sidebar_config():
     cfg["max_position_per_etf"] = max_per_etf
     cfg["stop_loss"] = stop_loss
     cfg["market_timing"] = use_timing
+    
+    # 构建因子配置
+    factor_cfg = {
+        "rebalance_freq": rebalance_freq,
+        "rebalance_weekday": rebalance_weekday,
+        "cooling_period": cooling_period,
+        "cooling_score_boost": cooling_score_boost,
+        "trailing_stop_mode": trailing_stop_mode,
+    }
+    if trailing_stop is not None:
+        factor_cfg["trailing_stop"] = trailing_stop
+    if trailing_stop_mode == "tiered":
+        factor_cfg.update({
+            "tier_1_pnl": tier_1_pnl,
+            "tier_1_drawdown": tier_1_drawdown,
+            "tier_2_pnl": tier_2_pnl,
+            "tier_2_drawdown": tier_2_drawdown,
+            "tier_3_pnl": tier_3_pnl,
+            "tier_3_drawdown": tier_3_drawdown,
+        })
+    
+    # 合并为完整配置
+    cfg = build_config(factor_cfg=factor_cfg, strategy_cfg=cfg)
 
     st.sidebar.divider()
     latest = get_database().get_latest_date()
@@ -208,7 +310,16 @@ def cfg_signature(cfg):
         round(cfg["stop_loss"], 6),
         cfg["market_timing"],
     )
-    return weights + params
+    # 加入因子参数
+    factor_params = (
+        cfg.get("rebalance_freq", "weekly"),
+        cfg.get("rebalance_weekday", 3),
+        cfg.get("cooling_period", 5),
+        cfg.get("cooling_score_boost", 10),
+        cfg.get("trailing_stop_mode", "simple"),
+        cfg.get("trailing_stop"),
+    )
+    return weights + params + factor_params
 
 
 def get_latest_score_table(cfg):
@@ -475,12 +586,40 @@ def render_dashboard(cfg):
     stats = load_stats()
     signal_df = scores[scores["qualified"]] if not scores.empty else pd.DataFrame()
 
+    # 获取大盘择时信号
+    db_dash = get_database()
+    bench_df_dash = load_market_data(ticker=BENCHMARK)
+    market_signal_val = 1.0
+    if not bench_df_dash.empty and cfg["market_timing"]:
+        engine_dash = StrategyEngine(cfg)
+        bench_signals = engine_dash.market_timing(bench_df_dash)
+        bench_latest = bench_signals[bench_signals["date"] == latest] if latest else pd.DataFrame()
+        if not bench_latest.empty:
+            market_signal_val = bench_latest["market_signal"].iloc[0]
+
+    if market_signal_val >= 0.9:
+        mkt_text, mkt_color = "满仓", "#2e9d75"
+    elif market_signal_val >= 0.4:
+        mkt_text, mkt_color = "半仓", "#f0a202"
+    else:
+        mkt_text, mkt_color = "防御", "#d64f4f"
+
     kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
     kpi1.metric("最新交易日", latest or "N/A")
     kpi2.metric("候选信号", len(signal_df))
     kpi3.metric("最高评分", f"{scores['total_score'].max():.1f}" if not scores.empty else "N/A")
     kpi4.metric("数据记录", f"{stats.get('market_data_count', 0):,}")
-    kpi5.metric("覆盖标的", stats.get("ticker_count", 0))
+    with kpi5:
+        st.markdown(
+            f"""
+            <div style='background:#ffffff;border:1px solid #e6edf5;border-radius:8px;padding:14px 16px;box-shadow:0 4px 14px rgba(20,39,68,0.05);text-align:center;'>
+                <div style='font-size:0.86rem;color:#506176;'>大盘择时</div>
+                <div style='font-size:1.5rem;font-weight:700;color:{mkt_color};'>{mkt_text}</div>
+                <div style='font-size:0.78rem;color:#66758a;'>仓位 {market_signal_val:.0%}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     left, right = st.columns([1.25, 1])
     with left:
@@ -521,6 +660,56 @@ def render_dashboard(cfg):
         ].copy()
         display.columns = ["代码", "名称", "实时总分", "原始总分", "趋势", "确认", "动量", "成交量", "波动率", "收盘价", "入选"]
         st.dataframe(display, use_container_width=True, hide_index=True)
+
+    # ========== 持仓明细 ==========
+    st.subheader("💼 当前持仓明细")
+    try:
+        with db_dash._connect() as conn:
+            portfolio_open = pd.read_sql_query(
+                "SELECT * FROM portfolio WHERE status='OPEN' ORDER BY date DESC",
+                conn
+            )
+    except Exception:
+        portfolio_open = pd.DataFrame()
+
+    if not portfolio_open.empty:
+        hold_cols = st.columns(min(4, len(portfolio_open)))
+        for i, (_, row) in enumerate(portfolio_open.iterrows()):
+            ticker = row["ticker"]
+            name = ETF_UNIVERSE.get(ticker, ticker)
+            latest_price_df = load_market_data(ticker=ticker, start_date=latest, end_date=latest)
+            if not latest_price_df.empty:
+                current_price = latest_price_df["close"].iloc[0]
+                cost = row["cost_basis"]
+                pnl_pct = (current_price - cost) / cost if cost and cost > 0 else 0
+                pnl_color = "#2e9d75" if pnl_pct >= 0 else "#d64f4f"
+                pnl_sign = "+" if pnl_pct >= 0 else ""
+                unrealized = row.get("unrealized_pnl", 0)
+            else:
+                current_price = row.get("current_price", 0)
+                pnl_pct = 0
+                pnl_color = "#333333"
+                unrealized = 0
+
+            with hold_cols[i % len(hold_cols)]:
+                st.markdown(
+                    f"""
+                    <div style='background:#ffffff;border:1px solid #e6edf5;border-radius:8px;padding:14px;text-align:center;box-shadow:0 4px 14px rgba(20,39,68,0.05);'>
+                        <div style='font-size:14px;font-weight:600;color:#142744;'>{name}</div>
+                        <div style='font-size:11px;color:#66758a;'>{ticker}</div>
+                        <div style='font-size:12px;color:#506176;margin-top:6px;'>仓位: 15%</div>
+                        <div style='font-size:14px;font-weight:700;color:{pnl_color};margin-top:4px;'>
+                            {pnl_sign}{pnl_pct:.1%} | ¥{unrealized:,.0f}
+                        </div>
+                        <div style='font-size:11px;color:#66758a;margin-top:4px;'>
+                            成本: {cost:.3f} | 现价: {current_price:.3f}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+    else:
+        st.info("当前无持仓，等待买入信号")
 
 
 def render_backtest(cfg):
@@ -584,6 +773,38 @@ def render_backtest(cfg):
             trades_view = trades.copy()
             trades_view["name"] = trades_view["ticker"].map(lambda x: ETF_UNIVERSE.get(x, x))
             st.dataframe(trades_view, use_container_width=True, hide_index=True)
+
+        # ========== 年度收益对比 ==========
+        st.subheader("📅 年度收益对比")
+        nav_df = result["nav_df"].copy()
+        if not nav_df.empty:
+            nav_df["year"] = nav_df["date"].dt.year
+            yearly = nav_df.groupby("year").agg({
+                "nav": lambda x: (x.iloc[-1] / x.iloc[0]) - 1 if len(x) > 1 and x.iloc[0] > 0 else 0,
+            }).reset_index()
+            yearly.columns = ["年份", "策略收益"]
+
+            if "bench_return" in nav_df.columns:
+                bench_yearly = nav_df.groupby("year").agg({
+                    "bench_return": lambda x: x.iloc[-1] - x.iloc[0] if len(x) > 1 else 0,
+                }).reset_index()
+                bench_yearly.columns = ["年份", "基准收益"]
+                yearly = yearly.merge(bench_yearly, on="年份", how="left")
+            else:
+                yearly["基准收益"] = 0
+
+            yearly["超额"] = yearly["策略收益"] - yearly["基准收益"]
+
+            display_yearly = yearly.copy()
+            display_yearly["策略"] = display_yearly["策略收益"].apply(lambda x: format_pct(x, 1))
+            display_yearly["基准"] = display_yearly["基准收益"].apply(lambda x: format_pct(x, 1))
+            display_yearly["超额"] = display_yearly["超额"].apply(lambda x: format_pct(x, 1))
+
+            st.dataframe(
+                display_yearly[["年份", "策略", "基准", "超额"]],
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def render_etf_analysis(cfg):
@@ -657,7 +878,117 @@ def render_data_management():
                 load_stats.clear()
                 st.success(f"已更新 {count} 条记录")
                 st.rerun()
-        st.caption("更新会调用现有 data_fetcher，不修改 src 目录。")
+        st.caption("AKShare 增量更新，不修改 src 目录。")
+
+        st.divider()
+
+        # iFinD CSV 导入
+        uploaded = st.file_uploader("📥 导入 iFinD CSV", type=["csv"], key="ifind_upload")
+        if uploaded is not None:
+            with st.spinner("导入 iFinD 数据中..."):
+                from data_fetcher import import_from_kimi
+                try:
+                    ifind_df = pd.read_csv(uploaded)
+                    count = import_from_kimi(ifind_df, db=db, source_label="iFinD")
+                    load_market_data.clear()
+                    load_scores.clear()
+                    load_stats.clear()
+                    st.success(f"✅ 已导入 {count} 条 iFinD 记录")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"导入失败: {e}")
+
+        st.divider()
+
+        # 重新计算评分
+        if st.button("🧮 重新计算评分", use_container_width=True):
+            with st.spinner("重新计算所有评分..."):
+                try:
+                    engine_calc = StrategyEngine(cfg)
+                    all_scores = []
+                    for ticker in ETF_UNIVERSE.keys():
+                        df = db.get_market_data(ticker=ticker)
+                        if len(df) >= 50:
+                            scored = engine_calc.calculate_total_score(df)
+                            all_scores.append(scored)
+                    if all_scores:
+                        scores_all = pd.concat(all_scores, ignore_index=True)
+                        db.save_scores(scores_all)
+                        load_scores.clear()
+                        st.success(f"✅ 已计算并保存 {len(scores_all)} 条评分记录")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"计算失败: {e}")
+
+        # 数据质量检查
+        if st.button("📊 数据质量检查", use_container_width=True):
+            with st.spinner("数据质量检查中..."):
+                issues = []
+                try:
+                    for ticker in list(ETF_UNIVERSE.keys()) + [BENCHMARK]:
+                        df = db.get_market_data(ticker=ticker)
+                        if df.empty:
+                            issues.append(f"❌ {ticker}: 无数据")
+                            continue
+                        df["date"] = pd.to_datetime(df["date"])
+                        date_range = pd.date_range(df["date"].min(), df["date"].max(), freq="B")
+                        missing = len(date_range) - len(df)
+                        if missing > 5:
+                            issues.append(f"⚠️ {ticker}: 缺失 {missing} 个交易日")
+                        if (df["close"] <= 0).any():
+                            issues.append(f"❌ {ticker}: 存在零或负价格")
+                        max_daily_change = df["close"].pct_change().abs().max()
+                        if max_daily_change > 0.2:
+                            issues.append(f"⚠️ {ticker}: 存在单日涨跌幅>{max_daily_change:.1%}的异常值")
+                    if issues:
+                        for issue in issues:
+                            st.markdown(issue)
+                    else:
+                        st.success("✅ 数据质量检查通过，未发现异常")
+                except Exception as e:
+                    st.error(f"检查失败: {e}")
+
+        # 清理旧数据
+        if st.button("🗑️ 清理90天前数据", use_container_width=True):
+            with st.spinner("清理数据中..."):
+                try:
+                    cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+                    with db._connect() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM market_data WHERE date < ?", (cutoff,))
+                        deleted = cursor.rowcount
+                        conn.commit()
+                    load_market_data.clear()
+                    load_scores.clear()
+                    load_stats.clear()
+                    st.success(f"✅ 已清理 {deleted} 条旧数据")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"清理失败: {e}")
+
+        # CSV 导出
+        export_type = st.selectbox("导出类型", ["行情数据", "评分数据", "交易信号"], key="export_type")
+        if st.button("📤 导出 CSV", use_container_width=True):
+            try:
+                if export_type == "行情数据":
+                    df_exp = db.get_market_data()
+                elif export_type == "评分数据":
+                    df_exp = db.get_scores()
+                else:
+                    df_exp = db.get_signals()
+                if not df_exp.empty:
+                    csv = df_exp.to_csv(index=False).encode("utf-8-sig")
+                    st.download_button(
+                        label="⬇️ 下载 CSV",
+                        data=csv,
+                        file_name=f"{export_type}_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+                else:
+                    st.warning("无数据可导出")
+            except Exception as e:
+                st.error(f"导出失败: {e}")
 
     with logs_col:
         st.subheader("运行日志")
@@ -688,6 +1019,66 @@ def render_strategy_config(cfg):
     st.header("策略配置")
     st.markdown('<div class="section-note">当前 sidebar 参数快照、评分规则和ETF标的池。</div>', unsafe_allow_html=True)
 
+    # ========== 参数预设区 ==========
+    st.subheader("💾 参数预设")
+    presets = load_presets()
+    if presets:
+        preset_cols = st.columns(min(4, len(presets)))
+        for i, (name, preset) in enumerate(presets.items()):
+            with preset_cols[i % len(preset_cols)]:
+                is_current = (
+                    abs(preset.get("min_total_score", 0) - cfg["min_total_score"]) < 0.01
+                    and abs(preset.get("stop_loss", 0) - cfg["stop_loss"]) < 0.001
+                )
+                border_color = "#1769aa" if is_current else "#e6edf5"
+                bg_color = "#edf6ff" if is_current else "#ffffff"
+                st.markdown(
+                    f"""
+                    <div style='background:{bg_color};border:2px solid {border_color};border-radius:8px;padding:12px;'>
+                        <div style='font-size:14px;font-weight:600;color:#142744;'>{name}</div>
+                        <div style='font-size:11px;color:#66758a;margin:4px 0;'>{'当前使用中' if is_current else ''}</div>
+                        <div style='font-size:11px;color:#506176;'>
+                            趋势{preset['weights']['trend']:.0%} | 确认{preset['weights']['confirm']:.0%} | 动量{preset['weights']['momentum']:.0%}
+                        </div>
+                        <div style='font-size:11px;color:#506176;'>
+                            总评≥{preset['min_total_score']} | 止损{preset['stop_loss']:.0%} | 持仓{preset['max_holdings']}只
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                btn_cols = st.columns(2)
+                with btn_cols[0]:
+                    if st.button("加载", key=f"load_{name}", use_container_width=True):
+                        st.info(f"请手动在侧边栏调整参数以匹配 '{name}' 预设（Streamlit 限制无法自动同步 slider）")
+                with btn_cols[1]:
+                    if st.button("删除", key=f"del_{name}", use_container_width=True):
+                        del presets[name]
+                        save_presets(presets)
+                        st.success(f"已删除: {name}")
+                        st.rerun()
+    else:
+        st.info("暂无保存的参数预设。")
+
+    # 保存当前参数为新预设
+    with st.expander("➕ 保存当前参数为新预设"):
+        new_preset_name = st.text_input("预设名称", "", key="new_preset_name")
+        if st.button("保存", use_container_width=True) and new_preset_name:
+            presets[new_preset_name] = {
+                "weights": cfg["weights"].copy(),
+                "min_trend_score": cfg["min_trend_score"],
+                "min_confirm_score": cfg["min_confirm_score"],
+                "min_total_score": cfg["min_total_score"],
+                "max_holdings": cfg["max_holdings"],
+                "max_position_per_etf": cfg["max_position_per_etf"],
+                "stop_loss": cfg["stop_loss"],
+            }
+            save_presets(presets)
+            st.success(f"✅ 已保存预设: {new_preset_name}")
+            st.rerun()
+
+    st.divider()
+
     left, right = st.columns([1, 1])
     with left:
         st.subheader("当前参数")
@@ -701,6 +1092,34 @@ def render_strategy_config(cfg):
             ]
         )
         st.dataframe(weight_df, use_container_width=True, hide_index=True)
+
+        # 权重饼图
+        fig_pie = go.Figure(
+            data=[
+                go.Pie(
+                    labels=["趋势", "确认", "动量", "成交", "波动"],
+                    values=[
+                        cfg["weights"]["trend"],
+                        cfg["weights"]["confirm"],
+                        cfg["weights"]["momentum"],
+                        cfg["weights"]["volume"],
+                        cfg["weights"]["volatility"],
+                    ],
+                    hole=0.4,
+                    marker_colors=["#1769aa", "#9c27b0", "#2e9d75", "#f0a202", "#d64f4f"],
+                    textinfo="label+percent",
+                    textfont_size=12,
+                )
+            ]
+        )
+        fig_pie.update_layout(
+            height=260,
+            showlegend=False,
+            margin=dict(l=20, r=20, t=20, b=20),
+            paper_bgcolor="rgba(0,0,0,0)",
+            annotations=[dict(text="权重", x=0.5, y=0.5, font_size=14, showarrow=False)],
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
 
         param_df = pd.DataFrame(
             [
