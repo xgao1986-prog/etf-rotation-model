@@ -118,6 +118,8 @@ class ETFDatabase:
                     ticker TEXT,
                     shares INTEGER,
                     cost_basis REAL,
+                    high_water REAL,        -- 移动止损最高价
+                    stop_loss_date TEXT,    -- 止损日期（冷却期用）
                     current_price REAL,
                     unrealized_pnl REAL,
                     realized_pnl REAL,
@@ -138,12 +140,52 @@ class ETFDatabase:
                 )
             ''')
             
+            # 7. 板块指数历史行情（v1.1新增）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sector_market_data (
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    amount REAL,
+                    adj_close REAL,
+                    source TEXT DEFAULT 'AKShare-Sector',
+                    PRIMARY KEY (ticker, date)
+                )
+            ''')
+            
+            # 8. 板块指数评分（v1.1新增）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sector_scores (
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    ma20 REAL,
+                    ma50 REAL,
+                    ma20_slope REAL,
+                    above_ma20_days INTEGER,
+                    volatility_20 REAL,
+                    momentum_20 REAL,
+                    volume_ratio REAL,
+                    trend_score INTEGER,
+                    confirm_score INTEGER,
+                    momentum_rank REAL,
+                    volume_score INTEGER,
+                    vol_score INTEGER,
+                    total_score REAL,
+                    sector_boost_value REAL DEFAULT 0,  -- 板块动量加分值
+                    PRIMARY KEY (ticker, date)
+                )
+            ''')
+            
             conn.commit()
     
     # ==================== 行情数据操作 ====================
     
     def save_market_data(self, df: pd.DataFrame):
-        """保存行情数据（先删除已有记录，避免主键冲突）"""
+        """保存行情数据，自动去重"""
         if df.empty:
             return 0
         
@@ -158,20 +200,21 @@ class ETFDatabase:
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
         with self._connect() as conn:
-            cursor = conn.cursor()
-            # 先删除已有的相同(ticker, date)记录，避免主键冲突
-            dates = df['date'].unique().tolist()
-            tickers = df['ticker'].unique().tolist()
-            placeholders_d = ','.join(['?' for _ in dates])
-            placeholders_t = ','.join(['?' for _ in tickers])
-            cursor.execute(
-                f"DELETE FROM market_data WHERE date IN ({placeholders_d}) AND ticker IN ({placeholders_t})",
-                dates + tickers
-            )
-            
+            # 使用INSERT OR REPLACE避免重复
             df.to_sql('market_data', conn, if_exists='append', index=False)
+            
+            # 清理重复数据（保留最新）
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM market_data 
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) 
+                    FROM market_data 
+                    GROUP BY ticker, date
+                )
+            ''')
             conn.commit()
-        
+            
         return len(df)
     
     def get_market_data(self, ticker=None, start_date=None, end_date=None) -> pd.DataFrame:
@@ -232,10 +275,86 @@ class ETFDatabase:
             result = cursor.fetchone()
         return result[0] if result else None
     
-    # ==================== 评分数据操作 ====================
+    # ==================== 板块指数数据操作（v1.1新增）====================
     
-    def save_scores(self, df: pd.DataFrame):
-        """保存评分数据（先删除已有记录，避免唯一约束冲突）"""
+    def save_sector_data(self, df: pd.DataFrame):
+        """保存板块指数行情数据，自动去重"""
+        if df.empty:
+            return 0
+        
+        required_cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume']
+        for col in required_cols:
+            if col not in df.columns:
+                raise ValueError(f"缺少必要列: {col}")
+        
+        df = df.copy()
+        df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+        
+        with self._connect() as conn:
+            df.to_sql('sector_market_data', conn, if_exists='append', index=False)
+            
+            # 清理重复数据
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM sector_market_data 
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) 
+                    FROM sector_market_data 
+                    GROUP BY ticker, date
+                )
+            ''')
+            conn.commit()
+        
+        return len(df)
+    
+    def get_sector_data(self, ticker=None, start_date=None, end_date=None) -> pd.DataFrame:
+        """获取板块指数行情数据"""
+        query = "SELECT * FROM sector_market_data WHERE 1=1"
+        params = []
+        
+        if ticker:
+            if isinstance(ticker, list):
+                placeholders = ','.join(['?' for _ in ticker])
+                query += f" AND ticker IN ({placeholders})"
+                params.extend(ticker)
+            else:
+                query += " AND ticker = ?"
+                params.append(ticker)
+        
+        if start_date:
+            query += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND date <= ?"
+            params.append(end_date)
+        
+        query += " ORDER BY ticker, date"
+        
+        with self._connect() as conn:
+            df = pd.read_sql_query(query, conn, params=params)
+        
+        if not df.empty:
+            df['date'] = pd.to_datetime(df['date'])
+        
+        return df
+    
+    def get_all_sector_tickers(self):
+        """获取数据库中所有板块指数标的"""
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT ticker FROM sector_market_data ORDER BY ticker")
+            return [row[0] for row in cursor.fetchall()]
+    
+    def get_sector_latest_date(self):
+        """获取板块指数最新日期"""
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(date) FROM sector_market_data")
+            result = cursor.fetchone()
+        return result[0] if result else None
+    
+    def save_sector_scores(self, df: pd.DataFrame):
+        """保存板块指数评分数据"""
         if df.empty:
             return 0
         
@@ -244,18 +363,68 @@ class ETFDatabase:
             df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
         with self._connect() as conn:
-            cursor = conn.cursor()
-            # 先删除已有的相同(ticker, date)记录
-            dates = df['date'].unique().tolist()
-            tickers = df['ticker'].unique().tolist()
-            placeholders_d = ','.join(['?' for _ in dates])
-            placeholders_t = ','.join(['?' for _ in tickers])
-            cursor.execute(
-                f"DELETE FROM daily_scores WHERE date IN ({placeholders_d}) AND ticker IN ({placeholders_t})",
-                dates + tickers
-            )
+            df.to_sql('sector_scores', conn, if_exists='append', index=False)
             
+            # 清理重复
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM sector_scores 
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) 
+                    FROM sector_scores 
+                    GROUP BY ticker, date
+                )
+            ''')
+            conn.commit()
+        
+        return len(df)
+    
+    def get_sector_scores(self, date=None, ticker=None) -> pd.DataFrame:
+        """获取板块指数评分数据"""
+        query = "SELECT * FROM sector_scores WHERE 1=1"
+        params = []
+        
+        if date:
+            query += " AND date = ?"
+            params.append(date)
+        if ticker:
+            query += " AND ticker = ?"
+            params.append(ticker)
+        
+        query += " ORDER BY date, total_score DESC"
+        
+        with self._connect() as conn:
+            df = pd.read_sql_query(query, conn, params=params)
+        
+        if not df.empty:
+            df['date'] = pd.to_datetime(df['date'])
+        
+        return df
+    
+    # ==================== 评分数据操作 ====================
+    
+    def save_scores(self, df: pd.DataFrame):
+        """保存评分数据"""
+        if df.empty:
+            return 0
+        
+        df = df.copy()
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+        
+        with self._connect() as conn:
             df.to_sql('daily_scores', conn, if_exists='append', index=False)
+            
+            # 清理重复
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM daily_scores 
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) 
+                    FROM daily_scores 
+                    GROUP BY ticker, date
+                )
+            ''')
             conn.commit()
         
         return len(df)
@@ -285,7 +454,7 @@ class ETFDatabase:
     # ==================== 信号记录操作 ====================
     
     def save_signals(self, df: pd.DataFrame):
-        """保存交易信号（先删除已有记录，避免重复追加）"""
+        """保存交易信号"""
         if df.empty:
             return 0
         
@@ -294,17 +463,6 @@ class ETFDatabase:
             df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
         with self._connect() as conn:
-            cursor = conn.cursor()
-            # 先删除已有的相同(date, ticker)记录
-            dates = df['date'].unique().tolist()
-            tickers = df['ticker'].unique().tolist()
-            placeholders_d = ','.join(['?' for _ in dates])
-            placeholders_t = ','.join(['?' for _ in tickers])
-            cursor.execute(
-                f"DELETE FROM trade_signals WHERE date IN ({placeholders_d}) AND ticker IN ({placeholders_t})",
-                dates + tickers
-            )
-            
             df.to_sql('trade_signals', conn, if_exists='append', index=False)
             conn.commit()
         

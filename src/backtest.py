@@ -20,34 +20,47 @@ class BacktestEngine:
         self.strategy = StrategyEngine(cfg)
         self.initial_capital = BACKTEST_CONFIG['initial_capital']
     
-    def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame) -> dict:
+    def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame, sector_df=None) -> dict:
         """
         运行回测
         
         Parameters:
             market_df: 所有ETF的行情数据
             bench_df: 基准（沪深300）行情数据
+            sector_df: 板块指数行情数据（可选，用于板块动量增强）
         
         Returns:
             dict with backtest results
         """
-        # 计算评分（先逐ETF计算技术指标，再合并做横截面动量排名）
+        # 计算板块评分（如果提供板块数据且启用板块增强）
+        sector_scores_df = None
+        if sector_df is not None and not sector_df.empty and self.cfg.get('sector_boost_enabled', False):
+            print("计算板块指数评分...")
+            sector_scores_list = []
+            for ticker in sector_df['ticker'].unique():
+                sector_ticker_df = sector_df[sector_df['ticker'] == ticker].copy()
+                if len(sector_ticker_df) < 50:
+                    continue
+                sector_scored = self.strategy.calculate_sector_total_score(sector_ticker_df)
+                sector_scores_list.append(sector_scored)
+            
+            if sector_scores_list:
+                sector_scores_df = pd.concat(sector_scores_list, ignore_index=True)
+                print(f"板块评分计算完成: {len(sector_scores_df)} 条记录, {sector_scores_df['ticker'].nunique()} 个板块")
+        
+        # 计算ETF评分（传入板块评分用于增强）
         all_scores = []
         for ticker in market_df['ticker'].unique():
             ticker_df = market_df[market_df['ticker'] == ticker].copy()
             if len(ticker_df) < 50:  # 数据不足跳过
                 continue
-            scored = self.strategy.calculate_indicators_and_scores(ticker_df)
+            scored = self.strategy.calculate_total_score(ticker_df, sector_scores_df)
             all_scores.append(scored)
         
         if not all_scores:
             return {'error': '无有效数据'}
         
         scores_df = pd.concat(all_scores, ignore_index=True)
-        
-        # 横截面动量排名（必须在全universe合并后计算）
-        scores_df = self.strategy.rank_all_momentum(scores_df)
-        scores_df = self.strategy.compute_total_score(scores_df)
         
         # 生成信号
         signals_df = self.strategy.generate_signals(scores_df, bench_df)
@@ -64,9 +77,12 @@ class BacktestEngine:
         # 初始化
         portfolio = {
             'cash': self.initial_capital,
-            'positions': {},  # {ticker: {'shares': x, 'cost': y, 'entry_date': z}}
+            'positions': {},  # {ticker: {'shares': x, 'cost': y, 'entry_date': z, 'high_water': h}}
             'total_value': self.initial_capital,
         }
+        
+        # 冷却期记录：{ticker: stop_loss_date}
+        cooling_list = {}
         
         nav_records = []  # 净值记录
         trade_records = []  # 交易记录
@@ -83,27 +99,52 @@ class BacktestEngine:
             day_signals = signals_df[signals_df['date'] == date].copy()
             day_prices = market_df[market_df['date'] == date].set_index('ticker')['close'].to_dict()
             
-            # 获取大盘择时信号（从signals_df中获取，而非bench_df）
+            # 获取大盘择时信号
+            bench_day = bench_df[bench_df['date'] == date]
             max_total_position = 1.0
-            if not day_signals.empty and 'market_signal' in day_signals.columns:
-                # 取当日任意一条记录的market_signal（所有记录相同）
-                max_total_position = day_signals['market_signal'].iloc[0]
+            if not bench_day.empty and 'market_signal' in bench_day.columns:
+                max_total_position = bench_day['market_signal'].iloc[0]
             
-            # ========== 每日止损检查 ==========
+            # ========== 每日止损检查（固定止损 + 移动止损）==========
             stops = []
             for ticker, pos in list(portfolio['positions'].items()):
                 if ticker in day_prices:
                     current_price = day_prices[ticker]
                     cost = pos.get('cost', current_price)
-                    pnl = (current_price - cost) / cost
                     
+                    # 更新最高价（移动止损用）
+                    high_water = pos.get('high_water', cost)
+                    if current_price > high_water:
+                        high_water = current_price
+                        pos['high_water'] = high_water
+                    
+                    # 计算盈亏
+                    pnl = (current_price - cost) / cost
+                    drawdown = (current_price - high_water) / high_water
+                    
+                    # 层1：固定止损（相对于成本价）
                     if pnl < self.cfg['stop_loss']:
                         stops.append({
                             'ticker': ticker,
                             'current_price': current_price,
                             'cost': cost,
+                            'high_water': high_water,
                             'pnl': pnl,
-                            'entry_date': pos.get('entry_date', date_str)
+                            'drawdown': drawdown,
+                            'entry_date': pos.get('entry_date', date_str),
+                            'reason': '固定止损'
+                        })
+                    # 层2：移动止损（从高点回撤）- 仅在配置启用时
+                    elif self.cfg.get('trailing_stop') is not None and drawdown < self.cfg['trailing_stop'] and pnl > 0:
+                        stops.append({
+                            'ticker': ticker,
+                            'current_price': current_price,
+                            'cost': cost,
+                            'high_water': high_water,
+                            'pnl': pnl,
+                            'drawdown': drawdown,
+                            'entry_date': pos.get('entry_date', date_str),
+                            'reason': '移动止盈'
                         })
             
             # 执行止损
@@ -128,8 +169,11 @@ class BacktestEngine:
                     'amount': proceeds,
                     'commission': commission,
                     'pnl_pct': stop['pnl'],
-                    'reason': f'止损触发: 亏损{stop["pnl"]:.2%}'
+                    'reason': f"{stop['reason']}: 成本盈亏{stop['pnl']:.2%}, 高点回撤{stop['drawdown']:.2%}"
                 })
+                
+                # 记录冷却期
+                cooling_list[ticker] = date
                 
                 del portfolio['positions'][ticker]
             
@@ -176,12 +220,12 @@ class BacktestEngine:
                 max_new = self.cfg['max_holdings'] - current_holdings
                 
                 if max_new > 0 and portfolio['cash'] > 1000:
-                    # 根据大盘择时调整总仓位（基于当前组合净值，而非初始资金）
+                    # 根据大盘择时调整总仓位
+                    target_total_value = self.initial_capital * max_total_position
                     current_value = portfolio['cash'] + sum(
                         portfolio['positions'][t]['shares'] * day_prices.get(t, 0)
                         for t in portfolio['positions']
                     )
-                    target_total_value = current_value * max_total_position
                     
                     # 计算可用资金
                     available_cash = min(portfolio['cash'], 
@@ -194,11 +238,29 @@ class BacktestEngine:
                         
                         for _, row in buy_signals.head(n_buy).iterrows():
                             ticker = row['ticker']
+                            
+                            # 检查冷却期
+                            if ticker in cooling_list:
+                                days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
+                                if days_since_stop < self.cfg['cooling_period']:
+                                    continue  # 仍在冷却期内，跳过买入
+                            
                             if ticker in day_prices and ticker not in portfolio['positions']:
                                 price = day_prices[ticker]
                                 
-                                # 目标金额（基于当前组合净值）
-                                target_amount = current_value * base_weight * max_total_position
+                                # 冷却期后重新买入需要更高评分
+                                min_score = self.cfg['min_total_score']
+                                if ticker in cooling_list:
+                                    days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
+                                    if days_since_stop >= self.cfg['cooling_period']:
+                                        min_score += self.cfg['cooling_score_boost']
+                                
+                                # 评分不达标则跳过
+                                if row['total_score'] < min_score:
+                                    continue
+                                
+                                # 目标金额
+                                target_amount = self.initial_capital * base_weight * max_total_position
                                 target_amount = min(target_amount, available_cash * 0.95)
                                 
                                 if target_amount < 1000:  # 最小交易金额
@@ -221,8 +283,13 @@ class BacktestEngine:
                                 portfolio['positions'][ticker] = {
                                     'shares': shares,
                                     'cost': price,
-                                    'entry_date': date_str
+                                    'entry_date': date_str,
+                                    'high_water': price  # 初始化最高价
                                 }
+                                
+                                # 从冷却期列表中移除（已重新买入）
+                                if ticker in cooling_list:
+                                    del cooling_list[ticker]
                                 
                                 trade_records.append({
                                     'date': date_str,
