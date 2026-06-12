@@ -147,14 +147,14 @@ def cmd_signal(args):
         print("数据库无数据，请先运行: python main.py update --full")
         return
     
-    # 计算评分（像回测一样逐只计算）
+    # 计算评分（先逐ETF计算技术指标，再合并做横截面动量排名）
     engine = StrategyEngine()
     all_scores = []
     for ticker in market_df['ticker'].unique():
         ticker_df = market_df[market_df['ticker'] == ticker].copy()
         if len(ticker_df) < 50:
             continue
-        scored = engine.calculate_total_score(ticker_df)
+        scored = engine.calculate_indicators_and_scores(ticker_df)
         all_scores.append(scored)
     
     if not all_scores:
@@ -162,6 +162,10 @@ def cmd_signal(args):
         return
     
     scores_df = pd.concat(all_scores, ignore_index=True)
+    
+    # 横截面动量排名（必须在全universe合并后计算）
+    scores_df = engine.rank_all_momentum(scores_df)
+    scores_df = engine.compute_total_score(scores_df)
     
     # 过滤列：只保留daily_scores表存在的列
     db_score_cols = ['ticker', 'date', 'ma20', 'ma50', 'ma20_slope', 

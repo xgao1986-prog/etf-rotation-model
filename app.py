@@ -237,7 +237,7 @@ def get_latest_score_table(cfg):
 
 def run_weighted_backtest(cfg, sample_type):
     db = get_database()
-    market_df = db.get_market_data()
+    market_df = db.get_market_data(ticker=list(ETF_UNIVERSE.keys()))
     bench_df = db.get_market_data(ticker=BENCHMARK)
     if market_df.empty:
         return {"error": "数据库无行情数据"}

@@ -31,19 +31,23 @@ class BacktestEngine:
         Returns:
             dict with backtest results
         """
-        # 计算评分
+        # 计算评分（先逐ETF计算技术指标，再合并做横截面动量排名）
         all_scores = []
         for ticker in market_df['ticker'].unique():
             ticker_df = market_df[market_df['ticker'] == ticker].copy()
             if len(ticker_df) < 50:  # 数据不足跳过
                 continue
-            scored = self.strategy.calculate_total_score(ticker_df)
+            scored = self.strategy.calculate_indicators_and_scores(ticker_df)
             all_scores.append(scored)
         
         if not all_scores:
             return {'error': '无有效数据'}
         
         scores_df = pd.concat(all_scores, ignore_index=True)
+        
+        # 横截面动量排名（必须在全universe合并后计算）
+        scores_df = self.strategy.rank_all_momentum(scores_df)
+        scores_df = self.strategy.compute_total_score(scores_df)
         
         # 生成信号
         signals_df = self.strategy.generate_signals(scores_df, bench_df)

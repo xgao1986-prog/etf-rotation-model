@@ -124,11 +124,71 @@ class StrategyEngine:
         df['momentum_rank'] = df['momentum_rank'].fillna(0)
         return df
     
+    def calculate_indicators_and_scores(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        计算技术指标和除动量排名外的所有评分
+        
+        注意：动量排名需要在全universe合并后做横截面计算，
+        因此本方法不计算momentum_rank和total_score
+        """
+        df = self.calculate_scores(df)
+        # 不在这里调用rank_momentum，因为df只有单只ETF
+        return df
+    
+    def rank_all_momentum(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        对全universe做动量横截面排名（百分位×25）
+        
+        必须在所有ETF合并后调用，按date分组排名
+        """
+        df = scores_df.copy()
+        
+        # 按date分组，对每个交易日的所有ETF做动量排名
+        def _rank_day(group):
+            valid = group[group['momentum_valid'] == True].copy()
+            if len(valid) > 1:
+                valid['momentum_rank'] = valid['momentum_20'].rank(pct=True) * 25
+                group = group.merge(valid[['ticker', 'momentum_rank']], 
+                                   on='ticker', how='left')
+            else:
+                group['momentum_rank'] = 12.5
+            group['momentum_rank'] = group['momentum_rank'].fillna(0)
+            return group
+        
+        df = df.groupby('date', group_keys=False).apply(_rank_day)
+        
+        # 如果apply产生了重复的ticker列，清理一下
+        if 'ticker_y' in df.columns:
+            df = df.drop(columns=['ticker_y'])
+        if 'ticker_x' in df.columns:
+            df = df.rename(columns={'ticker_x': 'ticker'})
+        
+        return df
+    
+    def compute_total_score(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        计算总分（在rank_all_momentum之后调用）
+        """
+        df = scores_df.copy()
+        df['total_score'] = (
+            df['trend_score'] +
+            df['confirm_score'] +
+            df['momentum_rank'] +
+            df['volume_score'] +
+            df['vol_score']
+        )
+        return df
+    
     def calculate_total_score(self, df: pd.DataFrame) -> pd.DataFrame:
-        """计算总评分"""
+        """
+        计算总评分（单ETF调用，动量排名固定为12.5）
+        
+        注意：此方法仅用于快速测试单只ETF，正式回测应使用
+        calculate_indicators_and_scores + rank_all_momentum + compute_total_score
+        """
         df = self.calculate_scores(df)
         
-        # 按日期分组计算动量排名
+        # 单ETF无法做横截面排名，固定为12.5
         dates = df['date'].unique()
         result_dfs = []
         
@@ -139,9 +199,6 @@ class StrategyEngine:
         
         df = pd.concat(result_dfs, ignore_index=True)
         
-        # 计算总分
-        # 注意: 各维度得分已经是按权重分配后的满分
-        # trend_score(30) + confirm_score(20) + momentum_rank(25) + volume_score(15) + vol_score(10) = 100
         df['total_score'] = (
             df['trend_score'] +
             df['confirm_score'] +

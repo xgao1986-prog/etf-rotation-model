@@ -143,7 +143,7 @@ class ETFDatabase:
     # ==================== 行情数据操作 ====================
     
     def save_market_data(self, df: pd.DataFrame):
-        """保存行情数据，自动去重"""
+        """保存行情数据（先删除已有记录，避免主键冲突）"""
         if df.empty:
             return 0
         
@@ -158,21 +158,20 @@ class ETFDatabase:
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
         with self._connect() as conn:
-            # 使用INSERT OR REPLACE避免重复
-            df.to_sql('market_data', conn, if_exists='append', index=False)
-            
-            # 清理重复数据（保留最新）
             cursor = conn.cursor()
-            cursor.execute('''
-                DELETE FROM market_data 
-                WHERE rowid NOT IN (
-                    SELECT MIN(rowid) 
-                    FROM market_data 
-                    GROUP BY ticker, date
-                )
-            ''')
-            conn.commit()
+            # 先删除已有的相同(ticker, date)记录，避免主键冲突
+            dates = df['date'].unique().tolist()
+            tickers = df['ticker'].unique().tolist()
+            placeholders_d = ','.join(['?' for _ in dates])
+            placeholders_t = ','.join(['?' for _ in tickers])
+            cursor.execute(
+                f"DELETE FROM market_data WHERE date IN ({placeholders_d}) AND ticker IN ({placeholders_t})",
+                dates + tickers
+            )
             
+            df.to_sql('market_data', conn, if_exists='append', index=False)
+            conn.commit()
+        
         return len(df)
     
     def get_market_data(self, ticker=None, start_date=None, end_date=None) -> pd.DataFrame:
@@ -286,7 +285,7 @@ class ETFDatabase:
     # ==================== 信号记录操作 ====================
     
     def save_signals(self, df: pd.DataFrame):
-        """保存交易信号"""
+        """保存交易信号（先删除已有记录，避免重复追加）"""
         if df.empty:
             return 0
         
@@ -295,6 +294,17 @@ class ETFDatabase:
             df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
         with self._connect() as conn:
+            cursor = conn.cursor()
+            # 先删除已有的相同(date, ticker)记录
+            dates = df['date'].unique().tolist()
+            tickers = df['ticker'].unique().tolist()
+            placeholders_d = ','.join(['?' for _ in dates])
+            placeholders_t = ','.join(['?' for _ in tickers])
+            cursor.execute(
+                f"DELETE FROM trade_signals WHERE date IN ({placeholders_d}) AND ticker IN ({placeholders_t})",
+                dates + tickers
+            )
+            
             df.to_sql('trade_signals', conn, if_exists='append', index=False)
             conn.commit()
         
