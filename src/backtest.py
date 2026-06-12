@@ -8,7 +8,7 @@ import numpy as np
 from datetime import datetime
 import json
 
-from config import STRATEGY_CONFIG, ETF_UNIVERSE, BACKTEST_CONFIG
+from config import STRATEGY_CONFIG, FACTOR_CONFIG, ETF_UNIVERSE, BACKTEST_CONFIG, build_config
 from strategy import StrategyEngine
 
 
@@ -16,8 +16,9 @@ class BacktestEngine:
     """回测引擎"""
     
     def __init__(self, cfg=None):
-        self.cfg = cfg or STRATEGY_CONFIG
-        self.strategy = StrategyEngine(cfg)
+        # 使用 build_config 合并策略配置 + 因子配置
+        self.cfg = cfg or build_config()
+        self.strategy = StrategyEngine(self.cfg)
         self.initial_capital = BACKTEST_CONFIG['initial_capital']
     
     def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame, sector_df=None) -> dict:
@@ -68,6 +69,76 @@ class BacktestEngine:
         # 执行回测
         return self._execute_backtest(signals_df, market_df, bench_df)
     
+    def _is_rebalance_day(self, date, last_rebalance_date=None) -> bool:
+        """判断给定日期是否为调仓日
+        
+        支持三种频率:
+        - 'weekly': 每周指定星期几调仓
+        - 'biweekly': 每两周的指定星期几调仓（奇数周）
+        - 'monthly': 每月第N个指定星期几调仓
+        
+        Parameters:
+            date: 当前日期 (str or datetime)
+            last_rebalance_date: 上次调仓日期（双周调仓用，可选）
+        
+        Returns:
+            bool: 是否调仓日
+        """
+        dt = pd.to_datetime(date)
+        weekday = dt.weekday()  # 0=周一, 4=周五
+        
+        freq = self.cfg.get('rebalance_freq', 'weekly')
+        target_weekday = self.cfg.get('rebalance_weekday', 3)  # 默认周四
+        
+        # 星期几不匹配，直接返回False
+        if weekday != target_weekday:
+            return False
+        
+        if freq == 'weekly':
+            # 每周都调仓
+            return True
+        
+        elif freq == 'biweekly':
+            # 双周调仓：基于ISO周数，奇数周调仓
+            # 也可以用 last_rebalance_date 判断间隔>=14天
+            week_num = dt.isocalendar().week
+            
+            # 方法1: ISO周数奇偶性（简单但可能跨年有问题）
+            # return week_num % 2 == 1
+            
+            # 方法2: 距离上次调仓>=14天（更稳健）
+            if last_rebalance_date is not None:
+                days_since = (dt - pd.to_datetime(last_rebalance_date)).days
+                return days_since >= 14
+            else:
+                # 首次调仓：奇数周
+                return week_num % 2 == 1
+        
+        elif freq == 'monthly':
+            # 月度调仓：每月第N个指定星期几
+            ordinal = self.cfg.get('rebalance_ordinal', 1)  # 1=第一个, 2=第二个, -1=最后一个
+            
+            if ordinal == -1:
+                # 最后一个该星期几：判断后面7天内是否还有同星期几
+                days_to_month_end = (dt + pd.offsets.MonthEnd(0) - dt).days
+                # 如果距离月底<7天，就是最后一个
+                return days_to_month_end < 7
+            else:
+                # 第N个该星期几
+                # 计算本月第几个该星期几
+                first_day_of_month = dt.replace(day=1)
+                # 第一个该星期几的日期
+                first_target_weekday = first_day_of_month + pd.Timedelta(
+                    days=(target_weekday - first_day_of_month.weekday()) % 7
+                )
+                # 第N个
+                nth_target = first_target_weekday + pd.Timedelta(weeks=ordinal-1)
+                return dt.date() == nth_target.date()
+        
+        else:
+            # 未知频率，默认每周
+            return True
+    
     def _execute_backtest(self, signals_df, market_df, bench_df) -> dict:
         """执行回测逻辑"""
         
@@ -86,6 +157,7 @@ class BacktestEngine:
         
         nav_records = []  # 净值记录
         trade_records = []  # 交易记录
+        last_rebalance_date = None  # 上次调仓日期（双周调仓用）
         
         # 佣金函数
         def calc_commission(amount):
@@ -177,10 +249,12 @@ class BacktestEngine:
                 
                 del portfolio['positions'][ticker]
             
-            # ========== 调仓日检查（每周五） ==========
-            is_rebalance = pd.to_datetime(date).weekday() == 4  # 周五
+            # ========== 调仓日检查 ==========
+            is_rebalance = self._is_rebalance_day(date, last_rebalance_date)
             
             if is_rebalance:
+                # 记录本次调仓日期
+                last_rebalance_date = date
                 # 1. 卖出不在候选列表的持仓
                 buy_signals = day_signals[day_signals['signal_type'] == 'BUY'].sort_values(
                     'total_score', ascending=False

@@ -122,10 +122,6 @@ STRATEGY_CONFIG = {
     # 风控
     'stop_loss': -0.08,         # 固定止损线-8%（相对于成本价）
     'trailing_stop': None,      # 移动止损线（None=不启用，或设-0.10等）
-    'cooling_period': 5,        # 止损后冷却期（交易日）
-    'cooling_score_boost': 10,  # 冷却期后重新买入评分门槛提升
-    'rebalance_freq': 'W-FRI',  # 每周调仓
-    'rebalance_weekday': 4,     # 调仓日（0=周一, 1=周二, 2=周三, 3=周四, 4=周五）
     
     # 大盘择时
     'market_timing': True,      # 是否启用大盘择时
@@ -145,6 +141,111 @@ STRATEGY_CONFIG = {
     'sector_above_ma_bonus': 5,      # 板块指数站上均线加分
     'sector_momentum_bonus': 10,     # 板块动量排名前N加分
 }
+
+# ==================== 可调因子配置（v1.2 新增）====================
+# 这些参数被设计为"因子"，可以通过参数扫描/网格搜索/机器学习进行优化
+# 与 STRATEGY_CONFIG 分离，便于独立调整和批量测试
+
+FACTOR_CONFIG = {
+    # --- 调仓频率因子 ---
+    'rebalance_freq': 'weekly',      # 调仓频率: 'weekly'(每周), 'biweekly'(双周), 'monthly'(月度)
+    'rebalance_weekday': 3,          # 调仓日（0=周一, 1=周二, 2=周三, 3=周四, 4=周五）
+    'rebalance_ordinal': 1,          # 月度调仓时: 1=第一个, 2=第二个, -1=最后一个该星期几
+    
+    # --- 冷静期因子 ---
+    'cooling_period': 5,             # 止损后冷却期（交易日）
+    'cooling_score_boost': 10,       # 冷却期后重新买入评分门槛提升
+}
+
+# 因子搜索空间（用于网格搜索 / 随机搜索 / 贝叶斯优化）
+# 每个因子定义其可调范围和步长
+FACTOR_SPACE = {
+    'rebalance_freq': {
+        'type': 'categorical',
+        'values': ['weekly', 'biweekly', 'monthly'],
+        'default': 'weekly',
+        'description': '调仓频率',
+    },
+    'rebalance_weekday': {
+        'type': 'int',
+        'low': 0, 'high': 4,
+        'default': 3,
+        'description': '调仓日（0=周一~4=周五）',
+    },
+    'rebalance_ordinal': {
+        'type': 'int',
+        'low': 1, 'high': 2,  # 月度时: 第1个或第2个该星期几; -1表示最后一个
+        'default': 1,
+        'description': '月度调仓时取第几个该星期几（1=第一个, 2=第二个）',
+    },
+    'cooling_period': {
+        'type': 'int',
+        'low': 0, 'high': 20,
+        'default': 5,
+        'description': '止损后冷却期（交易日）',
+    },
+    'cooling_score_boost': {
+        'type': 'int',
+        'low': 0, 'high': 30,
+        'default': 10,
+        'description': '冷却期后重新买入评分门槛提升',
+    },
+}
+
+# 快速生成所有因子组合（用于全网格搜索）
+def generate_factor_combinations():
+    """生成因子搜索空间中的所有组合（笛卡尔积）
+    
+    注意: 全网格搜索组合数 = ∏(各因子取值数)
+    当前5个因子约 3×5×2×21×31 = 19,530 种组合，建议用随机采样或贝叶斯优化
+    """
+    import itertools
+    
+    # 为每个因子生成取值列表
+    value_lists = []
+    factor_names = []
+    for name, spec in FACTOR_SPACE.items():
+        factor_names.append(name)
+        if spec['type'] == 'categorical':
+            value_lists.append(spec['values'])
+        elif spec['type'] == 'int':
+            value_lists.append(list(range(spec['low'], spec['high'] + 1)))
+    
+    combinations = []
+    for values in itertools.product(*value_lists):
+        combo = dict(zip(factor_names, values))
+        combinations.append(combo)
+    
+    return combinations
+
+# 随机采样因子组合（推荐用于大搜索空间）
+def sample_factor_combinations(n_samples=100, seed=42):
+    """随机采样因子组合"""
+    import random
+    random.seed(seed)
+    
+    all_combos = generate_factor_combinations()
+    n_total = len(all_combos)
+    
+    if n_samples >= n_total:
+        return all_combos
+    
+    return random.sample(all_combos, n_samples)
+
+# 合并策略配置 + 因子配置（生成完整配置）
+def build_config(factor_cfg=None, strategy_cfg=None):
+    """合并策略配置和因子配置，生成完整配置字典
+    
+    优先级: factor_cfg > FACTOR_CONFIG > STRATEGY_CONFIG
+    """
+    import copy
+    cfg = copy.deepcopy(STRATEGY_CONFIG)
+    cfg.update(copy.deepcopy(FACTOR_CONFIG))
+    if strategy_cfg:
+        cfg.update(strategy_cfg)
+    if factor_cfg:
+        cfg.update(factor_cfg)
+    return cfg
 
 # ==================== 数据源配置 ====================
 # 工作流:

@@ -576,7 +576,47 @@ b715548 v1.1: 添加.gitignore, 更新PROGRESS
 
 ---
 
+### 发现5：可调因子体系 v1.2 实现（2026-06-12）
+
+**实现内容**：
+- 将 `rebalance_weekday`（调仓日）、`rebalance_freq`（调仓频率）、`cooling_period`（冷静期）、`cooling_score_boost`（冷静期评分提升）从硬编码策略参数中分离
+- 新增 `FACTOR_CONFIG`：独立的因子配置字典
+- 新增 `FACTOR_SPACE`：每个因子的搜索空间定义（类型、范围、默认值）
+- 新增 `build_config()`：合并策略配置 + 因子配置，支持参数覆盖
+- 新增 `generate_factor_combinations()` / `sample_factor_combinations()`：生成因子组合用于网格搜索/随机采样
+- 修改 `backtest.py`：`BacktestEngine.__init__()` 使用 `build_config()` 获取完整配置
+- 修改 `backtest.py`：新增 `_is_rebalance_day()` 方法，支持三种调仓频率：
+  - `weekly`：每周指定星期几调仓
+  - `biweekly`：每两周指定星期几调仓（基于ISO周数或间隔>=14天）
+  - `monthly`：每月第N个指定星期几调仓
+- 新增 `scripts/parameter_scan.py`：参数扫描脚本，支持 grid/random/single 三种模式
+- 新增 `scripts/quick_factor_test.py`：快速验证脚本，使用预计算评分避免重复计算
+
+**快速验证结果**（调仓日因子，全区间，16只池子）：
+
+| 排名 | 调仓日 | 夏普 | 收益 | 回撤 |
+|------|--------|------|------|------|
+| 1 | 周四 | **0.625** | 58.29% | -10.96% |
+| 2 | 周三 | 0.447 | 42.53% | -18.78% |
+| 3 | 周五 | 0.349 | 34.55% | -18.03% |
+| 4 | 周二 | 0.296 | 31.28% | -21.13% |
+| 5 | 周一 | -0.070 | -7.55% | -30.23% |
+
+**结论**：
+- ✅ 因子体系正常工作，调仓日因子验证通过
+- ✅ 周四仍为最佳调仓日，与之前验证一致
+- ⚠️ 参数扫描（grid模式）组合数较多时运行较慢，建议使用 `quick_factor_test.py` 预计算评分后批量测试
+
+---
+
 ## 📝 变更摘要（每次提交后更新）
+
+### v1.3 (待提交) - 2025-06-12
+- 新增可调因子体系：`FACTOR_CONFIG` + `FACTOR_SPACE` + `build_config()`
+- 修改 `src/config.py`：策略参数与因子参数分离
+- 修改 `src/backtest.py`：支持 `weekly/biweekly/monthly` 三种调仓频率
+- 新增 `scripts/parameter_scan.py`：参数扫描脚本
+- 新增 `scripts/quick_factor_test.py`：快速因子验证（预计算评分）
 
 ### v1.2 (7baa4fc) - 2025-06-12
 - 重构数据源架构：iFinD通过Kimi对话获取 + AKShare本地自动补充
