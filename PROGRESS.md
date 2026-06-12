@@ -11,7 +11,11 @@
 - **策略类型**: 趋势跟踪 + 动量轮动
 - **标的数量**: 15只行业ETF + 沪深300基准
 - **数据库**: SQLite本地文件
-- **主数据源**: AKShare（免费）
+- **主数据源**: iFinD（已付费，优先使用）
+- **备用数据源**: AKShare（免费，iFinD失败时补充）
+- **数据获取策略**: 先查本地数据库 → iFinD分批获取 → AKShare补充
+- **iFinD限制**: 每批最多10个ticker，每段最多3年
+- **版本控制**: Git已初始化
 
 ---
 
@@ -24,7 +28,8 @@
 | 项目架构 | ✅ | 完整目录结构 |
 | 配置文件 | ✅ | src/config.py |
 | 数据库模块 | ✅ | src/database.py (6张表) |
-| 数据获取 | ✅ | src/data_fetcher.py (AKShare) |
+| 数据获取 | ✅ | src/data_fetcher.py (iFinD主 + AKShare备) |
+| Git版本控制 | ✅ | .git/ 已初始化，.gitignore已配置 |
 | 策略引擎v1.0 | ✅ | src/strategy.py |
 | 回测引擎 | ✅ | src/backtest.py |
 | 主入口CLI | ✅ | main.py |
@@ -123,6 +128,7 @@
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v1.0 | 2025-06-12 | 本地化重构，修复未来数据/仓位控制/交易费率 |
+| v1.1 | 2025-06-12 | iFinD+AKShare混合数据源，Git版本控制初始化 |
 
 ---
 

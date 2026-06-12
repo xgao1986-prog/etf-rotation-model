@@ -1,0 +1,36 @@
+# Git忽略文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 数据库文件（数据太大，不纳入版本控制）
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 输出目录（自动生成）
+reports/*.csv
+reports/*.png
+reports/*.html
+signals/*.csv
+
+# 日志
+*.log
+
+# 环境
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
