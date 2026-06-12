@@ -576,6 +576,37 @@ b715548 v1.1: 添加.gitignore, 更新PROGRESS
 
 ---
 
+### 发现6：动态止盈因子实现与验证（2026-06-12）
+
+**实现内容**：
+- 将 `trailing_stop` 从 `STRATEGY_CONFIG` 移至 `FACTOR_CONFIG`，成为可调因子
+- 新增 `trailing_stop_mode`: `none` / `simple` / `tiered` 三种模式
+- `simple` 模式：单一回撤阈值（如回撤10%止盈）
+- `tiered` 模式：分档止盈，盈利越多回撤容忍度越大
+  - 盈利≥5%：回撤5%止盈
+  - 盈利≥15%：回撤8%止盈
+  - 盈利≥30%：回撤12%止盈
+- 修改 `backtest.py`：新增 `_check_trailing_stop()` 方法，支持三种模式
+- 新增 `scripts/test_trailing_stop.py`：验证脚本
+
+**验证结果**（全区间，16只池子，周四调仓）：
+
+| 模式 | 参数 | 夏普 | 收益 | 回撤 | 止盈次数 |
+|------|------|------|------|------|---------|
+| **none** | 不启用 | **0.739** | **69.89%** | -10.35% | 17 |
+| simple | 回撤5%止盈 | 0.591 | 53.30% | -11.33% | 112 |
+| simple | 回撤10%止盈 | 0.659 | 61.48% | -10.28% | 39 |
+| tiered | 默认分档 | 0.719 | 65.32% | -10.44% | 74 |
+
+**结论**：
+- ⚠️ **当前策略下，不启用动态止盈反而夏普最高**（0.739），因为固定止损-8%已足够
+- ⚠️ **simple -5% 太敏感**：止盈112次，过早截断利润，收益大幅下降
+- ✅ **simple -10% 较合理**：夏普0.659，接近none模式，但止盈次数更少（39次）
+- ✅ **tiered 模式居中**：夏普0.719，在利润保护和让利润奔跑之间取得平衡
+- 💡 **建议**：当前默认保持 `trailing_stop_mode='simple', trailing_stop=None`（不启用），未来可通过参数扫描找到最优阈值
+
+---
+
 ### 发现5：可调因子体系 v1.2 实现（2026-06-12）
 
 **实现内容**：
@@ -617,6 +648,8 @@ b715548 v1.1: 添加.gitignore, 更新PROGRESS
 - 修改 `src/backtest.py`：支持 `weekly/biweekly/monthly` 三种调仓频率
 - 新增 `scripts/parameter_scan.py`：参数扫描脚本
 - 新增 `scripts/quick_factor_test.py`：快速因子验证（预计算评分）
+- 新增动态止盈因子：`trailing_stop_mode` (none/simple/tiered) + `trailing_stop` + 分档参数
+- 新增 `scripts/test_trailing_stop.py`：动态止盈模式验证
 
 ### v1.2 (7baa4fc) - 2025-06-12
 - 重构数据源架构：iFinD通过Kimi对话获取 + AKShare本地自动补充

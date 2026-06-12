@@ -139,6 +139,54 @@ class BacktestEngine:
             # 未知频率，默认每周
             return True
     
+    def _check_trailing_stop(self, pnl, drawdown) -> tuple:
+        """检查是否触发动态止盈
+        
+        支持三种模式:
+        - 'none': 不启用动态止盈
+        - 'simple': 单一回撤阈值 (如回撤10%止盈)
+        - 'tiered': 分档止盈 (盈利越多, 回撤容忍度越大)
+        
+        Parameters:
+            pnl: 当前盈亏比例 (相对于成本价)
+            drawdown: 当前从高点回撤比例 (负数)
+        
+        Returns:
+            (triggered: bool, reason: str)
+        """
+        mode = self.cfg.get('trailing_stop_mode', 'none')
+        
+        if mode == 'none':
+            return False, ''
+        
+        # 只有盈利状态才检查止盈
+        if pnl <= 0:
+            return False, ''
+        
+        if mode == 'simple':
+            threshold = self.cfg.get('trailing_stop')
+            if threshold is not None and drawdown < threshold:
+                return True, f'移动止盈(回撤{threshold:.1%})'
+            return False, ''
+        
+        elif mode == 'tiered':
+            # 分档止盈: 盈利越多, 回撤容忍度越大
+            # 档位从低到高检查, 取最高 applicable 档
+            tiers = [
+                (self.cfg.get('tier_3_pnl', 0.30), self.cfg.get('tier_3_drawdown', -0.12), '3档'),
+                (self.cfg.get('tier_2_pnl', 0.15), self.cfg.get('tier_2_drawdown', -0.08), '2档'),
+                (self.cfg.get('tier_1_pnl', 0.05), self.cfg.get('tier_1_drawdown', -0.05), '1档'),
+            ]
+            
+            for pnl_threshold, dd_threshold, tier_name in tiers:
+                if pnl >= pnl_threshold and drawdown < dd_threshold:
+                    return True, f'分档止盈({tier_name}, 盈利{pnl:.1%}, 回撤{dd_threshold:.1%})'
+            
+            return False, ''
+        
+        else:
+            return False, ''
+    
     def _execute_backtest(self, signals_df, market_df, bench_df) -> dict:
         """执行回测逻辑"""
         
@@ -177,14 +225,14 @@ class BacktestEngine:
             if not bench_day.empty and 'market_signal' in bench_day.columns:
                 max_total_position = bench_day['market_signal'].iloc[0]
             
-            # ========== 每日止损检查（固定止损 + 移动止损）==========
+            # ========== 每日止损检查（固定止损 + 动态止盈）==========
             stops = []
             for ticker, pos in list(portfolio['positions'].items()):
                 if ticker in day_prices:
                     current_price = day_prices[ticker]
                     cost = pos.get('cost', current_price)
                     
-                    # 更新最高价（移动止损用）
+                    # 更新最高价（动态止盈用）
                     high_water = pos.get('high_water', cost)
                     if current_price > high_water:
                         high_water = current_price
@@ -206,18 +254,20 @@ class BacktestEngine:
                             'entry_date': pos.get('entry_date', date_str),
                             'reason': '固定止损'
                         })
-                    # 层2：移动止损（从高点回撤）- 仅在配置启用时
-                    elif self.cfg.get('trailing_stop') is not None and drawdown < self.cfg['trailing_stop'] and pnl > 0:
-                        stops.append({
-                            'ticker': ticker,
-                            'current_price': current_price,
-                            'cost': cost,
-                            'high_water': high_water,
-                            'pnl': pnl,
-                            'drawdown': drawdown,
-                            'entry_date': pos.get('entry_date', date_str),
-                            'reason': '移动止盈'
-                        })
+                    else:
+                        # 层2：动态止盈（仅在未触发固定止损时检查）
+                        triggered, stop_reason = self._check_trailing_stop(pnl, drawdown)
+                        if triggered:
+                            stops.append({
+                                'ticker': ticker,
+                                'current_price': current_price,
+                                'cost': cost,
+                                'high_water': high_water,
+                                'pnl': pnl,
+                                'drawdown': drawdown,
+                                'entry_date': pos.get('entry_date', date_str),
+                                'reason': stop_reason
+                            })
             
             # 执行止损
             for stop in stops:

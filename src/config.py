@@ -121,7 +121,7 @@ STRATEGY_CONFIG = {
     
     # 风控
     'stop_loss': -0.08,         # 固定止损线-8%（相对于成本价）
-    'trailing_stop': None,      # 移动止损线（None=不启用，或设-0.10等）
+    # 注意: 动态止盈参数已移至 FACTOR_CONFIG (trailing_stop_mode, trailing_stop, tiered参数)
     
     # 大盘择时
     'market_timing': True,      # 是否启用大盘择时
@@ -155,6 +155,17 @@ FACTOR_CONFIG = {
     # --- 冷静期因子 ---
     'cooling_period': 5,             # 止损后冷却期（交易日）
     'cooling_score_boost': 10,       # 冷却期后重新买入评分门槛提升
+    
+    # --- 动态止盈因子 (v1.2 新增) ---
+    'trailing_stop_mode': 'simple',   # 动态止盈模式: 'none'=不启用, 'simple'=单一阈值, 'tiered'=分档止盈
+    'trailing_stop': None,            # simple模式: 从高点回撤阈值 (如 -0.10 = 回撤10%止盈)
+    # tiered模式: 根据盈利比例分档设置回撤容忍度
+    'tier_1_pnl': 0.05,               # 第1档门槛: 盈利>=5%
+    'tier_1_drawdown': -0.05,         # 第1档: 回撤5%止盈
+    'tier_2_pnl': 0.15,               # 第2档门槛: 盈利>=15%
+    'tier_2_drawdown': -0.08,         # 第2档: 回撤8%止盈
+    'tier_3_pnl': 0.30,               # 第3档门槛: 盈利>=30%
+    'tier_3_drawdown': -0.12,         # 第3档: 回撤12%止盈
 }
 
 # 因子搜索空间（用于网格搜索 / 随机搜索 / 贝叶斯优化）
@@ -189,6 +200,62 @@ FACTOR_SPACE = {
         'low': 0, 'high': 30,
         'default': 10,
         'description': '冷却期后重新买入评分门槛提升',
+    },
+    # --- 动态止盈因子搜索空间 ---
+    'trailing_stop_mode': {
+        'type': 'categorical',
+        'values': ['none', 'simple', 'tiered'],
+        'default': 'simple',
+        'description': '动态止盈模式',
+    },
+    'trailing_stop': {
+        'type': 'float',
+        'low': -0.20, 'high': -0.03,
+        'step': 0.01,
+        'default': None,  # None表示不启用，或设具体值如-0.10
+        'description': 'simple模式: 从高点回撤阈值 (如-0.10=回撤10%止盈)',
+    },
+    'tier_1_pnl': {
+        'type': 'float',
+        'low': 0.02, 'high': 0.10,
+        'step': 0.01,
+        'default': 0.05,
+        'description': 'tiered模式第1档盈利门槛',
+    },
+    'tier_1_drawdown': {
+        'type': 'float',
+        'low': -0.10, 'high': -0.02,
+        'step': 0.01,
+        'default': -0.05,
+        'description': 'tiered模式第1档回撤容忍度',
+    },
+    'tier_2_pnl': {
+        'type': 'float',
+        'low': 0.10, 'high': 0.25,
+        'step': 0.01,
+        'default': 0.15,
+        'description': 'tiered模式第2档盈利门槛',
+    },
+    'tier_2_drawdown': {
+        'type': 'float',
+        'low': -0.15, 'high': -0.05,
+        'step': 0.01,
+        'default': -0.08,
+        'description': 'tiered模式第2档回撤容忍度',
+    },
+    'tier_3_pnl': {
+        'type': 'float',
+        'low': 0.20, 'high': 0.50,
+        'step': 0.05,
+        'default': 0.30,
+        'description': 'tiered模式第3档盈利门槛',
+    },
+    'tier_3_drawdown': {
+        'type': 'float',
+        'low': -0.20, 'high': -0.08,
+        'step': 0.01,
+        'default': -0.12,
+        'description': 'tiered模式第3档回撤容忍度',
     },
 }
 
