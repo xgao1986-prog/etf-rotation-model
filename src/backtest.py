@@ -312,7 +312,60 @@ class BacktestEngine:
                     # 当大盘择时信号低时，强制配置防御资产（黄金/国债）
                     import config as _config_module
                     _defense_tickers = list(_config_module.DEFENSE_UNIVERSE.keys())
-                    _defense_allocation = _config_module.DEFENSE_ALLOCATION.get(max_total_position, 0.0)
+                    
+                    # 动态防御比例计算
+                    _defense_allocation_mode = getattr(_config_module, 'DEFENSE_ALLOCATION_MODE', 'step')
+                    _defense_allocation_map = _config_module.DEFENSE_ALLOCATION
+                    
+                    if _defense_allocation_mode == 'linear':
+                        # 线性插值：根据max_total_position在关键点之间插值
+                        sorted_signals = sorted(_defense_allocation_map.keys())
+                        _defense_allocation = 0.0
+                        for i in range(len(sorted_signals) - 1):
+                            s_low, s_high = sorted_signals[i], sorted_signals[i + 1]
+                            if s_low <= max_total_position <= s_high:
+                                a_low = _defense_allocation_map[s_low]
+                                a_high = _defense_allocation_map[s_high]
+                                if s_high == s_low:
+                                    _defense_allocation = a_low
+                                else:
+                                    _defense_allocation = a_low + (a_high - a_low) * (max_total_position - s_low) / (s_high - s_low)
+                                break
+                        else:
+                            # 超出范围，取边界值
+                            if max_total_position < sorted_signals[0]:
+                                _defense_allocation = _defense_allocation_map[sorted_signals[0]]
+                            else:
+                                _defense_allocation = _defense_allocation_map[sorted_signals[-1]]
+                    else:
+                        # 阶梯式（原始逻辑）
+                        _defense_allocation = _defense_allocation_map.get(max_total_position, 0.0)
+                    
+                    # 波动率增强（可选）
+                    _vol_enhance = getattr(_config_module, 'VOLATILITY_ENHANCEMENT', {})
+                    if _vol_enhance.get('enabled', False):
+                        # 计算近期市场波动率（基于基准）
+                        vol_lookback = _vol_enhance.get('lookback', 20)
+                        bench_recent = bench_df[bench_df['date'] <= date].tail(vol_lookback)
+                        if len(bench_recent) >= 5:
+                            bench_returns = bench_recent['close'].pct_change().dropna()
+                            if len(bench_returns) > 0:
+                                current_vol = bench_returns.std() * np.sqrt(252)  # 年化波动率
+                                vol_low = _vol_enhance.get('threshold_low', 0.15)
+                                vol_high = _vol_enhance.get('threshold_high', 0.30)
+                                adj_low = _vol_enhance.get('adjustment_low', -0.05)
+                                adj_high = _vol_enhance.get('adjustment_high', 0.10)
+                                
+                                if current_vol <= vol_low:
+                                    vol_adjustment = adj_low
+                                elif current_vol >= vol_high:
+                                    vol_adjustment = adj_high
+                                else:
+                                    vol_adjustment = adj_low + (adj_high - adj_low) * (current_vol - vol_low) / (vol_high - vol_low)
+                                
+                                _defense_allocation += vol_adjustment
+                                _defense_allocation = max(_vol_enhance.get('min_allocation', 0.0), 
+                                                        min(_vol_enhance.get('max_allocation', 0.80), _defense_allocation))
                     
                     if _defense_allocation > 0:
                         # 从买入信号中过滤防御资产

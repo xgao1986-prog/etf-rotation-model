@@ -177,7 +177,7 @@ def build_sidebar_config():
 
     # ========== 实验性因子参数 (v1.1/v1.2) ==========
     with st.sidebar.expander("⚡ 实验性因子", expanded=False):
-        st.caption("板块增强、调仓频率、冷静期、动态止盈（默认关闭）")
+        st.caption("板块增强、调仓频率、冷静期、动态止盈、防御模块（默认关闭）")
         
         # 板块动量增强
         sector_boost = st.checkbox("启用板块动量增强", False)
@@ -216,6 +216,17 @@ def build_sidebar_config():
             tier_2_drawdown = st.slider("2档回撤容忍(%)", -15, -5, -8) / 100
             tier_3_pnl = st.slider("3档盈利门槛(%)", 20, 50, 30) / 100
             tier_3_drawdown = st.slider("3档回撤容忍(%)", -20, -8, -12) / 100
+        
+        # 防御模块 (v1.3)
+        st.divider()
+        st.caption("防御模块（v1.3）")
+        defense_enabled = st.checkbox("启用防御资产", True)
+        defense_mode = st.selectbox("防御资产模式", ["黄金+国债", "仅黄金", "仅国债"], index=0)
+        
+        st.caption("防御比例（按大盘择时信号）")
+        defense_20 = st.slider("防御仓位(0.2)配防御(%)", 0, 100, 50) / 100
+        defense_50 = st.slider("半仓(0.5)配防御(%)", 0, 50, 20) / 100
+        defense_100 = st.slider("满仓(1.0)配防御(%)", 0, 20, 0) / 100
 
     # 构建策略配置
     cfg = STRATEGY_CONFIG.copy()
@@ -228,8 +239,8 @@ def build_sidebar_config():
     cfg["stop_loss"] = stop_loss
     cfg["market_timing"] = use_timing
     
-    # 构建实验性配置
-    experimental_cfg = {
+    # 构建交易规则配置
+    trading_rules_cfg = {
         "sector_boost_enabled": sector_boost,
         "rebalance_freq": rebalance_freq,
         "rebalance_weekday": rebalance_weekday,
@@ -238,9 +249,9 @@ def build_sidebar_config():
         "trailing_stop_mode": trailing_stop_mode,
     }
     if trailing_stop is not None:
-        experimental_cfg["trailing_stop"] = trailing_stop
+        trading_rules_cfg["trailing_stop"] = trailing_stop
     if trailing_stop_mode == "tiered":
-        experimental_cfg.update({
+        trading_rules_cfg.update({
             "tier_1_pnl": tier_1_pnl,
             "tier_1_drawdown": tier_1_drawdown,
             "tier_2_pnl": tier_2_pnl,
@@ -249,8 +260,29 @@ def build_sidebar_config():
             "tier_3_drawdown": tier_3_drawdown,
         })
     
+    # 构建防御配置
+    defense_cfg = {
+        "defense_enabled": defense_enabled,
+    }
+    
+    # 根据防御资产模式设置 DEFENSE_UNIVERSE
+    import config as _config_module
+    if defense_mode == "仅黄金":
+        _config_module.DEFENSE_UNIVERSE = {"518880.SH": "黄金ETF"}
+    elif defense_mode == "仅国债":
+        _config_module.DEFENSE_UNIVERSE = {"511010.SH": "国债ETF"}
+    else:
+        _config_module.DEFENSE_UNIVERSE = {"518880.SH": "黄金ETF", "511010.SH": "国债ETF"}
+    
+    # 更新防御比例
+    _config_module.DEFENSE_ALLOCATION = {
+        0.2: defense_20,
+        0.5: defense_50,
+        1.0: defense_100,
+    }
+    
     # 合并为完整配置
-    cfg = build_config(strategy_cfg=cfg, experimental_cfg=experimental_cfg)
+    cfg = build_config(strategy_cfg=cfg, trading_rules_cfg=trading_rules_cfg, defense_cfg=defense_cfg)
 
     st.sidebar.divider()
     latest = get_database().get_latest_date()
@@ -767,6 +799,14 @@ def render_backtest(cfg):
         s3.metric("止损次数", result["stop_loss_count"])
         s4.metric("平均持仓数", f"{result['avg_holdings']:.1f}")
         s5.metric("总佣金", format_money(result["total_commission"]))
+        
+        # 防御资产交易统计 (v1.3)
+        if cfg.get("defense_enabled", False):
+            import config as _config_module
+            defense_tickers = list(_config_module.DEFENSE_UNIVERSE.keys())
+            defense_trades = trades[trades["ticker"].isin(defense_tickers)] if not trades.empty else pd.DataFrame()
+            if not defense_trades.empty:
+                st.caption(f"🛡️ 防御资产交易: {len(defense_trades)} 次 ({', '.join([ETF_UNIVERSE.get(t, t) for t in defense_tickers])})")
 
         trades = result["trades_df"]
         if not trades.empty:
@@ -1122,6 +1162,7 @@ def render_strategy_config(cfg):
         )
         st.plotly_chart(fig_pie, use_container_width=True)
 
+        import config as _config_module
         param_df = pd.DataFrame(
             [
                 {"参数": "趋势最低分", "当前值": cfg["min_trend_score"]},
@@ -1131,6 +1172,10 @@ def render_strategy_config(cfg):
                 {"参数": "单只上限", "当前值": f"{cfg['max_position_per_etf']:.0%}"},
                 {"参数": "止损线", "当前值": f"{cfg['stop_loss']:.0%}"},
                 {"参数": "大盘择时", "当前值": "启用" if cfg["market_timing"] else "关闭"},
+                {"参数": "防御模块", "当前值": "启用" if cfg.get("defense_enabled", False) else "关闭"},
+                {"参数": "防御资产", "当前值": ", ".join([ETF_UNIVERSE.get(t, t) for t in _config_module.DEFENSE_UNIVERSE.keys()]) if cfg.get("defense_enabled", False) else "无"},
+                {"参数": "防御比例(0.2)", "当前值": f"{_config_module.DEFENSE_ALLOCATION.get(0.2, 0):.0%}" if cfg.get("defense_enabled", False) else "N/A"},
+                {"参数": "防御比例(0.5)", "当前值": f"{_config_module.DEFENSE_ALLOCATION.get(0.5, 0):.0%}" if cfg.get("defense_enabled", False) else "N/A"},
             ]
         )
         st.dataframe(param_df, use_container_width=True, hide_index=True)
