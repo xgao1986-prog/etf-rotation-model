@@ -16,13 +16,32 @@
 | 项目 | 状态 |
 |------|------|
 | **当前活跃协作者** | Kimi |
-| **Git分支** | master |
+| **Git分支** | feature/v1.1-experimental |
 | **数据库最新日期** | 2026-06-12 |
-| **ETF池子** | 16只（v1.0 可信版，不含黄金ETF） |
-| **最后回测结果** | v1.0修复版：总收益32.38%，夏普0.45，最大回撤-13.37% |
+| **ETF池子** | 16只行业ETF + 黄金ETF(防御) + 国债ETF(防御) |
+| **最后回测结果** | v1.1防御版：总收益41.58%，夏普0.56，最大回撤-11.44% |
 | **工作目录** | `D:\etf_rotation_model\` |
 | **GitHub仓库** | ✅ 已创建: https://github.com/xgao1986-prog/etf-rotation-model |
-| **版本状态** | v1.0 可信修复版（实验性功能拆至 config_experimental.py） |
+| **版本状态** | **v1.1 防御型交易规则版本**（已重新定义范围） |
+
+### v1.1 版本定义（已确认）
+
+**v1.1 = "防御型交易规则版本"**
+
+| 包含内容 | 说明 |
+|----------|------|
+| 防御资产层 | 黄金ETF(518880) + 国债ETF(511010)，熊市强制配置 |
+| 调仓日规则 | 每周五调仓，支持双周/月度频率 |
+| 动态止盈 | 分档止盈（盈利5%/15%/30%对应不同回撤阈值） |
+| 冷静期 | 止损后5天冷却期，防止频繁交易 |
+| 大盘择时 | 沪深300均线择时，控制总仓位 |
+| 基础评分 | 趋势30% + 确认20% + 动量25% + 成交量15% + 波动率10% |
+
+| 不包含内容（移到v1.2/v1.3） | 说明 |
+|------------------------------|------|
+| 行业板块指数 | SECTOR_INDEX_UNIVERSE 已注释，v1.2信号增强使用 |
+| 板块动量增强 | sector_boost 已移除，v1.2信号增强使用 |
+| ETF-板块映射 | ETF_TO_SECTOR_MAPPING 已注释，v1.2使用 |
 
 ---
 
@@ -74,6 +93,46 @@ ETF最终总分 = 基础分(趋势30+确认20+动量25+成交量15+波动率10) 
 - `src/backtest.py` — 支持板块数据回测
 
 **工作目录已迁移至：** `D:\etf_rotation_model\`
+
+---
+
+### 2025-06-12 16:00 - Kimi - v1.1 版本重新定义 + 代码清理
+
+**背景：**
+用户要求重新定义 v1.1 版本范围：v1.1 = "防御型交易规则版本"，只包含防御资产+调仓规则+动态止盈+冷静期，行业板块数据移到 v1.2/v1.3。
+
+**完成内容：**
+- ✅ 重新定义 v1.1 版本范围（已写入 HANDOFF.md 当前状态快照）
+- ✅ 清理 `src/config.py`：
+  - 保留：防御模块（DEFENSE_UNIVERSE/DEFENSE_ALLOCATION/DEFENSE_CONFIG）
+  - 保留：交易规则配置（TRADING_RULES_CONFIG：调仓频率/冷静期/动态止盈）
+  - 注释掉：SECTOR_INDEX_UNIVERSE、ETF_TO_SECTOR_MAPPING、SECTOR_CODES（移到 v1.2 预留区）
+  - 注释掉：SECTOR_BOOST_CONFIG（移到 v1.2 预留区）
+  - 重组 EXPERIMENTAL_CONFIG：v1.1 参数引用 TRADING_RULES_CONFIG，v1.2 参数保留但默认关闭
+- ✅ 清理 `src/backtest.py`：
+  - 移除 `sector_df` 参数和板块评分计算代码
+  - 保留：防御模块、动态止盈 `_check_trailing_stop`
+  - 更新文件头注释为 v1.1 定位
+- ✅ 清理 `src/strategy.py`：
+  - 移除 `ETF_TO_SECTOR_MAPPING`、`SECTOR_INDEX_UNIVERSE` 导入
+  - 移除板块相关方法：calculate_sector_indicators、calculate_sector_scores、rank_sector_momentum、calculate_sector_total_score、calculate_sector_boost
+  - 更新 calculate_total_score 签名（移除 sector_scores_df 参数）
+  - 更新文件头注释为 v1.1 定位
+- ✅ 更新 `HANDOFF.md`：添加 v1.1 版本定义到当前状态快照
+
+**版本边界（已确认）：**
+| 版本 | 内容 |
+|------|------|
+| v1.0 | 基础ETF轮动：16只行业ETF + 五维评分 + 大盘择时 |
+| **v1.1** | **防御型交易规则：防御资产(黄金/国债) + 调仓日 + 动态止盈 + 冷静期** |
+| v1.2 | 行业信号增强：板块指数数据 + 板块动量增强（预留，待开发） |
+| v1.3 | 更多信号因子：基本面过滤、主力资金等（预留） |
+
+**修改文件：**
+- `src/config.py` — 重组配置结构，注释板块相关配置
+- `src/backtest.py` — 移除 sector_df 参数和板块代码
+- `src/strategy.py` — 移除板块相关导入和方法
+- `HANDOFF.md` — 更新版本定义
 
 ---
 

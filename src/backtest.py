@@ -1,6 +1,10 @@
 """
-回测引擎 - ETF轮动策略回测
-支持：交易费率、止损、仓位控制、大盘择时
+回测引擎 - ETF轮动策略回测 (v1.1 防御型交易规则版本)
+支持：交易费率、止损、仓位控制、大盘择时、防御资产、动态止盈
+
+版本定位：
+  v1.1 = "防御型交易规则版本"
+  核心内容：防御资产层（黄金/国债）+ 调仓日规则 + 动态止盈 + 冷静期
 """
 
 import pandas as pd
@@ -20,7 +24,7 @@ class BacktestEngine:
         self.strategy = StrategyEngine(self.cfg)
         self.initial_capital = BACKTEST_CONFIG['initial_capital']
     
-    def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame, sector_df=None) -> dict:
+    def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame) -> dict:
         """
         运行回测
         
@@ -28,34 +32,17 @@ class BacktestEngine:
         1. 逐ETF计算指标和评分（不含动量排名）
         2. 合并所有ETF的scores
         3. 按日期对全universe做momentum_20横截面排名
-        4. 计算total_score（含板块增强，如启用）
+        4. 计算total_score
         5. 生成信号（含大盘择时）
-        6. 执行回测
+        6. 执行回测（含防御资产、动态止盈）
         
         Parameters:
             market_df: 所有ETF的行情数据
             bench_df: 基准（沪深300）行情数据
-            sector_df: 板块指数行情数据（可选，实验性v1.1）
         
         Returns:
             dict with backtest results
         """
-        # 计算板块评分（实验性v1.1）
-        sector_scores_df = None
-        if sector_df is not None and not sector_df.empty and self.cfg.get('sector_boost_enabled', False):
-            print("计算板块指数评分...")
-            sector_scores_list = []
-            for ticker in sector_df['ticker'].unique():
-                sector_ticker_df = sector_df[sector_df['ticker'] == ticker].copy()
-                if len(sector_ticker_df) < 50:
-                    continue
-                sector_scored = self.strategy.calculate_sector_total_score(sector_ticker_df)
-                sector_scores_list.append(sector_scored)
-            
-            if sector_scores_list:
-                sector_scores_df = pd.concat(sector_scores_list, ignore_index=True)
-                print(f"板块评分计算完成: {len(sector_scores_df)} 条记录, {sector_scores_df['ticker'].nunique()} 个板块")
-        
         # 步骤1-2：逐ETF计算指标和评分，合并
         all_scores = []
         for ticker in market_df['ticker'].unique():
@@ -73,13 +60,8 @@ class BacktestEngine:
         # 步骤3：全universe横截面动量排名
         scores_df = self.strategy.rank_all_momentum(scores_df)
         
-        # 步骤4：计算总评分（含板块增强）
+        # 步骤4：计算总评分
         scores_df = self.strategy.compute_total_score(scores_df)
-        
-        # 添加板块动量增强（实验性v1.1）
-        if sector_scores_df is not None:
-            scores_df = self.strategy.calculate_sector_boost(scores_df, sector_scores_df)
-            scores_df['total_score'] = scores_df['total_score'] + scores_df['sector_boost']
         
         # 步骤5：生成信号（含大盘择时合并）
         signals_df = self.strategy.generate_signals(scores_df, bench_df)
@@ -328,65 +310,121 @@ class BacktestEngine:
                     
                     # ========== 防御模块（v1.3）==========
                     # 当大盘择时信号低时，强制配置防御资产（黄金/国债）
-                    defense_tickers = list(DEFENSE_UNIVERSE.keys())
-                    defense_allocation = DEFENSE_ALLOCATION.get(max_total_position, 0.0)
+                    import config as _config_module
+                    _defense_tickers = list(_config_module.DEFENSE_UNIVERSE.keys())
+                    _defense_allocation = _config_module.DEFENSE_ALLOCATION.get(max_total_position, 0.0)
                     
-                    if defense_allocation > 0 and max_new > 0:
+                    if _defense_allocation > 0:
                         # 从买入信号中过滤防御资产
-                        defense_signals = buy_signals[buy_signals['ticker'].isin(defense_tickers)]
+                        defense_signals = buy_signals[buy_signals['ticker'].isin(_defense_tickers)]
+                        
+                        # DEBUG: 打印防御模块状态
+                        if True:  # 改为True可开启调试
+                            print(f"DEBUG {date_str}: defense_tickers={_defense_tickers}, "
+                                  f"allocation={_defense_allocation}, max_new={max_new}, "
+                                  f"defense_signals={len(defense_signals)}, "
+                                  f"positions={list(portfolio['positions'].keys())}")
                         
                         if not defense_signals.empty:
-                            # 防御资产目标金额 = 当前净值 × 防御配置比例 × 大盘择时仓位
-                            defense_target = current_value * defense_allocation * max_total_position
-                            defense_target = min(defense_target, available_cash * 0.95)
-                            
-                            if defense_target >= 1000:
-                                # 取评分最高的防御资产
-                                defense_row = defense_signals.iloc[0]
-                                ticker = defense_row['ticker']
-                                
-                                if ticker in day_prices and ticker not in portfolio['positions']:
-                                    price = day_prices[ticker]
+                            # 如果持仓已满，强制卖出评分最低的股票ETF，为防御资产腾仓位
+                            if max_new <= 0 and len(portfolio['positions']) > 0:
+                                # 找出评分最低的非防御持仓
+                                non_defense_positions = {
+                                    t: p for t, p in portfolio['positions'].items() 
+                                    if t not in _defense_tickers and t in day_prices
+                                }
+                                if non_defense_positions:
+                                    # 获取这些持仓的当前评分
+                                    position_scores = []
+                                    for t in non_defense_positions:
+                                        t_signal = day_signals[day_signals['ticker'] == t]
+                                        if not t_signal.empty:
+                                            position_scores.append((t, t_signal['total_score'].iloc[0]))
                                     
-                                    # 防御资产评分门槛更宽松
-                                    min_defense_score = self.cfg.get('min_total_score', 40) - 10
-                                    if defense_row['total_score'] < min_defense_score:
-                                        pass  # 评分不达标，跳过防御配置
-                                    else:
-                                        shares = int(defense_target / price)
-                                        if shares >= 1:
-                                            cost = shares * price
-                                            commission = calc_commission(cost)
-                                            total_cost = cost + commission
-                                            
-                                            if total_cost <= portfolio['cash']:
-                                                portfolio['cash'] -= total_cost
-                                                available_cash -= total_cost
-                                                max_new -= 1
+                                    if position_scores:
+                                        # 卖出评分最低的
+                                        position_scores.sort(key=lambda x: x[1])
+                                        sell_ticker = position_scores[0][0]
+                                        
+                                        price = day_prices[sell_ticker]
+                                        pos = portfolio['positions'][sell_ticker]
+                                        shares = pos['shares']
+                                        
+                                        proceeds = shares * price
+                                        commission = calc_commission(proceeds)
+                                        net_proceeds = proceeds - commission
+                                        
+                                        portfolio['cash'] += net_proceeds
+                                        
+                                        pnl = (price - pos['cost']) / pos['cost']
+                                        trade_records.append({
+                                            'date': date_str,
+                                            'ticker': sell_ticker,
+                                            'action': 'SELL',
+                                            'price': price,
+                                            'shares': shares,
+                                            'amount': proceeds,
+                                            'commission': commission,
+                                            'pnl_pct': pnl,
+                                            'reason': '为防御资产腾仓位'
+                                        })
+                                        
+                                        del portfolio['positions'][sell_ticker]
+                                        max_new += 1
+                            
+                            # 现在有仓位了，配置防御资产
+                            if max_new > 0:
+                                # 防御资产目标金额 = 当前净值 × 防御配置比例 × 大盘择时仓位
+                                defense_target = current_value * _defense_allocation * max_total_position
+                                defense_target = min(defense_target, available_cash * 0.95)
+                                
+                                if defense_target >= 1000:
+                                    # 取评分最高的防御资产
+                                    defense_row = defense_signals.iloc[0]
+                                    ticker = defense_row['ticker']
+                                    
+                                    if ticker in day_prices and ticker not in portfolio['positions']:
+                                        price = day_prices[ticker]
+                                        
+                                        # 防御资产评分门槛更宽松
+                                        min_defense_score = self.cfg.get('min_total_score', 40) - 10
+                                        if defense_row['total_score'] < min_defense_score:
+                                            pass  # 评分不达标，跳过防御配置
+                                        else:
+                                            shares = int(defense_target / price)
+                                            if shares >= 1:
+                                                cost = shares * price
+                                                commission = calc_commission(cost)
+                                                total_cost = cost + commission
                                                 
-                                                portfolio['positions'][ticker] = {
-                                                    'shares': shares,
-                                                    'cost': price,
-                                                    'entry_date': date_str,
-                                                    'high_water': price
-                                                }
-                                                
-                                                trade_records.append({
-                                                    'date': date_str,
-                                                    'ticker': ticker,
-                                                    'action': 'BUY',
-                                                    'price': price,
-                                                    'shares': shares,
-                                                    'amount': cost,
-                                                    'commission': commission,
-                                                    'pnl_pct': 0,
-                                                    'reason': f"防御配置({max_total_position:.0%}仓位): 评分{defense_row['total_score']:.1f}"
-                                                })
+                                                if total_cost <= portfolio['cash']:
+                                                    portfolio['cash'] -= total_cost
+                                                    available_cash -= total_cost
+                                                    max_new -= 1
+                                                    
+                                                    portfolio['positions'][ticker] = {
+                                                        'shares': shares,
+                                                        'cost': price,
+                                                        'entry_date': date_str,
+                                                        'high_water': price
+                                                    }
+                                                    
+                                                    trade_records.append({
+                                                        'date': date_str,
+                                                        'ticker': ticker,
+                                                        'action': 'BUY',
+                                                        'price': price,
+                                                        'shares': shares,
+                                                        'amount': cost,
+                                                        'commission': commission,
+                                                        'pnl_pct': 0,
+                                                        'reason': f"防御配置({max_total_position:.0%}仓位): 评分{defense_row['total_score']:.1f}"
+                                                    })
                     
                     # ========== 买入股票ETF ==========
                     if max_new > 0:
                         # 过滤掉已买入的防御资产，只买股票ETF
-                        stock_signals = buy_signals[~buy_signals['ticker'].isin(defense_tickers)]
+                        stock_signals = buy_signals[~buy_signals['ticker'].isin(_defense_tickers)]
                         n_buy = min(max_new, len(stock_signals))
                         
                         if n_buy > 0:

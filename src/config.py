@@ -1,13 +1,24 @@
 """
-ETF轮动量化策略 - 全局配置 (v1.0 可信修复版)
-A股ETF轮动模型 v1.0 配置文件
+ETF轮动量化策略 - 全局配置 (v1.1 防御型交易规则版本)
+A股ETF轮动模型 v1.1 配置文件
 
-修复内容：
+版本定位：
+  v1.1 = "防御型交易规则版本"
+  核心内容：防御资产层（黄金/国债）+ 调仓日规则 + 动态止盈 + 冷静期 + 大盘择时
+  
+不包含：
+  - 行业板块指数数据（移到 v1.2/v1.3 信号增强版本）
+  - 板块动量增强（移到 v1.2）
+
+修复内容（v1.0 → v1.1）：
   - 横截面动量排名在合并全universe后计算
   - generate_signals使用groupby shift防止跨ETF污染
   - 大盘择时从signals_df取market_signal
   - 仓位按当前组合净值计算
   - AKShare后缀修复（159xxx/16xxxx=.SZ）
+  - 新增防御资产模块（黄金/国债ETF熊市强制配置）
+  - 新增动态止盈模块（分档止盈）
+  - 新增冷静期模块（止损后冷却）
 """
 
 import os
@@ -24,7 +35,7 @@ for d in [DATA_DIR, REPORT_DIR, SIGNAL_DIR]:
 DB_PATH = os.path.join(DATA_DIR, 'etf_model.db')
 
 # ==================== ETF标的池 ====================
-# 16只行业ETF + 黄金ETF(防御资产) + 沪深300基准
+# 16只行业ETF + 黄金ETF(防御资产) + 国债ETF(防御资产) + 沪深300基准
 ETF_UNIVERSE = {
     '512480.SH': '半导体ETF',
     '515230.SH': '软件ETF',
@@ -42,7 +53,8 @@ ETF_UNIVERSE = {
     '159865.SZ': '养殖ETF',
     '159697.SZ': '油气ETF',
     '159530.SZ': '机器人ETF',
-    '518880.SH': '黄金ETF',  # 防御资产
+    '518880.SH': '黄金ETF',   # 防御资产
+    '511010.SH': '国债ETF',   # 防御资产
 }
 
 BENCHMARK = '000300.SH'  # 沪深300
@@ -130,19 +142,19 @@ LOG_CONFIG = {
     'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 }
 
-# ==================== 实验性配置 (v1.1/v1.2) ====================
-# 以下配置仅供实验分支使用，默认不启用
+# ==================== v1.1 防御资产模块 ====================
+# 防御资产：低相关性避险资产，熊市强制配置以降低回撤
 
-# 黄金ETF（低相关性避险资产）
+# 黄金ETF
 GOLD_ETF = {
     '518880.SH': '黄金ETF',
 }
 
-# 防御资产池（v1.3 防御模块）
+# 防御资产池（v1.1 核心）
 # 当大盘择时信号低时，强制配置防御资产以降低回撤
 DEFENSE_UNIVERSE = {
     '518880.SH': '黄金ETF',
-    # 未来可扩展国债ETF: '511010.SH': '国债ETF'
+    '511010.SH': '国债ETF',
 }
 
 # 防御资产配置比例（按大盘择时信号）
@@ -161,85 +173,127 @@ DEFENSE_CONFIG = {
     'min_defense_total_score': 25,  # 防御资产总评分最低分
 }
 
-# 板块指数配置（v1.1 板块动量增强）
-SECTOR_INDEX_UNIVERSE = {
-    '801080': '电子',
-    '801750': '计算机',
-    '801770': '通信',
-    '801150': '医药生物',
-    '801120': '食品饮料',
-    '801730': '电力设备',
-    '801880': '汽车',
-    '801780': '银行',
-    '801790': '非银金融',
-    '801740': '国防军工',
-    '801760': '传媒',
-    '801050': '有色金属',
-    '801110': '家用电器',
-    '801010': '农林牧渔',
-    '801960': '石油石化',
-    '801890': '机械设备',
+# ==================== v1.1 交易规则配置 ====================
+# 调仓日、动态止盈、冷静期等交易规则参数
+
+TRADING_RULES_CONFIG = {
+    # 调仓频率
+    'rebalance_freq': 'weekly',      # weekly=每周, biweekly=双周, monthly=每月
+    'rebalance_ordinal': 1,          # 第几个交易日（1=第一个）
+    'rebalance_weekday': 4,          # 调仓日（0=周一, 4=周五）
+    
+    # 冷静期（止损后冷却）
+    'cooling_period': 5,             # 止损后冷却天数
+    'cooling_score_boost': 10,       # 冷却期后重新买入的评分加分
+    
+    # 动态止盈
+    'trailing_stop_mode': 'tiered',  # 'none'=关闭, 'simple'=简单, 'tiered'=分档
+    'trailing_stop': None,           # 简单模式：回撤阈值
+    'tier_1_pnl': 0.05,              # 1档：盈利5%
+    'tier_1_drawdown': -0.05,        # 1档：允许回撤5%
+    'tier_2_pnl': 0.15,              # 2档：盈利15%
+    'tier_2_drawdown': -0.08,        # 2档：允许回撤8%
+    'tier_3_pnl': 0.30,              # 3档：盈利30%
+    'tier_3_drawdown': -0.12,        # 3档：允许回撤12%
 }
 
-ETF_TO_SECTOR_MAPPING = {
-    '512480.SH': '801080',
-    '515230.SH': '801750',
-    '515880.SH': '801770',
-    '512010.SH': '801150',
-    '159928.SZ': '801120',
-    '516160.SH': '801730',
-    '516110.SH': '801880',
-    '512800.SH': '801780',
-    '512000.SH': '801790',
-    '512660.SH': '801740',
-    '512980.SH': '801760',
-    '512400.SH': '801050',
-    '159996.SZ': '801110',
-    '159865.SZ': '801010',
-    '159697.SZ': '801960',
-    '159530.SZ': '801890',
-}
+# ==================== v1.2/v1.3 预留：行业信号增强 ====================
+# 以下配置属于未来版本（行业板块指数信号增强），v1.1 不启用
+# 保留在此文件中以便后续版本迭代，但默认不加载
 
-SECTOR_CODES = list(SECTOR_INDEX_UNIVERSE.keys())
+# 板块指数配置（v1.2 预留）
+# SECTOR_INDEX_UNIVERSE = {
+#     '801080': '电子',
+#     '801750': '计算机',
+#     '801770': '通信',
+#     '801150': '医药生物',
+#     '801120': '食品饮料',
+#     '801730': '电力设备',
+#     '801880': '汽车',
+#     '801780': '银行',
+#     '801790': '非银金融',
+#     '801740': '国防军工',
+#     '801760': '传媒',
+#     '801050': '有色金属',
+#     '801110': '家用电器',
+#     '801010': '农林牧渔',
+#     '801960': '石油石化',
+#     '801890': '机械设备',
+# }
+# 
+# ETF_TO_SECTOR_MAPPING = {
+#     '512480.SH': '801080',
+#     '515230.SH': '801750',
+#     '515880.SH': '801770',
+#     '512010.SH': '801150',
+#     '159928.SZ': '801120',
+#     '516160.SH': '801730',
+#     '516110.SH': '801880',
+#     '512800.SH': '801780',
+#     '512000.SH': '801790',
+#     '512660.SH': '801740',
+#     '512980.SH': '801760',
+#     '512400.SH': '801050',
+#     '159996.SZ': '801110',
+#     '159865.SZ': '801010',
+#     '159697.SZ': '801960',
+#     '159530.SZ': '801890',
+# }
+# 
+# SECTOR_CODES = list(SECTOR_INDEX_UNIVERSE.keys())
 
-# 实验性策略参数（默认关闭，需显式启用）
+# 板块动量增强参数（v1.2 预留）
+# SECTOR_BOOST_CONFIG = {
+#     'sector_boost_enabled': False,   # 默认关闭
+#     'sector_boost_weight': 15,
+#     'sector_momentum_lookback': 20,
+#     'sector_ma_short': 20,
+#     'sector_top_n_threshold': 3,
+#     'sector_above_ma_bonus': 5,
+#     'sector_momentum_bonus': 10,
+# }
+
+# ==================== 实验性配置（已整合到各版本模块） ====================
+# 以下配置已分别整合到 TRADING_RULES_CONFIG 和 DEFENSE_CONFIG 中
+# 保留此处仅用于向后兼容，新代码请直接使用上述模块配置
+
 EXPERIMENTAL_CONFIG = {
-    # 板块动量增强（v1.1）
-    'sector_boost_enabled': False,   # 默认关闭
+    # 已整合到 TRADING_RULES_CONFIG
+    'rebalance_freq': TRADING_RULES_CONFIG['rebalance_freq'],
+    'rebalance_ordinal': TRADING_RULES_CONFIG['rebalance_ordinal'],
+    'cooling_period': TRADING_RULES_CONFIG['cooling_period'],
+    'cooling_score_boost': TRADING_RULES_CONFIG['cooling_score_boost'],
+    'trailing_stop_mode': TRADING_RULES_CONFIG['trailing_stop_mode'],
+    'trailing_stop': TRADING_RULES_CONFIG['trailing_stop'],
+    'tier_1_pnl': TRADING_RULES_CONFIG['tier_1_pnl'],
+    'tier_1_drawdown': TRADING_RULES_CONFIG['tier_1_drawdown'],
+    'tier_2_pnl': TRADING_RULES_CONFIG['tier_2_pnl'],
+    'tier_2_drawdown': TRADING_RULES_CONFIG['tier_2_drawdown'],
+    'tier_3_pnl': TRADING_RULES_CONFIG['tier_3_pnl'],
+    'tier_3_drawdown': TRADING_RULES_CONFIG['tier_3_drawdown'],
+    
+    # v1.2 预留（默认关闭）
+    'sector_boost_enabled': False,
     'sector_boost_weight': 15,
     'sector_momentum_lookback': 20,
     'sector_ma_short': 20,
     'sector_top_n_threshold': 3,
     'sector_above_ma_bonus': 5,
     'sector_momentum_bonus': 10,
-    
-    # 调仓频率因子（v1.2）
-    'rebalance_freq': 'weekly',
-    'rebalance_ordinal': 1,
-    
-    # 冷静期因子（v1.2）
-    'cooling_period': 5,
-    'cooling_score_boost': 10,
-    
-    # 动态止盈因子（v1.2）
-    'trailing_stop_mode': 'none',    # 默认关闭
-    'trailing_stop': None,
-    'tier_1_pnl': 0.05,
-    'tier_1_drawdown': -0.05,
-    'tier_2_pnl': 0.15,
-    'tier_2_drawdown': -0.08,
-    'tier_3_pnl': 0.30,
-    'tier_3_drawdown': -0.12,
 }
 
-# 合并配置工具（实验分支使用）
-def build_config(strategy_cfg=None, experimental_cfg=None):
-    """合并策略配置和实验性配置"""
+# 合并配置工具（v1.1 使用）
+def build_config(strategy_cfg=None, trading_rules_cfg=None, defense_cfg=None):
+    """合并策略配置、交易规则配置和防御配置"""
     import copy
     cfg = copy.deepcopy(STRATEGY_CONFIG)
+    cfg.update(copy.deepcopy(TRADING_RULES_CONFIG))
+    cfg.update(copy.deepcopy(DEFENSE_CONFIG))
     cfg.update(copy.deepcopy(EXPERIMENTAL_CONFIG))
     if strategy_cfg:
         cfg.update(strategy_cfg)
-    if experimental_cfg:
-        cfg.update(experimental_cfg)
+    if trading_rules_cfg:
+        cfg.update(trading_rules_cfg)
+    if defense_cfg:
+        cfg.update(defense_cfg)
     return cfg
