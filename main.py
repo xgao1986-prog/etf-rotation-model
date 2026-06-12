@@ -83,7 +83,7 @@ def cmd_backtest(args):
     print(f"胜率:        {result['win_rate']:.1%}")
     print(f"平均盈利:    {result['avg_win']:.2%}")
     print(f"平均亏损:    {result['avg_loss']:.2%}")
-    print(f"总佣金:      ¥{result['total_commission']:,.2f}")
+    print(f"总佣金:      {result['total_commission']:,.2f} 元")
     print(f"止损次数:    {result['stop_loss_count']}")
     print(f"平均持仓:    {result['avg_holdings']:.1f} 只")
     print(f"最大持仓:    {result['max_holdings']} 只")
