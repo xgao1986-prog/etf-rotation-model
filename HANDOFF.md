@@ -21,8 +21,8 @@
 | **ETF池子** | 16只（已优化，含家电/养殖/油气/机器人） |
 | **最后回测结果** | 全区间：总收益32.33%，夏普0.45，最大回撤-13.37%（动量排名修复后） |
 | **未合并的feature分支** | 无 |
-| **本地路径（新）** | `D:\etf_rotation_model`（双方可操作） |
-| **本地路径（旧）** | `C:\Users\Gao Xiang\Documents\kimi\workspace\etf_rotation_model` |
+| **本地路径（唯一）** | `D:\etf_rotation_model`（双方可操作） |
+| **本地路径（旧，已废弃）** | ~~`C:\Users\Gao Xiang\Documents\kimi\workspace\etf_rotation_model`~~ ❌ 不再使用 |
 | **GitHub仓库** | ✅ https://github.com/xgao1986-prog/etf-rotation-model |
 | **已安装工具脚本** | ✅ 4个（etf_screener / compute_indicators / stock_atom / kimi_tech） |
 
