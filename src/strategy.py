@@ -140,13 +140,14 @@ class StrategyEngine:
         df = pd.concat(result_dfs, ignore_index=True)
         
         # 计算总分
-        w = self.cfg['weights']
+        # 注意: 各维度得分已经是按权重分配后的满分
+        # trend_score(30) + confirm_score(20) + momentum_rank(25) + volume_score(15) + vol_score(10) = 100
         df['total_score'] = (
-            df['trend_score'] * w['trend'] +
-            df['confirm_score'] * w['confirm'] +
-            df['momentum_rank'] * w['momentum'] +
-            df['volume_score'] * w['volume'] +
-            df['vol_score'] * w['volatility']
+            df['trend_score'] +
+            df['confirm_score'] +
+            df['momentum_rank'] +
+            df['volume_score'] +
+            df['vol_score']
         )
         
         return df
