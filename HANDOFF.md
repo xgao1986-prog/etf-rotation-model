@@ -17,14 +17,12 @@
 |------|------|
 | **当前活跃协作者** | Kimi |
 | **Git分支** | master |
-| **数据库最新日期** | 2026-06-11 |
-| **板块数据状态** | ✅ 26,491条已入库（16板块，2019-06-03~2026-06-11） |
-| **ETF池子** | 16只（已优化，含家电/养殖/油气/机器人） |
-| **最后回测结果** | 新16只池子：总收益37.71%，夏普0.41，最大回撤-20.36% |
-| **板块增强状态** | ✅ v1.1已接入（AKShare申万一级行业指数） |
+| **数据库最新日期** | 2026-06-12 |
+| **ETF池子** | 16只（v1.0 可信版，不含黄金ETF） |
+| **最后回测结果** | v1.0修复版：总收益32.38%，夏普0.45，最大回撤-13.37% |
 | **工作目录** | `D:\etf_rotation_model\` |
-| **未合并的feature分支** | 无 |
 | **GitHub仓库** | ✅ 已创建: https://github.com/xgao1986-prog/etf-rotation-model |
+| **版本状态** | v1.0 可信修复版（实验性功能拆至 config_experimental.py） |
 
 ---
 
@@ -32,7 +30,7 @@
 
 | 协作者 | 正在修改的文件 | 开始时间 | 预计完成 | 状态 | 备注 |
 |--------|---------------|---------|---------|------|------|
-| Kimi | `src/config.py`, `database/etf_model.db`, `reports/` | 2025-06-12 | 2025-06-12 | ✅ | ETF池子优化完成，概念ETF测试完成，等待Codex接入 |
+| Kimi | v1.0 可信修复版收敛 | 2025-06-12 | 2025-06-12 | ✅ | 按Codex审计要求修复7个bug，实验性功能拆出 |
 
 ---
 
@@ -642,14 +640,33 @@ b715548 v1.1: 添加.gitignore, 更新PROGRESS
 
 ## 📝 变更摘要（每次提交后更新）
 
-### v1.3 (待提交) - 2025-06-12
-- 新增可调因子体系：`FACTOR_CONFIG` + `FACTOR_SPACE` + `build_config()`
-- 修改 `src/config.py`：策略参数与因子参数分离
-- 修改 `src/backtest.py`：支持 `weekly/biweekly/monthly` 三种调仓频率
-- 新增 `scripts/parameter_scan.py`：参数扫描脚本
-- 新增 `scripts/quick_factor_test.py`：快速因子验证（预计算评分）
-- 新增动态止盈因子：`trailing_stop_mode` (none/simple/tiered) + `trailing_stop` + 分档参数
-- 新增 `scripts/test_trailing_stop.py`：动态止盈模式验证
+### v1.0 可信修复版 (ee62995) - 2025-06-12
+- 恢复横截面动量正确实现：rank_all_momentum() 在合并全universe后计算
+- 恢复 generate_signals() 分组shift：防止跨ETF污染
+- 修复 main.py signal 接口：统一使用 calculate_indicators_and_scores -> rank_all_momentum -> compute_total_score
+- 恢复大盘择时实际生效：从 day_signals['market_signal'] 取
+- 恢复按当前组合净值计算仓位：用 current_value 而非 initial_capital
+- 修复 AKShare ETF 后缀：159xxx/16xxxx -> .SZ
+- 修复 fetch_latest()：调用 fetch_all_data()
+- 拆分实验性功能：板块增强/黄金ETF/动态止盈/冷却期/调仓日因子 -> config_experimental.py
+- 修复数据库重复记录：save_scores/save_signals 先DELETE再INSERT
+- 清理 __pycache__/*.pyc
+
+验证结果：
+- momentum_rank: 77个唯一值 (0~25) ✅
+- trade_signals: 0重复 ✅
+- 回测未交易000300.SH ✅
+- max_total_position: [0.2, 0.5, 1.0] 大盘择时生效 ✅
+
+### v1.3 (eaf5ddf) - 2025-06-12
+- Streamlit UI 接入因子参数（已拆出至实验配置）
+
+### v1.3 (47a7498) - 2025-06-12
+- 新增可调因子体系：FACTOR_CONFIG + FACTOR_SPACE + build_config()
+- 新增动态止盈因子：trailing_stop_mode (none/simple/tiered)
+
+### v1.3 (0abe149) - 2025-06-12
+- 新增动态止盈因子纳入因子体系
 
 ### v1.2 (7baa4fc) - 2025-06-12
 - 重构数据源架构：iFinD通过Kimi对话获取 + AKShare本地自动补充
