@@ -21,7 +21,7 @@
 | **ETF池子** | 16只（已优化，含家电/养殖/油气/机器人） |
 | **最后回测结果** | 新16只池子：总收益37.71%，夏普0.41，最大回撤-20.36% |
 | **未合并的feature分支** | 无 |
-| **GitHub仓库** | 未创建（Codex负责） |
+| **GitHub仓库** | ✅ 已创建: https://github.com/xgao1986-prog/etf-rotation-model |
 
 ---
 
@@ -252,8 +252,9 @@ b715548 v1.1: 添加.gitignore, 更新PROGRESS
 
 | 任务 | 负责人 | 说明 | 依赖 |
 |------|--------|------|------|
-| GitHub仓库创建 | Codex | 在GitHub创建仓库，推送main分支，配置分支保护 | 需用户确认仓库名 |
-| Codex环境接入 | Codex | 验证Codex能否通过Git远程访问代码 | 需GitHub仓库 |
+| Codex环境接入 | Codex | 验证Codex能否通过Git远程访问代码 | 需GitHub仓库 ✅ |
+
+### P2 - 中优先级
 
 ### P2 - 中优先级
 
