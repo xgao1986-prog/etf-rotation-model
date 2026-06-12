@@ -82,22 +82,24 @@ STRATEGY_CONFIG = {
 }
 
 # ==================== 数据源配置 ====================
-# 优先级: iFinD (主) > AKShare (备)
-# iFinD限制: 每次最多10个ticker，日期范围最多3年
+# 工作流:
+#   1. iFinD数据: 通过Kimi对话获取（我调用get_data_source工具），
+#      然后调用 import_from_kimi() 写入本地数据库
+#   2. AKShare数据: 本地Python代码自动获取（免费，无需账号）
+#   3. 数据合并: iFinD为主，AKShare补充缺失部分
+#
+# 使用方式:
+#   - 首次下载: 在Kimi对话中说"用iFinD下载全部历史数据"
+#   - 日常更新: 在Kimi对话中说"更新iFinD数据"
+#   - AKShare兜底: python main.py update --full（本地自动运行）
+
 DATA_SOURCE = {
-    'primary': 'ifind',         # 主数据源: ifind / akshare / tushare
-    'backup': 'akshare',        # 备用数据源: akshare / tushare / None
+    'primary': 'ifind_via_kimi',   # iFinD通过Kimi对话获取
+    'backup': 'akshare',            # AKShare本地自动获取
     
-    # iFinD配置（已付费，优先使用）
-    'ifind_username': os.environ.get('IFIND_USER', ''),
-    'ifind_password': os.environ.get('IFIND_PASS', ''),
-    
-    # iFinD查询限制
+    # iFinD限制（Kimi内置）
     'ifind_max_tickers_per_query': 10,   # 每次最多10个ticker
     'ifind_max_years_per_query': 3,       # 日期范围最多3年
-    
-    # Tushare配置（如使用）
-    'tushare_token': os.environ.get('TUSHARE_TOKEN', ''),
 }
 
 # ==================== 回测参数 ====================
