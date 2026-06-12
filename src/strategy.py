@@ -203,18 +203,21 @@ class StrategyEngine:
         # 入场信号
         scores_df['signal_type'] = 'HOLD'
         
+        # 按ticker分组后shift，避免跨标的串行污染
+        prev_close = scores_df.groupby('ticker')['close'].shift(1)
+        
         buy_mask = (
             (scores_df['trend_score'] >= self.cfg['min_trend_score']) &
             (scores_df['confirm_score'] >= self.cfg['min_confirm_score']) &
             (scores_df['total_score'] >= self.cfg['min_total_score']) &
-            (scores_df['close'].shift(1) > scores_df['ma20']) &
+            (prev_close > scores_df['ma20']) &
             (scores_df['ma20_slope'] > 0)
         )
         
         scores_df.loc[buy_mask, 'signal_type'] = 'BUY'
         
-        # 出场信号：跌破均线
-        sell_mask = scores_df['close'].shift(1) < scores_df['ma20']
+        # 出场信号：跌破均线（同样按ticker分组后shift）
+        sell_mask = prev_close < scores_df['ma20']
         scores_df.loc[sell_mask, 'signal_type'] = 'SELL'
         
         return scores_df

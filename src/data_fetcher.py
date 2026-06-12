@@ -68,7 +68,14 @@ class DataFetcher:
             })
             
             df['date'] = pd.to_datetime(df['date'])
-            df['ticker'] = f"{code}.SH" if code.startswith('5') or code.startswith('1') else f"{code}.SZ"
+            # 修复：159xxx是深交所ETF，应为.SZ；5开头和51开头的是上交所ETF，应为.SH
+            if code.startswith('5'):
+                suffix = '.SH'
+            elif code.startswith('15') or code.startswith('16'):
+                suffix = '.SZ'
+            else:
+                suffix = '.SH'  # 默认上交所
+            df['ticker'] = f"{code}{suffix}"
             df['adj_close'] = df['close']
             df['source'] = 'AKShare'
             

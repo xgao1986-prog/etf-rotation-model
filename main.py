@@ -43,9 +43,10 @@ def cmd_backtest(args):
     """运行回测"""
     db = ETFDatabase()
     
-    # 加载数据
+    # 加载数据 - 只读取ETF_UNIVERSE中的标的，排除基准和概念ETF
     print("加载数据...")
-    market_df = db.get_market_data()
+    etf_tickers = list(ETF_UNIVERSE.keys())
+    market_df = db.get_market_data(ticker=etf_tickers)
     bench_df = db.get_market_data(ticker=BENCHMARK)
     
     if market_df.empty or bench_df.empty:

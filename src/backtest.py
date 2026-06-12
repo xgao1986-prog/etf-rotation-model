@@ -79,11 +79,11 @@ class BacktestEngine:
             day_signals = signals_df[signals_df['date'] == date].copy()
             day_prices = market_df[market_df['date'] == date].set_index('ticker')['close'].to_dict()
             
-            # 获取大盘择时信号
-            bench_day = bench_df[bench_df['date'] == date]
+            # 获取大盘择时信号（从signals_df中获取，而非bench_df）
             max_total_position = 1.0
-            if not bench_day.empty and 'market_signal' in bench_day.columns:
-                max_total_position = bench_day['market_signal'].iloc[0]
+            if not day_signals.empty and 'market_signal' in day_signals.columns:
+                # 取当日任意一条记录的market_signal（所有记录相同）
+                max_total_position = day_signals['market_signal'].iloc[0]
             
             # ========== 每日止损检查 ==========
             stops = []
@@ -172,12 +172,12 @@ class BacktestEngine:
                 max_new = self.cfg['max_holdings'] - current_holdings
                 
                 if max_new > 0 and portfolio['cash'] > 1000:
-                    # 根据大盘择时调整总仓位
-                    target_total_value = self.initial_capital * max_total_position
+                    # 根据大盘择时调整总仓位（基于当前组合净值，而非初始资金）
                     current_value = portfolio['cash'] + sum(
                         portfolio['positions'][t]['shares'] * day_prices.get(t, 0)
                         for t in portfolio['positions']
                     )
+                    target_total_value = current_value * max_total_position
                     
                     # 计算可用资金
                     available_cash = min(portfolio['cash'], 
@@ -193,8 +193,8 @@ class BacktestEngine:
                             if ticker in day_prices and ticker not in portfolio['positions']:
                                 price = day_prices[ticker]
                                 
-                                # 目标金额
-                                target_amount = self.initial_capital * base_weight * max_total_position
+                                # 目标金额（基于当前组合净值）
+                                target_amount = current_value * base_weight * max_total_position
                                 target_amount = min(target_amount, available_cash * 0.95)
                                 
                                 if target_amount < 1000:  # 最小交易金额
