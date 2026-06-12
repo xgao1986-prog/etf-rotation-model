@@ -24,6 +24,7 @@
 | **本地路径（新）** | `D:\etf_rotation_model`（双方可操作） |
 | **本地路径（旧）** | `C:\Users\Gao Xiang\Documents\kimi\workspace\etf_rotation_model` |
 | **GitHub仓库** | ✅ https://github.com/xgao1986-prog/etf-rotation-model |
+| **已安装工具脚本** | ✅ 4个（etf_screener / compute_indicators / stock_atom / kimi_tech） |
 
 ---
 
@@ -31,7 +32,7 @@
 
 | 协作者 | 正在修改的文件 | 开始时间 | 预计完成 | 状态 | 备注 |
 |--------|---------------|---------|---------|------|------|
-| Kimi | `src/config.py`, `database/etf_model.db`, `reports/` | 2025-06-12 | 2025-06-12 | ✅ | ETF池子优化完成，概念ETF测试完成，等待Codex接入 |
+| Kimi | 无 | - | - | ⏳ | 等待Codex接入，项目已迁移至 D:\etf_rotation_model |
 
 ---
 
