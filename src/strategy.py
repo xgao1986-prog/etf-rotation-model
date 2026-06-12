@@ -5,6 +5,8 @@
 
 修复内容：
   - 所有指标使用shift(1)，避免未来数据泄露
+  - 横截面动量排名在合并全universe后计算
+  - generate_signals使用groupby shift防止跨ETF污染
   - 交易费率0.03%双向
   - 仓位控制严格≤5只
   - 大盘择时控制总仓位
@@ -64,12 +66,12 @@ class StrategyEngine:
     
     def calculate_scores(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        计算ETF评分（满分100）
+        计算ETF评分（不含动量排名，动量排名需全universe合并后计算）
         
         维度：
           趋势强度 30%: 收盘价>20日均线(+15) + >50日均线(+10) + 均线斜率>0(+5)
           趋势确认 20%: 连续在20日均线之上的天数×4分，最多5天(20分)
-          动量    25%: 20日收益率的横截面排名（百分位×25）
+          动量    25%: 20日收益率的横截面排名（百分位×25）——在rank_all_momentum中计算
           成交量  15%: 放量上涨(+15) / 放量(+10) / 普通(+5)
           波动率  10%: 适中波动率1-4%(+10) / 较高4-6%(+5)
         """
@@ -84,9 +86,10 @@ class StrategyEngine:
         # 2. 趋势确认 (20分) - 连续在均线之上的天数
         df['confirm_score'] = np.minimum(df['above_ma20_days'] * 4, 20)
         
-        # 3. 动量 (25分) - 横截面排名，需要按日期分组计算
-        # 先标记有效动量值
+        # 3. 动量 (25分) - 横截面排名，需要全universe合并后计算
+        # 先标记有效动量值，排名在rank_all_momentum中完成
         df['momentum_valid'] = df['momentum_20'].notna()
+        df['momentum_rank'] = np.nan  # 占位，后续填充
         
         # 4. 成交量 (15分)
         df['volume_score'] = 5  # 默认5分
@@ -103,111 +106,77 @@ class StrategyEngine:
         
         return df
     
-    def rank_momentum(self, daily_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        计算动量横截面排名（百分位×25）
-        按日期分组，对所有ETF的20日动量进行排名
-        """
-        df = daily_df.copy()
-        
-        # 只对有有效动量的标的排名
-        valid = df[df['momentum_valid'] == True].copy()
-        
-        if len(valid) > 1:
-            # 按动量排名，百分位×25
-            valid['momentum_rank'] = valid['momentum_20'].rank(pct=True) * 25
-            df = df.merge(valid[['ticker', 'date', 'momentum_rank']], 
-                         on=['ticker', 'date'], how='left')
-        else:
-            df['momentum_rank'] = 12.5  # 中位数
-        
-        df['momentum_rank'] = df['momentum_rank'].fillna(0)
-        return df
-    
     def calculate_indicators_and_scores(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        计算技术指标和除动量排名外的所有评分
+        逐ETF计算指标和评分（不含横截面动量排名）
         
-        注意：动量排名需要在全universe合并后做横截面计算，
-        因此本方法不计算momentum_rank和total_score
+        这是main.py signal命令使用的接口。
+        横截面动量排名在合并所有ETF后由rank_all_momentum完成。
         """
-        df = self.calculate_scores(df)
-        # 不在这里调用rank_momentum，因为df只有单只ETF
-        return df
+        return self.calculate_scores(df)
     
     def rank_all_momentum(self, scores_df: pd.DataFrame) -> pd.DataFrame:
         """
-        对全universe做动量横截面排名（百分位×25）
+        全universe横截面动量排名（必须在合并所有ETF后调用）
         
-        必须在所有ETF合并后调用，按date分组排名
+        按日期分组，对所有ETF的20日动量进行排名，百分位×25
+        
+        Parameters:
+            scores_df: 合并后的所有ETF评分DataFrame（含ticker, date, momentum_20）
+        
+        Returns:
+            DataFrame with momentum_rank filled
         """
         df = scores_df.copy()
         
-        # 按date分组，对每个交易日的所有ETF做动量排名
-        def _rank_day(group):
-            valid = group[group['momentum_valid'] == True].copy()
-            if len(valid) > 1:
-                valid['momentum_rank'] = valid['momentum_20'].rank(pct=True) * 25
-                group = group.merge(valid[['ticker', 'momentum_rank']], 
-                                   on='ticker', how='left')
-            else:
-                group['momentum_rank'] = 12.5
-            group['momentum_rank'] = group['momentum_rank'].fillna(0)
-            return group
-        
-        df = df.groupby('date', group_keys=False).apply(_rank_day)
-        
-        # 如果apply产生了重复的ticker列，清理一下
-        if 'ticker_y' in df.columns:
-            df = df.drop(columns=['ticker_y'])
-        if 'ticker_x' in df.columns:
-            df = df.rename(columns={'ticker_x': 'ticker'})
-        
-        return df
-    
-    def compute_total_score(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        计算总分（在rank_all_momentum之后调用）
-        """
-        df = scores_df.copy()
-        df['total_score'] = (
-            df['trend_score'] +
-            df['confirm_score'] +
-            df['momentum_rank'] +
-            df['volume_score'] +
-            df['vol_score']
-        )
-        return df
-    
-    def calculate_total_score(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        计算总评分（单ETF调用，动量排名固定为12.5）
-        
-        注意：此方法仅用于快速测试单只ETF，正式回测应使用
-        calculate_indicators_and_scores + rank_all_momentum + compute_total_score
-        """
-        df = self.calculate_scores(df)
-        
-        # 单ETF无法做横截面排名，固定为12.5
+        # 按日期分组计算动量排名
         dates = df['date'].unique()
         result_dfs = []
         
         for date in dates:
             day_df = df[df['date'] == date].copy()
-            day_df = self.rank_momentum(day_df)
+            valid = day_df[day_df['momentum_valid'] == True]
+            
+            if len(valid) > 1:
+                day_df.loc[valid.index, 'momentum_rank'] = valid['momentum_20'].rank(pct=True) * 25
+            elif len(valid) == 1:
+                day_df.loc[valid.index, 'momentum_rank'] = 12.5
+            
             result_dfs.append(day_df)
         
         df = pd.concat(result_dfs, ignore_index=True)
+        df['momentum_rank'] = df['momentum_rank'].fillna(0)
+        
+        return df
+    
+    def compute_total_score(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        计算总评分（在横截面动量排名之后调用）
+        
+        total_score = trend_score + confirm_score + momentum_rank + volume_score + vol_score
+        """
+        df = scores_df.copy()
         
         df['total_score'] = (
-            df['trend_score'] +
-            df['confirm_score'] +
-            df['momentum_rank'] +
-            df['volume_score'] +
-            df['vol_score']
+            df['trend_score'].fillna(0) +
+            df['confirm_score'].fillna(0) +
+            df['momentum_rank'].fillna(0) +
+            df['volume_score'].fillna(0) +
+            df['vol_score'].fillna(0)
         )
         
         return df
+    
+    def calculate_total_score(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        计算总评分（单ETF调用，不含横截面动量排名）
+        
+        注意：此方法不计算横截面动量排名，因为单只ETF无法做横截面比较。
+        横截面排名需调用rank_all_momentum（全universe合并后）。
+        
+        这是backtest.py run()中逐ETF调用的接口。
+        """
+        return self.calculate_scores(df)
     
     def market_timing(self, bench_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -243,11 +212,10 @@ class StrategyEngine:
           1. 趋势得分 ≥ 15
           2. 确认得分 ≥ 4（至少1天在均线之上）
           3. 总评分 ≥ 40
-          4. 收盘价 > 20日均线 且 均线斜率 > 0
+          4. 前一日收盘价 > 20日均线 且 均线斜率 > 0
         
         出场条件（任一满足）：
-          1. 收盘价跌破20日均线
-          2. 单只回撤超过8%
+          1. 前一日收盘价跌破20日均线
         """
         # 合并大盘择时信号
         if self.cfg['market_timing'] and bench_df is not None:
@@ -257,24 +225,24 @@ class StrategyEngine:
         else:
             scores_df['market_signal'] = 1.0
         
+        # 使用groupby防止跨ETF污染的shift
+        scores_df['prev_close'] = scores_df.groupby('ticker')['close'].shift(1)
+        
         # 入场信号
         scores_df['signal_type'] = 'HOLD'
-        
-        # 按ticker分组后shift，避免跨标的串行污染
-        prev_close = scores_df.groupby('ticker')['close'].shift(1)
         
         buy_mask = (
             (scores_df['trend_score'] >= self.cfg['min_trend_score']) &
             (scores_df['confirm_score'] >= self.cfg['min_confirm_score']) &
             (scores_df['total_score'] >= self.cfg['min_total_score']) &
-            (prev_close > scores_df['ma20']) &
+            (scores_df['prev_close'] > scores_df['ma20']) &
             (scores_df['ma20_slope'] > 0)
         )
         
         scores_df.loc[buy_mask, 'signal_type'] = 'BUY'
         
-        # 出场信号：跌破均线（同样按ticker分组后shift）
-        sell_mask = prev_close < scores_df['ma20']
+        # 出场信号：前一日收盘价跌破均线
+        sell_mask = scores_df['prev_close'] < scores_df['ma20']
         scores_df.loc[sell_mask, 'signal_type'] = 'SELL'
         
         return scores_df

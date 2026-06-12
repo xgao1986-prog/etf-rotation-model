@@ -18,7 +18,7 @@ from plotly.subplots import make_subplots
 sys.path.insert(0, "src")
 
 from backtest import BacktestEngine
-from config import BACKTEST_CONFIG, BENCHMARK, ETF_UNIVERSE, STRATEGY_CONFIG, FACTOR_CONFIG, build_config
+from config import BACKTEST_CONFIG, BENCHMARK, ETF_UNIVERSE, STRATEGY_CONFIG
 from database import ETFDatabase
 from strategy import StrategyEngine
 
@@ -175,48 +175,6 @@ def build_sidebar_config():
         stop_loss = st.slider("止损线(%)", -20, -1, int(STRATEGY_CONFIG["stop_loss"] * 100)) / 100
         use_timing = st.checkbox("启用大盘择时", STRATEGY_CONFIG["market_timing"])
 
-    # ========== 因子参数 (v1.2 新增) ==========
-    with st.sidebar.expander("⚡ 因子参数", expanded=False):
-        st.caption("调仓频率、冷静期、动态止盈等可调因子")
-        
-        # 调仓频率
-        freq_options = {"每周": "weekly", "双周": "biweekly", "月度": "monthly"}
-        freq_display = list(freq_options.keys())
-        freq_default = list(freq_options.keys())[list(freq_options.values()).index(FACTOR_CONFIG["rebalance_freq"])]
-        freq_selected = st.selectbox("调仓频率", freq_display, index=freq_display.index(freq_default))
-        rebalance_freq = freq_options[freq_selected]
-        
-        # 调仓日
-        weekday_options = ["周一", "周二", "周三", "周四", "周五"]
-        rebalance_weekday = st.selectbox("调仓日", weekday_options, index=FACTOR_CONFIG["rebalance_weekday"])
-        rebalance_weekday = weekday_options.index(rebalance_weekday)
-        
-        # 冷静期
-        cooling_period = st.slider("冷静期(交易日)", 0, 20, FACTOR_CONFIG["cooling_period"])
-        cooling_score_boost = st.slider("冷静期评分提升", 0, 30, FACTOR_CONFIG["cooling_score_boost"])
-        
-        # 动态止盈
-        st.divider()
-        st.caption("动态止盈")
-        trailing_mode_options = {"不启用": "none", "单一阈值": "simple", "分档止盈": "tiered"}
-        trailing_display = list(trailing_mode_options.keys())
-        trailing_default = list(trailing_mode_options.keys())[list(trailing_mode_options.values()).index(FACTOR_CONFIG["trailing_stop_mode"])]
-        trailing_selected = st.selectbox("动态止盈模式", trailing_display, index=trailing_display.index(trailing_default))
-        trailing_stop_mode = trailing_mode_options[trailing_selected]
-        
-        trailing_stop = None
-        if trailing_stop_mode == "simple":
-            trailing_stop = st.slider("回撤止盈阈值(%)", -20, -1, -10) / 100
-        elif trailing_stop_mode == "tiered":
-            st.caption("分档参数（盈利门槛 / 回撤容忍）")
-            tier_1_pnl = st.slider("1档盈利门槛(%)", 2, 10, int(FACTOR_CONFIG["tier_1_pnl"] * 100)) / 100
-            tier_1_drawdown = st.slider("1档回撤容忍(%)", -10, -2, int(FACTOR_CONFIG["tier_1_drawdown"] * 100)) / 100
-            tier_2_pnl = st.slider("2档盈利门槛(%)", 10, 25, int(FACTOR_CONFIG["tier_2_pnl"] * 100)) / 100
-            tier_2_drawdown = st.slider("2档回撤容忍(%)", -15, -5, int(FACTOR_CONFIG["tier_2_drawdown"] * 100)) / 100
-            tier_3_pnl = st.slider("3档盈利门槛(%)", 20, 50, int(FACTOR_CONFIG["tier_3_pnl"] * 100)) / 100
-            tier_3_drawdown = st.slider("3档回撤容忍(%)", -20, -8, int(FACTOR_CONFIG["tier_3_drawdown"] * 100)) / 100
-
-    # 构建策略配置
     cfg = STRATEGY_CONFIG.copy()
     cfg["weights"] = weights
     cfg["min_trend_score"] = min_trend
@@ -226,29 +184,6 @@ def build_sidebar_config():
     cfg["max_position_per_etf"] = max_per_etf
     cfg["stop_loss"] = stop_loss
     cfg["market_timing"] = use_timing
-    
-    # 构建因子配置
-    factor_cfg = {
-        "rebalance_freq": rebalance_freq,
-        "rebalance_weekday": rebalance_weekday,
-        "cooling_period": cooling_period,
-        "cooling_score_boost": cooling_score_boost,
-        "trailing_stop_mode": trailing_stop_mode,
-    }
-    if trailing_stop is not None:
-        factor_cfg["trailing_stop"] = trailing_stop
-    if trailing_stop_mode == "tiered":
-        factor_cfg.update({
-            "tier_1_pnl": tier_1_pnl,
-            "tier_1_drawdown": tier_1_drawdown,
-            "tier_2_pnl": tier_2_pnl,
-            "tier_2_drawdown": tier_2_drawdown,
-            "tier_3_pnl": tier_3_pnl,
-            "tier_3_drawdown": tier_3_drawdown,
-        })
-    
-    # 合并为完整配置
-    cfg = build_config(factor_cfg=factor_cfg, strategy_cfg=cfg)
 
     st.sidebar.divider()
     latest = get_database().get_latest_date()
@@ -310,16 +245,7 @@ def cfg_signature(cfg):
         round(cfg["stop_loss"], 6),
         cfg["market_timing"],
     )
-    # 加入因子参数
-    factor_params = (
-        cfg.get("rebalance_freq", "weekly"),
-        cfg.get("rebalance_weekday", 3),
-        cfg.get("cooling_period", 5),
-        cfg.get("cooling_score_boost", 10),
-        cfg.get("trailing_stop_mode", "simple"),
-        cfg.get("trailing_stop"),
-    )
-    return weights + params + factor_params
+    return weights + params
 
 
 def get_latest_score_table(cfg):
@@ -362,23 +288,9 @@ def run_weighted_backtest(cfg, sample_type):
         market_df = market_df[market_df["date"] >= start]
         bench_df = bench_df[bench_df["date"] >= start]
 
-    strategy = StrategyEngine(cfg)
-    all_scores = []
-    for ticker in market_df["ticker"].unique():
-        ticker_df = market_df[market_df["ticker"] == ticker].copy()
-        if len(ticker_df) < 50:
-            continue
-        scored = strategy.calculate_total_score(ticker_df)
-        all_scores.append(scored)
-
-    if not all_scores:
-        return {"error": "无有效评分数据"}
-
-    scores_df = pd.concat(all_scores, ignore_index=True)
-    scores_df = apply_weighted_scores(scores_df, cfg)
-    signals_df = strategy.generate_signals(scores_df, bench_df)
+    # 使用 BacktestEngine.run() 走完整的评分路径
     engine = BacktestEngine(cfg)
-    return engine._execute_backtest(signals_df, market_df, bench_df)
+    return engine.run(market_df, bench_df)
 
 
 def make_score_bar(df):

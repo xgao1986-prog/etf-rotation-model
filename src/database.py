@@ -404,7 +404,7 @@ class ETFDatabase:
     # ==================== 评分数据操作 ====================
     
     def save_scores(self, df: pd.DataFrame):
-        """保存评分数据"""
+        """保存评分数据（先删除再插入，避免UNIQUE约束冲突）"""
         if df.empty:
             return 0
         
@@ -413,18 +413,17 @@ class ETFDatabase:
             df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
         with self._connect() as conn:
-            df.to_sql('daily_scores', conn, if_exists='append', index=False)
-            
-            # 清理重复
             cursor = conn.cursor()
-            cursor.execute('''
-                DELETE FROM daily_scores 
-                WHERE rowid NOT IN (
-                    SELECT MIN(rowid) 
-                    FROM daily_scores 
-                    GROUP BY ticker, date
+            
+            # 先删除已存在的记录（按ticker+date）
+            for _, row in df.iterrows():
+                cursor.execute(
+                    'DELETE FROM daily_scores WHERE ticker = ? AND date = ?',
+                    (row['ticker'], row['date'])
                 )
-            ''')
+            
+            # 插入新记录
+            df.to_sql('daily_scores', conn, if_exists='append', index=False)
             conn.commit()
         
         return len(df)
@@ -454,7 +453,7 @@ class ETFDatabase:
     # ==================== 信号记录操作 ====================
     
     def save_signals(self, df: pd.DataFrame):
-        """保存交易信号"""
+        """保存交易信号（先删除再插入，避免重复）"""
         if df.empty:
             return 0
         
@@ -463,6 +462,16 @@ class ETFDatabase:
             df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
         with self._connect() as conn:
+            cursor = conn.cursor()
+            
+            # 先删除已存在的记录（按ticker+date）
+            for _, row in df.iterrows():
+                cursor.execute(
+                    'DELETE FROM trade_signals WHERE ticker = ? AND date = ?',
+                    (row['ticker'], row['date'])
+                )
+            
+            # 插入新记录
             df.to_sql('trade_signals', conn, if_exists='append', index=False)
             conn.commit()
         

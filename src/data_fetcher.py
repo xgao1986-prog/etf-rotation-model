@@ -22,7 +22,13 @@ from datetime import datetime, timedelta
 import time
 import warnings
 
-from config import ETF_UNIVERSE, BENCHMARK, ETF_CODES, BENCHMARK_CODE
+from config import (ETF_UNIVERSE, BENCHMARK, ETF_CODES, BENCHMARK_CODE)
+
+# 实验性功能：板块指数（v1.1+）
+try:
+    from config_experimental import SECTOR_CODES
+except ImportError:
+    SECTOR_CODES = []
 
 
 class DataFetcher:
@@ -68,14 +74,7 @@ class DataFetcher:
             })
             
             df['date'] = pd.to_datetime(df['date'])
-            # 修复：159xxx是深交所ETF，应为.SZ；5开头和51开头的是上交所ETF，应为.SH
-            if code.startswith('5'):
-                suffix = '.SH'
-            elif code.startswith('15') or code.startswith('16'):
-                suffix = '.SZ'
-            else:
-                suffix = '.SH'  # 默认上交所
-            df['ticker'] = f"{code}{suffix}"
+            df['ticker'] = f"{code}.SH" if code.startswith('5') else f"{code}.SZ"
             df['adj_close'] = df['close']
             df['source'] = 'AKShare'
             
@@ -130,8 +129,86 @@ class DataFetcher:
             warnings.warn(f"AKShare获取指数 {code} 失败: {e}")
             return pd.DataFrame()
     
-    def fetch_all_etfs(self, start_date, end_date=None, db=None, delay=0.5) -> pd.DataFrame:
-        """批量获取所有ETF和基准数据"""
+    def fetch_sector_history(self, code, start_date, end_date=None) -> pd.DataFrame:
+        """获取申万一级行业指数历史行情（板块动量增强数据源）
+        
+        Parameters:
+            code: 申万行业代码（如 '801080'）
+            start_date: 开始日期 'YYYY-MM-DD'
+            end_date: 结束日期 'YYYY-MM-DD'（默认今天）
+        
+        Returns:
+            标准化后的DataFrame（列与ETF数据一致）
+        """
+        if end_date is None:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+        
+        try:
+            ak = self._get_akshare()
+            
+            df = ak.index_hist_sw(
+                symbol=code,
+                period='day'
+            )
+            
+            if df.empty:
+                return pd.DataFrame()
+            
+            # 申万指数数据列名: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额
+            df = df.rename(columns={
+                '日期': 'date',
+                '开盘': 'open',
+                '收盘': 'close',
+                '最高': 'high',
+                '最低': 'low',
+                '成交量': 'volume',
+                '成交额': 'amount',
+            })
+            
+            df['date'] = pd.to_datetime(df['date'])
+            
+            # 过滤日期范围
+            start_dt = pd.to_datetime(start_date)
+            end_dt = pd.to_datetime(end_date)
+            df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+            
+            if df.empty:
+                return pd.DataFrame()
+            
+            # 使用板块指数代码作为ticker（加前缀区分）
+            df['ticker'] = f"SECTOR_{code}"
+            df['adj_close'] = df['close']
+            df['source'] = 'AKShare-Sector'
+            
+            cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'adj_close', 'source']
+            df = df[[c for c in cols if c in df.columns]]
+            
+            return df.sort_values('date').reset_index(drop=True)
+            
+        except Exception as e:
+            warnings.warn(f"AKShare获取板块指数 {code} 失败: {e}")
+            return pd.DataFrame()
+    
+    def fetch_all_sectors(self, start_date, end_date=None, delay=0.5) -> pd.DataFrame:
+        """批量获取所有板块指数数据"""
+        if end_date is None:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+        
+        all_data = []
+        
+        for code in SECTOR_CODES:
+            df = self.fetch_sector_history(code, start_date, end_date)
+            if not df.empty:
+                all_data.append(df)
+            time.sleep(delay)
+        
+        if not all_data:
+            return pd.DataFrame()
+        
+        return pd.concat(all_data, ignore_index=True)
+    
+    def fetch_all_data(self, start_date, end_date=None, db=None, delay=0.5) -> pd.DataFrame:
+        """批量获取所有数据：ETF + 基准 + 板块指数"""
         if end_date is None:
             end_date = datetime.now().strftime('%Y-%m-%d')
         
@@ -148,6 +225,11 @@ class DataFetcher:
         bench_df = self.fetch_index_history(BENCHMARK_CODE, start_date, end_date)
         if not bench_df.empty:
             all_data.append(bench_df)
+        
+        # 获取板块指数数据
+        sector_df = self.fetch_all_sectors(start_date, end_date, delay=delay)
+        if not sector_df.empty:
+            all_data.append(sector_df)
         
         if not all_data:
             return pd.DataFrame()
@@ -167,7 +249,7 @@ class DataFetcher:
         else:
             start = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
         
-        return self.fetch_all_etfs(start, today, db=db, delay=0.3)
+        return self.fetch_all_data(start, today, db=db, delay=0.3)
 
 
 # ==================== iFinD桥接函数 ====================
@@ -301,9 +383,12 @@ def merge_data_sources(ifind_df: pd.DataFrame, akshare_df: pd.DataFrame,
 
 # ==================== 便捷函数 ====================
 
-def download_all_data(start_date='2019-06-03', end_date=None, db=None):
+def download_all_data(start_date='2019-06-03', end_date=None, db=None, include_sectors=True):
     """
     通过AKShare下载所有数据并保存到数据库
+    
+    Parameters:
+        include_sectors: 是否同时下载板块指数数据（默认True）
     
     注意: 此函数仅使用AKShare。如需iFinD数据，
           请在Kimi对话中说"用iFinD获取数据"，
@@ -315,18 +400,31 @@ def download_all_data(start_date='2019-06-03', end_date=None, db=None):
     print(f"AKShare数据下载: {start_date} ~ {end_date or '今天'}")
     print(f"="*60)
     
-    df = fetcher.fetch_all_etfs(start_date, end_date, db=db)
+    # 获取ETF+基准数据
+    df = fetcher.fetch_all_data(start_date, end_date, delay=0.5)
     
     if df.empty:
         print("\n⚠️ 下载失败，无数据")
         return pd.DataFrame()
     
+    # 分离ETF/基准数据和板块数据
+    etf_df = df[~df['ticker'].str.startswith('SECTOR_')].copy()
+    sector_df = df[df['ticker'].str.startswith('SECTOR_')].copy()
+    
     # 保存到数据库
     if db is not None:
-        count = db.save_market_data(df)
-        print(f"已保存 {count} 条记录到数据库")
+        if not etf_df.empty:
+            etf_count = db.save_market_data(etf_df)
+            print(f"已保存 {etf_count} 条 ETF/基准 记录到数据库")
+        
+        if not sector_df.empty:
+            sector_count = db.save_sector_data(sector_df)
+            print(f"已保存 {sector_count} 条 板块指数 记录到数据库")
     
-    print(f"\n下载完成: {len(df)} 条记录, {df['ticker'].nunique()} 只标的")
+    print(f"\n下载完成: {len(df)} 条记录")
+    print(f"  - ETF/基准: {len(etf_df)} 条, {etf_df['ticker'].nunique()} 只标的")
+    if not sector_df.empty:
+        print(f"  - 板块指数: {len(sector_df)} 条, {sector_df['ticker'].nunique()} 个板块")
     print(f"日期范围: {df['date'].min().date()} ~ {df['date'].max().date()}")
     
     return df
