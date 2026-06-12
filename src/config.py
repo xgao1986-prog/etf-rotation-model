@@ -6,7 +6,8 @@ A股ETF轮动模型 v1.0 配置文件
 import os
 
 # ==================== 路径配置 ====================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# BASE_DIR 指向项目根目录（config.py 的父目录的父目录）
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, 'database')
 REPORT_DIR = os.path.join(BASE_DIR, 'reports')
 SIGNAL_DIR = os.path.join(BASE_DIR, 'signals')

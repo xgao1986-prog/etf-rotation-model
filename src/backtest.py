@@ -296,19 +296,20 @@ class BacktestEngine:
         trades_df = pd.DataFrame(trade_records)
         num_trades = len(trades_df)
         
-        win_trades = trades_df[trades_df['action'].isin(['SELL', 'STOP_LOSS']) & (trades_df['pnl_pct'] > 0)]
-        lose_trades = trades_df[trades_df['action'].isin(['SELL', 'STOP_LOSS']) & (trades_df['pnl_pct'] <= 0)]
-        
-        win_rate = len(win_trades) / (len(win_trades) + len(lose_trades)) if (len(win_trades) + len(lose_trades)) > 0 else 0
-        
-        avg_win = win_trades['pnl_pct'].mean() if len(win_trades) > 0 else 0
-        avg_loss = lose_trades['pnl_pct'].mean() if len(lose_trades) > 0 else 0
-        
-        # 佣金统计
-        total_commission = trades_df['commission'].sum() if not trades_df.empty else 0
-        
-        # 止损统计
-        stop_loss_trades = trades_df[trades_df['action'] == 'STOP_LOSS']
+        if not trades_df.empty and 'action' in trades_df.columns:
+            win_trades = trades_df[trades_df['action'].isin(['SELL', 'STOP_LOSS']) & (trades_df['pnl_pct'] > 0)]
+            lose_trades = trades_df[trades_df['action'].isin(['SELL', 'STOP_LOSS']) & (trades_df['pnl_pct'] <= 0)]
+            win_rate = len(win_trades) / (len(win_trades) + len(lose_trades)) if (len(win_trades) + len(lose_trades)) > 0 else 0
+            avg_win = win_trades['pnl_pct'].mean() if len(win_trades) > 0 else 0
+            avg_loss = lose_trades['pnl_pct'].mean() if len(lose_trades) > 0 else 0
+            total_commission = trades_df['commission'].sum()
+            stop_loss_count = len(trades_df[trades_df['action'] == 'STOP_LOSS'])
+        else:
+            win_rate = 0
+            avg_win = 0
+            avg_loss = 0
+            total_commission = 0
+            stop_loss_count = 0
         
         result = {
             'nav_df': nav_df,
@@ -324,7 +325,7 @@ class BacktestEngine:
             'avg_win': avg_win,
             'avg_loss': avg_loss,
             'total_commission': total_commission,
-            'stop_loss_count': len(stop_loss_trades),
+            'stop_loss_count': stop_loss_count,
             'avg_holdings': nav_df['num_positions'].mean(),
             'max_holdings': nav_df['num_positions'].max(),
             'params': self.cfg,
