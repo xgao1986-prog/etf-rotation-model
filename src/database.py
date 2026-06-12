@@ -236,7 +236,7 @@ class ETFDatabase:
     # ==================== 评分数据操作 ====================
     
     def save_scores(self, df: pd.DataFrame):
-        """保存评分数据"""
+        """保存评分数据（先删除已有记录，避免唯一约束冲突）"""
         if df.empty:
             return 0
         
@@ -245,18 +245,18 @@ class ETFDatabase:
             df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
         with self._connect() as conn:
-            df.to_sql('daily_scores', conn, if_exists='append', index=False)
-            
-            # 清理重复
             cursor = conn.cursor()
-            cursor.execute('''
-                DELETE FROM daily_scores 
-                WHERE rowid NOT IN (
-                    SELECT MIN(rowid) 
-                    FROM daily_scores 
-                    GROUP BY ticker, date
-                )
-            ''')
+            # 先删除已有的相同(ticker, date)记录
+            dates = df['date'].unique().tolist()
+            tickers = df['ticker'].unique().tolist()
+            placeholders_d = ','.join(['?' for _ in dates])
+            placeholders_t = ','.join(['?' for _ in tickers])
+            cursor.execute(
+                f"DELETE FROM daily_scores WHERE date IN ({placeholders_d}) AND ticker IN ({placeholders_t})",
+                dates + tickers
+            )
+            
+            df.to_sql('daily_scores', conn, if_exists='append', index=False)
             conn.commit()
         
         return len(df)

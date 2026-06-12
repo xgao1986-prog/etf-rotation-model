@@ -126,31 +126,103 @@ def cmd_signal(args):
     """生成最新交易信号"""
     db = ETFDatabase()
     
-    # 确保数据最新
+    # 确保数据最新（如果更新失败，继续使用现有数据）
     latest_db = db.get_latest_date()
     today = datetime.now().strftime('%Y-%m-%d')
     
     if not latest_db or latest_db < today:
-        print("数据不是最新，先执行更新...")
-        update_latest_data(db=db)
+        print("数据不是最新，尝试执行更新...")
+        try:
+            update_latest_data(db=db)
+        except Exception as e:
+            print(f"更新失败（可能数据已存在）: {e}")
+            print("继续使用现有数据生成信号...")
     
-    # 获取最新评分
+    # 加载数据（限定universe为16只ETF）
+    etf_tickers = list(ETF_UNIVERSE.keys())
+    market_df = db.get_market_data(ticker=etf_tickers)
+    bench_df = db.get_market_data(ticker=BENCHMARK)
+    
+    if market_df.empty or bench_df.empty:
+        print("数据库无数据，请先运行: python main.py update --full")
+        return
+    
+    # 计算评分（像回测一样逐只计算）
     engine = StrategyEngine()
-    signals = engine.get_latest_signals(db)
+    all_scores = []
+    for ticker in market_df['ticker'].unique():
+        ticker_df = market_df[market_df['ticker'] == ticker].copy()
+        if len(ticker_df) < 50:
+            continue
+        scored = engine.calculate_total_score(ticker_df)
+        all_scores.append(scored)
     
-    if signals.empty:
-        print("无交易信号")
+    if not all_scores:
+        print("无有效数据")
+        return
+    
+    scores_df = pd.concat(all_scores, ignore_index=True)
+    
+    # 过滤列：只保留daily_scores表存在的列
+    db_score_cols = ['ticker', 'date', 'ma20', 'ma50', 'ma20_slope', 
+                     'above_ma20_days', 'volatility_20', 'momentum_20', 
+                     'volume_ratio', 'trend_score', 'confirm_score', 
+                     'momentum_rank', 'volume_score', 'vol_score', 'total_score']
+    scores_to_save = scores_df[[c for c in db_score_cols if c in scores_df.columns]].copy()
+    
+    # 保存评分到数据库（解决daily_scores=0的问题）
+    saved_scores = db.save_scores(scores_to_save)
+    print(f"评分已保存到数据库: {saved_scores} 条")
+    
+    # 生成信号
+    signals_df = engine.generate_signals(scores_df, bench_df)
+    
+    # 保存信号到数据库（解决trade_signals=0的问题）
+    # 构造trade_signals表需要的格式
+    signal_records = []
+    for _, row in signals_df.iterrows():
+        signal_records.append({
+            'date': row['date'],
+            'ticker': row['ticker'],
+            'name': ETF_UNIVERSE.get(row['ticker'], row['ticker']),
+            'signal_type': row['signal_type'],
+            'close_price': row['close'],
+            'ma20': row['ma20'],
+            'total_score': row['total_score'],
+            'target_weight': 0.0,
+            'actual_weight': 0.0,
+            'reason': f"评分{row['total_score']:.1f}"
+        })
+    
+    if signal_records:
+        signal_df = pd.DataFrame(signal_records)
+        saved_signals = db.save_signals(signal_df)
+        print(f"信号已保存到数据库: {saved_signals} 条")
+    
+    # 获取最新日期的买入信号
+    latest = scores_df['date'].max()
+    latest_signals = signals_df[signals_df['date'] == latest]
+    buy_signals = latest_signals[
+        latest_signals['signal_type'] == 'BUY'
+    ].sort_values('total_score', ascending=False)
+    
+    if buy_signals.empty:
+        print(f"\n{'='*50}")
+        print(f"最新交易信号 ({latest})")
+        print(f"{'='*50}")
+        print("无买入信号（所有ETF评分未达入场阈值）")
+        print(f"{'='*50}")
         return
     
     # 显示信号
     print(f"\n{'='*50}")
-    print(f"最新交易信号 ({signals['date'].iloc[0]})")
+    print(f"最新交易信号 ({latest})")
     print(f"{'='*50}")
     
-    for _, row in signals.iterrows():
+    for _, row in buy_signals.iterrows():
         ticker = row['ticker']
         name = ETF_UNIVERSE.get(ticker, ticker)
-        print(f"🟢 {name} ({ticker})")
+        print(f"[BUY] {name} ({ticker})")
         print(f"   评分: {row['total_score']:.1f}")
         print(f"   趋势: {row['trend_score']:.0f}/30  确认: {row['confirm_score']:.0f}/20")
         print(f"   动量: {row['momentum_rank']:.1f}/25  成交: {row['volume_score']:.0f}/15")
@@ -163,7 +235,7 @@ def cmd_signal(args):
         import os
         
         signal_path = os.path.join(SIGNAL_DIR, f"{today}_signal.csv")
-        signals.to_csv(signal_path, index=False)
+        buy_signals.to_csv(signal_path, index=False)
         print(f"信号已保存: {signal_path}")
 
 
