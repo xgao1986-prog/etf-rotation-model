@@ -24,7 +24,7 @@ for d in [DATA_DIR, REPORT_DIR, SIGNAL_DIR]:
 DB_PATH = os.path.join(DATA_DIR, 'etf_model.db')
 
 # ==================== ETF标的池 ====================
-# 16只行业ETF + 沪深300基准
+# 16只行业ETF + 黄金ETF(防御资产) + 沪深300基准
 ETF_UNIVERSE = {
     '512480.SH': '半导体ETF',
     '515230.SH': '软件ETF',
@@ -42,6 +42,7 @@ ETF_UNIVERSE = {
     '159865.SZ': '养殖ETF',
     '159697.SZ': '油气ETF',
     '159530.SZ': '机器人ETF',
+    '518880.SH': '黄金ETF',  # 防御资产
 }
 
 BENCHMARK = '000300.SH'  # 沪深300
@@ -135,6 +136,29 @@ LOG_CONFIG = {
 # 黄金ETF（低相关性避险资产）
 GOLD_ETF = {
     '518880.SH': '黄金ETF',
+}
+
+# 防御资产池（v1.3 防御模块）
+# 当大盘择时信号低时，强制配置防御资产以降低回撤
+DEFENSE_UNIVERSE = {
+    '518880.SH': '黄金ETF',
+    # 未来可扩展国债ETF: '511010.SH': '国债ETF'
+}
+
+# 防御资产配置比例（按大盘择时信号）
+# 例如: market_signal=0.2 时，防御资产占目标仓位的 50%
+DEFENSE_ALLOCATION = {
+    0.2: 0.50,   # 防御仓位: 50%配防御资产
+    0.5: 0.20,   # 半仓: 20%配防御资产
+    1.0: 0.00,   # 满仓: 不配防御资产
+}
+
+# 防御资产评分参数（简化版，不依赖动量排名）
+DEFENSE_CONFIG = {
+    'defense_enabled': True,        # 是否启用防御模块
+    'defense_mode': 'mandatory',    # 'mandatory'=强制配置, 'optional'=可选
+    'min_defense_trend_score': 10,  # 防御资产趋势最低分（比股票ETF宽松）
+    'min_defense_total_score': 25,  # 防御资产总评分最低分
 }
 
 # 板块指数配置（v1.1 板块动量增强）

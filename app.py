@@ -474,6 +474,23 @@ def make_candlestick(ticker, days=180):
         row=2,
         col=1,
     )
+
+    # 自动检测长假期（非周末的连续缺失交易日 > 3天）
+    market["date"] = pd.to_datetime(market["date"])
+    market["prev_date"] = market["date"].shift(1)
+    market["gap_days"] = (market["date"] - market["prev_date"]).dt.days
+    # 找出大于3天且跨越周末后仍有额外天数的间隙
+    long_gaps = market[market["gap_days"] > 3][["prev_date", "date", "gap_days"]].copy()
+    
+    rangebreaks = [dict(bounds=["sat", "mon"])]  # 移除周末
+    
+    for _, gap in long_gaps.iterrows():
+        start_dt = gap["prev_date"] + pd.Timedelta(days=1)
+        end_dt = gap["date"] - pd.Timedelta(days=1)
+        # 只添加非周末的假期段
+        if start_dt < end_dt:
+            rangebreaks.append(dict(values=[d.strftime("%Y-%m-%d") for d in pd.date_range(start_dt, end_dt) if d.weekday() < 5]))
+
     fig.update_layout(
         height=560,
         hovermode="x unified",
@@ -481,6 +498,11 @@ def make_candlestick(ticker, days=180):
         margin=dict(l=8, r=16, t=20, b=8),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
     )
+    
+    # 应用 rangebreaks 到两个子图的 x 轴
+    fig.update_xaxes(rangebreaks=rangebreaks, row=1, col=1)
+    fig.update_xaxes(rangebreaks=rangebreaks, row=2, col=1)
+    
     return fig
 
 

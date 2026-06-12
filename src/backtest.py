@@ -8,7 +8,7 @@ import numpy as np
 from datetime import datetime
 import json
 
-from config import STRATEGY_CONFIG, ETF_UNIVERSE, BACKTEST_CONFIG
+from config import STRATEGY_CONFIG, ETF_UNIVERSE, DEFENSE_UNIVERSE, DEFENSE_ALLOCATION, BACKTEST_CONFIG
 from strategy import StrategyEngine
 
 
@@ -308,7 +308,7 @@ class BacktestEngine:
                             
                             del portfolio['positions'][ticker]
                 
-                # 2. 买入新标的（考虑仓位控制 + 冷却期）
+                # 2. 买入新标的（考虑仓位控制 + 冷却期 + 防御模块）
                 current_holdings = len(portfolio['positions'])
                 max_new = self.cfg['max_holdings'] - current_holdings
                 
@@ -326,77 +326,138 @@ class BacktestEngine:
                     available_cash = min(portfolio['cash'], target_total_value - (current_value - portfolio['cash']))
                     available_cash = max(available_cash, 0)
                     
-                    # 每只标的的目标仓位
-                    n_buy = min(max_new, len(buy_signals))
-                    if n_buy > 0:
-                        base_weight = min(self.cfg['max_position_per_etf'], 1.0 / n_buy)
+                    # ========== 防御模块（v1.3）==========
+                    # 当大盘择时信号低时，强制配置防御资产（黄金/国债）
+                    defense_tickers = list(DEFENSE_UNIVERSE.keys())
+                    defense_allocation = DEFENSE_ALLOCATION.get(max_total_position, 0.0)
+                    
+                    if defense_allocation > 0 and max_new > 0:
+                        # 从买入信号中过滤防御资产
+                        defense_signals = buy_signals[buy_signals['ticker'].isin(defense_tickers)]
                         
-                        for _, row in buy_signals.head(n_buy).iterrows():
-                            ticker = row['ticker']
+                        if not defense_signals.empty:
+                            # 防御资产目标金额 = 当前净值 × 防御配置比例 × 大盘择时仓位
+                            defense_target = current_value * defense_allocation * max_total_position
+                            defense_target = min(defense_target, available_cash * 0.95)
                             
-                            # 检查冷却期（实验性v1.2）
-                            if ticker in cooling_list:
-                                days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
-                                if days_since_stop < self.cfg.get('cooling_period', 0):
-                                    continue  # 仍在冷却期内，跳过买入
-                            
-                            if ticker in day_prices and ticker not in portfolio['positions']:
-                                price = day_prices[ticker]
+                            if defense_target >= 1000:
+                                # 取评分最高的防御资产
+                                defense_row = defense_signals.iloc[0]
+                                ticker = defense_row['ticker']
                                 
-                                # 冷却期后重新买入需要更高评分（实验性v1.2）
-                                min_score = self.cfg['min_total_score']
+                                if ticker in day_prices and ticker not in portfolio['positions']:
+                                    price = day_prices[ticker]
+                                    
+                                    # 防御资产评分门槛更宽松
+                                    min_defense_score = self.cfg.get('min_total_score', 40) - 10
+                                    if defense_row['total_score'] < min_defense_score:
+                                        pass  # 评分不达标，跳过防御配置
+                                    else:
+                                        shares = int(defense_target / price)
+                                        if shares >= 1:
+                                            cost = shares * price
+                                            commission = calc_commission(cost)
+                                            total_cost = cost + commission
+                                            
+                                            if total_cost <= portfolio['cash']:
+                                                portfolio['cash'] -= total_cost
+                                                available_cash -= total_cost
+                                                max_new -= 1
+                                                
+                                                portfolio['positions'][ticker] = {
+                                                    'shares': shares,
+                                                    'cost': price,
+                                                    'entry_date': date_str,
+                                                    'high_water': price
+                                                }
+                                                
+                                                trade_records.append({
+                                                    'date': date_str,
+                                                    'ticker': ticker,
+                                                    'action': 'BUY',
+                                                    'price': price,
+                                                    'shares': shares,
+                                                    'amount': cost,
+                                                    'commission': commission,
+                                                    'pnl_pct': 0,
+                                                    'reason': f"防御配置({max_total_position:.0%}仓位): 评分{defense_row['total_score']:.1f}"
+                                                })
+                    
+                    # ========== 买入股票ETF ==========
+                    if max_new > 0:
+                        # 过滤掉已买入的防御资产，只买股票ETF
+                        stock_signals = buy_signals[~buy_signals['ticker'].isin(defense_tickers)]
+                        n_buy = min(max_new, len(stock_signals))
+                        
+                        if n_buy > 0:
+                            base_weight = min(self.cfg['max_position_per_etf'], 1.0 / n_buy)
+                            
+                            for _, row in stock_signals.head(n_buy).iterrows():
+                                ticker = row['ticker']
+                                
+                                # 检查冷却期（实验性v1.2）
                                 if ticker in cooling_list:
                                     days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
-                                    if days_since_stop >= self.cfg.get('cooling_period', 0):
-                                        min_score += self.cfg.get('cooling_score_boost', 0)
+                                    if days_since_stop < self.cfg.get('cooling_period', 0):
+                                        continue  # 仍在冷却期内，跳过买入
                                 
-                                # 评分不达标则跳过
-                                if row['total_score'] < min_score:
-                                    continue
-                                
-                                # 目标金额 = 当前净值 × 单只权重 × 大盘择时仓位
-                                target_amount = current_value * base_weight * max_total_position
-                                target_amount = min(target_amount, available_cash * 0.95)
-                                
-                                if target_amount < 1000:
-                                    continue
-                                
-                                shares = int(target_amount / price)
-                                if shares < 1:
-                                    continue
-                                
-                                cost = shares * price
-                                commission = calc_commission(cost)
-                                total_cost = cost + commission
-                                
-                                if total_cost > portfolio['cash']:
-                                    continue
-                                
-                                portfolio['cash'] -= total_cost
-                                available_cash -= total_cost
-                                
-                                portfolio['positions'][ticker] = {
-                                    'shares': shares,
-                                    'cost': price,
-                                    'entry_date': date_str,
-                                    'high_water': price  # 初始化最高价（动态止盈用）
-                                }
-                                
-                                # 从冷却期列表中移除（已重新买入）
-                                if ticker in cooling_list:
-                                    del cooling_list[ticker]
-                                
-                                trade_records.append({
-                                    'date': date_str,
-                                    'ticker': ticker,
-                                    'action': 'BUY',
-                                    'price': price,
-                                    'shares': shares,
-                                    'amount': cost,
-                                    'commission': commission,
-                                    'pnl_pct': 0,
-                                    'reason': f"评分{row['total_score']:.1f}"
-                                })
+                                if ticker in day_prices and ticker not in portfolio['positions']:
+                                    price = day_prices[ticker]
+                                    
+                                    # 冷却期后重新买入需要更高评分（实验性v1.2）
+                                    min_score = self.cfg['min_total_score']
+                                    if ticker in cooling_list:
+                                        days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
+                                        if days_since_stop >= self.cfg.get('cooling_period', 0):
+                                            min_score += self.cfg.get('cooling_score_boost', 0)
+                                    
+                                    # 评分不达标则跳过
+                                    if row['total_score'] < min_score:
+                                        continue
+                                    
+                                    # 目标金额 = 当前净值 × 单只权重 × 大盘择时仓位
+                                    target_amount = current_value * base_weight * max_total_position
+                                    target_amount = min(target_amount, available_cash * 0.95)
+                                    
+                                    if target_amount < 1000:
+                                        continue
+                                    
+                                    shares = int(target_amount / price)
+                                    if shares < 1:
+                                        continue
+                                    
+                                    cost = shares * price
+                                    commission = calc_commission(cost)
+                                    total_cost = cost + commission
+                                    
+                                    if total_cost > portfolio['cash']:
+                                        continue
+                                    
+                                    portfolio['cash'] -= total_cost
+                                    available_cash -= total_cost
+                                    
+                                    portfolio['positions'][ticker] = {
+                                        'shares': shares,
+                                        'cost': price,
+                                        'entry_date': date_str,
+                                        'high_water': price  # 初始化最高价（动态止盈用）
+                                    }
+                                    
+                                    # 从冷却期列表中移除（已重新买入）
+                                    if ticker in cooling_list:
+                                        del cooling_list[ticker]
+                                    
+                                    trade_records.append({
+                                        'date': date_str,
+                                        'ticker': ticker,
+                                        'action': 'BUY',
+                                        'price': price,
+                                        'shares': shares,
+                                        'amount': cost,
+                                        'commission': commission,
+                                        'pnl_pct': 0,
+                                        'reason': f"评分{row['total_score']:.1f}"
+                                    })
             
             # ========== 计算当日净值 ==========
             positions_value = 0
