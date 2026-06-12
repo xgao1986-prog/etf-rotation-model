@@ -123,7 +123,8 @@ STRATEGY_CONFIG = {
     'trailing_stop': None,      # 移动止损线（None=不启用，或设-0.10等）
     'cooling_period': 5,        # 止损后冷却期（交易日）
     'cooling_score_boost': 10,  # 冷却期后重新买入评分门槛提升
-    'rebalance_freq': 'W-FRI',  # 每周五调仓
+    'rebalance_freq': 'W-FRI',  # 每周调仓
+    'rebalance_weekday': 4,     # 调仓日（0=周一, 1=周二, 2=周三, 3=周四, 4=周五）
     
     # 大盘择时
     'market_timing': True,      # 是否启用大盘择时
