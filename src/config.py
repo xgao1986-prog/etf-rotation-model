@@ -19,7 +19,7 @@ for d in [DATA_DIR, REPORT_DIR, SIGNAL_DIR]:
 DB_PATH = os.path.join(DATA_DIR, 'etf_model.db')
 
 # ==================== ETF标的池 ====================
-# 15只行业ETF + 沪深300基准
+# 16只行业ETF + 沪深300基准
 ETF_UNIVERSE = {
     '512480.SH': '半导体ETF',
     '515230.SH': '软件ETF',
@@ -33,9 +33,10 @@ ETF_UNIVERSE = {
     '512660.SH': '军工ETF',
     '512980.SH': '传媒ETF',
     '512400.SH': '有色金属ETF',
-    '516120.SH': '化工ETF',
-    '516960.SH': '基建ETF',
-    '516650.SH': '煤炭ETF',
+    '159996.SZ': '家电ETF',
+    '159865.SZ': '养殖ETF',
+    '159697.SZ': '油气ETF',
+    '159530.SZ': '机器人ETF',
 }
 
 BENCHMARK = '000300.SH'  # 沪深300
