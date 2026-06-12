@@ -20,7 +20,7 @@ class BacktestEngine:
         self.strategy = StrategyEngine(self.cfg)
         self.initial_capital = BACKTEST_CONFIG['initial_capital']
     
-    def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame) -> dict:
+    def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame, sector_df=None) -> dict:
         """
         运行回测
         
@@ -28,17 +28,34 @@ class BacktestEngine:
         1. 逐ETF计算指标和评分（不含动量排名）
         2. 合并所有ETF的scores
         3. 按日期对全universe做momentum_20横截面排名
-        4. 计算total_score
+        4. 计算total_score（含板块增强，如启用）
         5. 生成信号（含大盘择时）
         6. 执行回测
         
         Parameters:
             market_df: 所有ETF的行情数据
             bench_df: 基准（沪深300）行情数据
+            sector_df: 板块指数行情数据（可选，实验性v1.1）
         
         Returns:
             dict with backtest results
         """
+        # 计算板块评分（实验性v1.1）
+        sector_scores_df = None
+        if sector_df is not None and not sector_df.empty and self.cfg.get('sector_boost_enabled', False):
+            print("计算板块指数评分...")
+            sector_scores_list = []
+            for ticker in sector_df['ticker'].unique():
+                sector_ticker_df = sector_df[sector_df['ticker'] == ticker].copy()
+                if len(sector_ticker_df) < 50:
+                    continue
+                sector_scored = self.strategy.calculate_sector_total_score(sector_ticker_df)
+                sector_scores_list.append(sector_scored)
+            
+            if sector_scores_list:
+                sector_scores_df = pd.concat(sector_scores_list, ignore_index=True)
+                print(f"板块评分计算完成: {len(sector_scores_df)} 条记录, {sector_scores_df['ticker'].nunique()} 个板块")
+        
         # 步骤1-2：逐ETF计算指标和评分，合并
         all_scores = []
         for ticker in market_df['ticker'].unique():
@@ -56,14 +73,88 @@ class BacktestEngine:
         # 步骤3：全universe横截面动量排名
         scores_df = self.strategy.rank_all_momentum(scores_df)
         
-        # 步骤4：计算总评分
+        # 步骤4：计算总评分（含板块增强）
         scores_df = self.strategy.compute_total_score(scores_df)
+        
+        # 添加板块动量增强（实验性v1.1）
+        if sector_scores_df is not None:
+            scores_df = self.strategy.calculate_sector_boost(scores_df, sector_scores_df)
+            scores_df['total_score'] = scores_df['total_score'] + scores_df['sector_boost']
         
         # 步骤5：生成信号（含大盘择时合并）
         signals_df = self.strategy.generate_signals(scores_df, bench_df)
         
         # 步骤6：执行回测
         return self._execute_backtest(signals_df, market_df, bench_df)
+    
+    def _check_trailing_stop(self, pnl, drawdown) -> tuple:
+        """检查是否触发动态止盈（实验性v1.2）"""
+        mode = self.cfg.get('trailing_stop_mode', 'none')
+        
+        if mode == 'none':
+            return False, ''
+        
+        if pnl <= 0:
+            return False, ''
+        
+        if mode == 'simple':
+            threshold = self.cfg.get('trailing_stop')
+            if threshold is not None and drawdown < threshold:
+                return True, f'移动止盈(回撤{threshold:.1%})'
+            return False, ''
+        
+        elif mode == 'tiered':
+            tiers = [
+                (self.cfg.get('tier_3_pnl', 0.30), self.cfg.get('tier_3_drawdown', -0.12), '3档'),
+                (self.cfg.get('tier_2_pnl', 0.15), self.cfg.get('tier_2_drawdown', -0.08), '2档'),
+                (self.cfg.get('tier_1_pnl', 0.05), self.cfg.get('tier_1_drawdown', -0.05), '1档'),
+            ]
+            
+            for pnl_threshold, dd_threshold, tier_name in tiers:
+                if pnl >= pnl_threshold and drawdown < dd_threshold:
+                    return True, f'分档止盈({tier_name}, 盈利{pnl:.1%}, 回撤{dd_threshold:.1%})'
+            
+            return False, ''
+        
+        return False, ''
+    
+    def _is_rebalance_day(self, date, last_rebalance_date=None) -> bool:
+        """判断给定日期是否为调仓日（支持weekly/biweekly/monthly）"""
+        dt = pd.to_datetime(date)
+        weekday = dt.weekday()
+        
+        freq = self.cfg.get('rebalance_freq', 'weekly')
+        target_weekday = self.cfg.get('rebalance_weekday', 4)
+        
+        if weekday != target_weekday:
+            return False
+        
+        if freq == 'weekly':
+            return True
+        
+        elif freq == 'biweekly':
+            week_num = dt.isocalendar().week
+            if last_rebalance_date is not None:
+                days_since = (dt - pd.to_datetime(last_rebalance_date)).days
+                return days_since >= 14
+            else:
+                return week_num % 2 == 1
+        
+        elif freq == 'monthly':
+            ordinal = self.cfg.get('rebalance_ordinal', 1)
+            
+            if ordinal == -1:
+                days_to_month_end = (dt + pd.offsets.MonthEnd(0) - dt).days
+                return days_to_month_end < 7
+            else:
+                first_day_of_month = dt.replace(day=1)
+                first_target_weekday = first_day_of_month + pd.Timedelta(
+                    days=(target_weekday - first_day_of_month.weekday()) % 7
+                )
+                nth_target = first_target_weekday + pd.Timedelta(weeks=ordinal-1)
+                return dt.date() == nth_target.date()
+        
+        return True
     
     def _execute_backtest(self, signals_df, market_df, bench_df) -> dict:
         """执行回测逻辑"""
@@ -74,12 +165,16 @@ class BacktestEngine:
         # 初始化
         portfolio = {
             'cash': self.initial_capital,
-            'positions': {},  # {ticker: {'shares': x, 'cost': y, 'entry_date': z, 'high_water': h}}
+            'positions': {},
             'total_value': self.initial_capital,
         }
         
-        nav_records = []  # 净值记录
-        trade_records = []  # 交易记录
+        # 冷却期记录（实验性v1.2）
+        cooling_list = {}
+        
+        nav_records = []
+        trade_records = []
+        last_rebalance_date = None
         
         # 佣金函数
         def calc_commission(amount):
@@ -93,32 +188,54 @@ class BacktestEngine:
             day_signals = signals_df[signals_df['date'] == date].copy()
             day_prices = market_df[market_df['date'] == date].set_index('ticker')['close'].to_dict()
             
-            # 获取大盘择时信号（从signals_df中已合并的market_signal取）
+            # 获取大盘择时信号
             max_total_position = 1.0
             if not day_signals.empty and 'market_signal' in day_signals.columns:
-                # 取当天第一个market_signal（所有ETF在同一天的market_signal相同）
                 max_total_position = day_signals['market_signal'].iloc[0]
             
-            # ========== 每日止损检查（固定止损）==========
+            # ========== 每日止损检查（固定止损 + 动态止盈）==========
             stops = []
             for ticker, pos in list(portfolio['positions'].items()):
                 if ticker in day_prices:
                     current_price = day_prices[ticker]
                     cost = pos.get('cost', current_price)
                     
+                    # 更新最高价（动态止盈用）
+                    high_water = pos.get('high_water', cost)
+                    if current_price > high_water:
+                        high_water = current_price
+                        pos['high_water'] = high_water
+                    
                     # 计算盈亏
                     pnl = (current_price - cost) / cost
+                    drawdown = (current_price - high_water) / high_water
                     
-                    # 固定止损（相对于成本价）
+                    # 层1：固定止损
                     if pnl < self.cfg['stop_loss']:
                         stops.append({
                             'ticker': ticker,
                             'current_price': current_price,
                             'cost': cost,
+                            'high_water': high_water,
                             'pnl': pnl,
+                            'drawdown': drawdown,
                             'entry_date': pos.get('entry_date', date_str),
                             'reason': '固定止损'
                         })
+                    else:
+                        # 层2：动态止盈（实验性v1.2）
+                        triggered, stop_reason = self._check_trailing_stop(pnl, drawdown)
+                        if triggered:
+                            stops.append({
+                                'ticker': ticker,
+                                'current_price': current_price,
+                                'cost': cost,
+                                'high_water': high_water,
+                                'pnl': pnl,
+                                'drawdown': drawdown,
+                                'entry_date': pos.get('entry_date', date_str),
+                                'reason': stop_reason
+                            })
             
             # 执行止损
             for stop in stops:
@@ -142,16 +259,21 @@ class BacktestEngine:
                     'amount': proceeds,
                     'commission': commission,
                     'pnl_pct': stop['pnl'],
-                    'reason': f"固定止损: 成本盈亏{stop['pnl']:.2%}"
+                    'reason': f"{stop['reason']}: 成本盈亏{stop['pnl']:.2%}, 高点回撤{stop['drawdown']:.2%}"
                 })
+                
+                # 记录冷却期（实验性v1.2）
+                cooling_list[ticker] = date
                 
                 del portfolio['positions'][ticker]
             
-            # ========== 调仓日检查 ==========
-            rebalance_weekday = self.cfg.get('rebalance_weekday', 4)  # 0=周一, 4=周五
-            is_rebalance = pd.to_datetime(date).weekday() == rebalance_weekday
+            # ========== 调仓日检查（支持多种频率）==========
+            is_rebalance = self._is_rebalance_day(date, last_rebalance_date)
             
             if is_rebalance:
+                # 记录本次调仓日期
+                last_rebalance_date = date
+                
                 # 1. 卖出不在候选列表的持仓
                 buy_signals = day_signals[day_signals['signal_type'] == 'BUY'].sort_values(
                     'total_score', ascending=False
@@ -186,7 +308,7 @@ class BacktestEngine:
                             
                             del portfolio['positions'][ticker]
                 
-                # 2. 买入新标的（考虑仓位控制）
+                # 2. 买入新标的（考虑仓位控制 + 冷却期）
                 current_holdings = len(portfolio['positions'])
                 max_new = self.cfg['max_holdings'] - current_holdings
                 
@@ -200,7 +322,7 @@ class BacktestEngine:
                     # 根据大盘择时调整总仓位上限
                     target_total_value = current_value * max_total_position
                     
-                    # 计算可用资金（不能超过目标总仓位）
+                    # 计算可用资金
                     available_cash = min(portfolio['cash'], target_total_value - (current_value - portfolio['cash']))
                     available_cash = max(available_cash, 0)
                     
@@ -212,18 +334,31 @@ class BacktestEngine:
                         for _, row in buy_signals.head(n_buy).iterrows():
                             ticker = row['ticker']
                             
+                            # 检查冷却期（实验性v1.2）
+                            if ticker in cooling_list:
+                                days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
+                                if days_since_stop < self.cfg.get('cooling_period', 0):
+                                    continue  # 仍在冷却期内，跳过买入
+                            
                             if ticker in day_prices and ticker not in portfolio['positions']:
                                 price = day_prices[ticker]
                                 
+                                # 冷却期后重新买入需要更高评分（实验性v1.2）
+                                min_score = self.cfg['min_total_score']
+                                if ticker in cooling_list:
+                                    days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
+                                    if days_since_stop >= self.cfg.get('cooling_period', 0):
+                                        min_score += self.cfg.get('cooling_score_boost', 0)
+                                
                                 # 评分不达标则跳过
-                                if row['total_score'] < self.cfg['min_total_score']:
+                                if row['total_score'] < min_score:
                                     continue
                                 
                                 # 目标金额 = 当前净值 × 单只权重 × 大盘择时仓位
                                 target_amount = current_value * base_weight * max_total_position
                                 target_amount = min(target_amount, available_cash * 0.95)
                                 
-                                if target_amount < 1000:  # 最小交易金额
+                                if target_amount < 1000:
                                     continue
                                 
                                 shares = int(target_amount / price)
@@ -244,7 +379,12 @@ class BacktestEngine:
                                     'shares': shares,
                                     'cost': price,
                                     'entry_date': date_str,
+                                    'high_water': price  # 初始化最高价（动态止盈用）
                                 }
+                                
+                                # 从冷却期列表中移除（已重新买入）
+                                if ticker in cooling_list:
+                                    del cooling_list[ticker]
                                 
                                 trade_records.append({
                                     'date': date_str,

@@ -128,3 +128,94 @@ LOG_CONFIG = {
     'file': os.path.join(BASE_DIR, 'etf_strategy.log'),
     'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 }
+
+# ==================== 实验性配置 (v1.1/v1.2) ====================
+# 以下配置仅供实验分支使用，默认不启用
+
+# 黄金ETF（低相关性避险资产）
+GOLD_ETF = {
+    '518880.SH': '黄金ETF',
+}
+
+# 板块指数配置（v1.1 板块动量增强）
+SECTOR_INDEX_UNIVERSE = {
+    '801080': '电子',
+    '801750': '计算机',
+    '801770': '通信',
+    '801150': '医药生物',
+    '801120': '食品饮料',
+    '801730': '电力设备',
+    '801880': '汽车',
+    '801780': '银行',
+    '801790': '非银金融',
+    '801740': '国防军工',
+    '801760': '传媒',
+    '801050': '有色金属',
+    '801110': '家用电器',
+    '801010': '农林牧渔',
+    '801960': '石油石化',
+    '801890': '机械设备',
+}
+
+ETF_TO_SECTOR_MAPPING = {
+    '512480.SH': '801080',
+    '515230.SH': '801750',
+    '515880.SH': '801770',
+    '512010.SH': '801150',
+    '159928.SZ': '801120',
+    '516160.SH': '801730',
+    '516110.SH': '801880',
+    '512800.SH': '801780',
+    '512000.SH': '801790',
+    '512660.SH': '801740',
+    '512980.SH': '801760',
+    '512400.SH': '801050',
+    '159996.SZ': '801110',
+    '159865.SZ': '801010',
+    '159697.SZ': '801960',
+    '159530.SZ': '801890',
+}
+
+SECTOR_CODES = list(SECTOR_INDEX_UNIVERSE.keys())
+
+# 实验性策略参数（默认关闭，需显式启用）
+EXPERIMENTAL_CONFIG = {
+    # 板块动量增强（v1.1）
+    'sector_boost_enabled': False,   # 默认关闭
+    'sector_boost_weight': 15,
+    'sector_momentum_lookback': 20,
+    'sector_ma_short': 20,
+    'sector_top_n_threshold': 3,
+    'sector_above_ma_bonus': 5,
+    'sector_momentum_bonus': 10,
+    
+    # 调仓频率因子（v1.2）
+    'rebalance_freq': 'weekly',
+    'rebalance_ordinal': 1,
+    
+    # 冷静期因子（v1.2）
+    'cooling_period': 5,
+    'cooling_score_boost': 10,
+    
+    # 动态止盈因子（v1.2）
+    'trailing_stop_mode': 'none',    # 默认关闭
+    'trailing_stop': None,
+    'tier_1_pnl': 0.05,
+    'tier_1_drawdown': -0.05,
+    'tier_2_pnl': 0.15,
+    'tier_2_drawdown': -0.08,
+    'tier_3_pnl': 0.30,
+    'tier_3_drawdown': -0.12,
+}
+
+# 合并配置工具（实验分支使用）
+def build_config(strategy_cfg=None, experimental_cfg=None):
+    """合并策略配置和实验性配置"""
+    import copy
+    cfg = copy.deepcopy(STRATEGY_CONFIG)
+    cfg.update(copy.deepcopy(EXPERIMENTAL_CONFIG))
+    if strategy_cfg:
+        cfg.update(strategy_cfg)
+    if experimental_cfg:
+        cfg.update(experimental_cfg)
+    return cfg

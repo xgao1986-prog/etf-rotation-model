@@ -23,12 +23,7 @@ import time
 import warnings
 
 from config import (ETF_UNIVERSE, BENCHMARK, ETF_CODES, BENCHMARK_CODE)
-
-# 实验性功能：板块指数（v1.1+）
-try:
-    from config_experimental import SECTOR_CODES
-except ImportError:
-    SECTOR_CODES = []
+from config import SECTOR_CODES, SECTOR_INDEX_UNIVERSE, ETF_TO_SECTOR_MAPPING
 
 
 class DataFetcher:
