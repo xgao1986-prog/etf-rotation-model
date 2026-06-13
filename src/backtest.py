@@ -16,6 +16,7 @@ from config import STRATEGY_CONFIG, ETF_UNIVERSE, DEFENSE_UNIVERSE, DEFENSE_ALLO
 from strategy import StrategyEngine
 
 
+
 class BacktestEngine:
     """回测引擎"""
     
@@ -116,7 +117,24 @@ class BacktestEngine:
         signals_df = self.strategy.generate_signals(scores_df, bench_df)
         
         # 步骤7：执行回测
-        return self._execute_backtest(signals_df, market_df, bench_df)
+        result = self._execute_backtest(signals_df, market_df, bench_df)
+        
+        # v1.2: 市场状态检测（observer 模式，不改变交易逻辑）
+        if self.cfg.get('market_regime_enabled', True) and 'error' not in result:
+            from market_regime import MarketRegimeDetector
+            detector = MarketRegimeDetector(self.cfg)
+            regime_history = detector.detect_history(bench_df, stock_df)
+            
+            if not regime_history.empty and 'nav_df' in result and not result['nav_df'].empty:
+                # 合并 regime 到 nav_df
+                result['nav_df'] = result['nav_df'].merge(
+                    regime_history[['date', 'regime_id', 'regime_name', 'confidence', 'reason']],
+                    on='date', how='left'
+                )
+                result['regime_history'] = regime_history
+                result['regime_summary'] = detector.get_state_summary(regime_history)
+        
+        return result
     
     def _check_trailing_stop(self, pnl, drawdown) -> tuple:
         """检查是否触发动态止盈（实验性v1.2）"""
