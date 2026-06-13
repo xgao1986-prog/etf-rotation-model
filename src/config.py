@@ -362,9 +362,73 @@ EXPERIMENTAL_CONFIG = {
     'sector_momentum_bonus': 10,
 }
 
-# 合并配置工具（v1.1 使用）
-def build_config(strategy_cfg=None, trading_rules_cfg=None, defense_cfg=None, fallback_equity_cfg=None, backtest_cfg=None):
-    """合并策略配置、交易规则配置、防御配置、宽基补仓配置和回测配置"""
+# ==================== v1.2 市场状态检测模块 ====================
+# v1.2 采用 observer-first 策略：先检测状态，记录展示，不直接改交易参数
+
+MARKET_REGIME_CONFIG = {
+    'enabled': True,               # 是否启用市场状态检测
+    'mode': 'observer',            # 'observer'=只记录展示；'adaptive'=按状态改参数（后续版本）
+    'confirmation_days': 5,        # 状态切换确认天数（避免噪声）
+    'ma_short': 20,              # 短期均线（与策略一致）
+    'ma_long': 50,               # 长期均线（与策略一致）
+    
+    # 状态阈值
+    'trend_position_threshold_strong': 1.02,   # 强牛：close > MA50 × 1.02
+    'trend_position_threshold_weak': 0.98,     # 震荡下限：close > MA50 × 0.98
+    'vol_low_threshold': 0.015,                # 低波动率阈值
+    'vol_high_threshold': 0.025,               # 高波动率阈值
+    'slope_accel_threshold': 1.0,              # 斜率加速阈值
+    
+    # 状态参数映射（v1.2 只做离线模拟，不默认启用）
+    # 后续版本可切换 mode='adaptive' 使用以下映射
+    'states': {
+        1: {  # 强牛
+            'min_total_score': 35,
+            'defense_fill_max_ratio_bull': 0.0,
+            'max_position_per_etf': 0.20,
+            'stop_loss': -0.10,
+            'trailing_stop_mode': 'standard',
+            'fallback_equity_enabled': True,
+            'fallback_equity_min_score': 35,
+            'cooling_period_days': 3,
+        },
+        2: {  # 弱牛
+            'min_total_score': 35,
+            'defense_fill_max_ratio_bull': 0.15,
+            'max_position_per_etf': 0.18,
+            'stop_loss': -0.08,
+            'trailing_stop_mode': 'tiered',
+            'fallback_equity_enabled': True,
+            'fallback_equity_min_score': 35,
+            'cooling_period_days': 5,
+        },
+        3: {  # 震荡
+            'min_total_score': 40,
+            'defense_fill_max_ratio_bull': 0.30,
+            'max_position_per_etf': 0.15,
+            'stop_loss': -0.08,
+            'trailing_stop_mode': 'tiered',
+            'fallback_equity_enabled': False,
+            'fallback_equity_min_score': 25,
+            'cooling_period_days': 5,
+        },
+        4: {  # 熊市
+            'min_total_score': 45,
+            'defense_fill_max_ratio_bull': 0.50,
+            'max_position_per_etf': 0.12,
+            'stop_loss': -0.12,
+            'trailing_stop_mode': 'standard',
+            'fallback_equity_enabled': False,
+            'fallback_equity_min_score': 25,
+            'cooling_period_days': 7,
+        },
+    },
+}
+
+# 合并配置工具（v1.1 使用，v1.2 扩展）
+def build_config(strategy_cfg=None, trading_rules_cfg=None, defense_cfg=None,
+                 fallback_equity_cfg=None, backtest_cfg=None, market_regime_cfg=None):
+    """合并策略配置、交易规则配置、防御配置、宽基补仓配置、回测配置和市场状态配置"""
     import copy
     cfg = copy.deepcopy(STRATEGY_CONFIG)
     cfg.update(copy.deepcopy(BACKTEST_CONFIG))
@@ -372,6 +436,7 @@ def build_config(strategy_cfg=None, trading_rules_cfg=None, defense_cfg=None, fa
     cfg.update(copy.deepcopy(DEFENSE_CONFIG))
     cfg.update(copy.deepcopy(FALLBACK_EQUITY_CONFIG))
     cfg.update(copy.deepcopy(EXPERIMENTAL_CONFIG))
+    cfg.update(copy.deepcopy(MARKET_REGIME_CONFIG))
     if strategy_cfg:
         cfg.update(strategy_cfg)
     if trading_rules_cfg:
@@ -382,4 +447,6 @@ def build_config(strategy_cfg=None, trading_rules_cfg=None, defense_cfg=None, fa
         cfg.update(fallback_equity_cfg)
     if backtest_cfg:
         cfg.update(backtest_cfg)
+    if market_regime_cfg:
+        cfg.update(market_regime_cfg)
     return cfg
