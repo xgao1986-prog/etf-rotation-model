@@ -90,6 +90,17 @@ def cmd_backtest(args):
     print(f"最大持仓:    {result['max_holdings']} 只")
     print(f"{'='*50}")
     
+    # v1.2: 显示市场状态分布（observer 模式）
+    if 'regime_summary' in result:
+        summary = result['regime_summary']
+        print(f"\n{'='*50}")
+        print(f"市场状态分布 (v1.2 observer)")
+        print(f"{'='*50}")
+        for state_id, info in summary['state_distribution'].items():
+            print(f"  {info['name']}: {info['days']}天 ({info['percentage']:.1%})  置信度:{info['avg_confidence']:.1%}")
+        print(f"  状态切换: {summary['switch_count']} 次")
+        print(f"{'='*50}")
+    
     # 保存结果
     if args.save:
         from config import REPORT_DIR
@@ -264,14 +275,36 @@ def cmd_signal(args):
     
     # 获取最新日期的买入信号
     latest = scores_df['date'].max()
+    
+    # v1.2: 检测当前市场状态
+    from market_regime import MarketRegimeDetector
+    from config import build_config
+    regime_cfg = build_config()
+    detector = MarketRegimeDetector(regime_cfg)
+    stock_df = market_df[market_df['ticker'].isin(ETF_UNIVERSE.keys())].copy()
+    regime = detector.detect(bench_df, stock_df)
+    
     latest_signals = signals_df[signals_df['date'] == latest]
     buy_signals = latest_signals[
         latest_signals['signal_type'] == 'BUY'
     ].sort_values('total_score', ascending=False)
     
+    # 显示市场状态（在信号之前）
+    print(f"\n{'='*50}")
+    print(f"市场状态 ({latest.strftime('%Y-%m-%d')})")
+    print(f"{'='*50}")
+    print(f"  状态: {regime['regime_name']} (ID={regime['regime_id']})")
+    print(f"  置信度: {regime['confidence']:.1%}")
+    print(f"  原因: {regime['reason']}")
+    print(f"  趋势位置: {regime['trend_position']:.3f}")
+    print(f"  波动率: {regime['vol_20']:.2%} ({regime['vol_regime']})")
+    if not pd.isna(regime['market_breadth']):
+        print(f"  市场宽度: {regime['market_breadth']:.1%}")
+    print(f"{'='*50}")
+    
     if buy_signals.empty:
         print(f"\n{'='*50}")
-        print(f"最新交易信号 ({latest})")
+        print(f"最新交易信号 ({latest.strftime('%Y-%m-%d')})")
         print(f"{'='*50}")
         print("无买入信号（所有ETF评分未达入场阈值）")
         print(f"{'='*50}")
@@ -279,7 +312,7 @@ def cmd_signal(args):
     
     # 显示信号（按资产类型分组）
     print(f"\n{'='*50}")
-    print(f"最新交易信号 ({latest})")
+    print(f"最新交易信号 ({latest.strftime('%Y-%m-%d')})")
     print(f"{'='*50}")
     
     # 行业ETF
@@ -344,6 +377,33 @@ def cmd_status(args):
     print(f"最早日期:   {stats.get('earliest_date', 'N/A')}")
     print(f"最新日期:   {stats.get('latest_date', 'N/A')}")
     print(f"{'='*50}")
+    
+    # v1.2: 显示当前市场状态
+    latest_date = stats.get('latest_date')
+    if latest_date:
+        from market_regime import MarketRegimeDetector
+        from config import build_config, ALL_TRADABLE_ETFS, ETF_UNIVERSE
+        
+        regime_cfg = build_config()
+        detector = MarketRegimeDetector(regime_cfg)
+        
+        bench_df = db.get_market_data(ticker=BENCHMARK)
+        market_df = db.get_market_data(ticker=list(ALL_TRADABLE_ETFS.keys()))
+        stock_df = market_df[market_df['ticker'].isin(ETF_UNIVERSE.keys())].copy()
+        
+        if not bench_df.empty:
+            regime = detector.detect(bench_df, stock_df)
+            print(f"\n{'='*50}")
+            print(f"市场状态 (v1.2)")
+            print(f"{'='*50}")
+            print(f"  状态: {regime['regime_name']} (ID={regime['regime_id']})")
+            print(f"  置信度: {regime['confidence']:.1%}")
+            print(f"  原因: {regime['reason']}")
+            print(f"  趋势位置: {regime['trend_position']:.3f}")
+            print(f"  波动率: {regime['vol_20']:.2%} ({regime['vol_regime']})")
+            if not pd.isna(regime['market_breadth']):
+                print(f"  市场宽度: {regime['market_breadth']:.1%}")
+            print(f"{'='*50}")
     
     # 显示最近日志
     logs = db.get_logs(limit=5)
