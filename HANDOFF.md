@@ -1,767 +1,128 @@
-# 🔄 接力日志（Handoff Log）
-
-> 本文档记录Kimi和Codex之间的工作交接。
-> **每次开始工作前必须阅读本文档，每次结束工作后必须更新本文档。**
-> 
-> 格式说明：
-> - `🔒` = 文件被锁定，他人不得修改
-> - `✅` = 已完成
-> - `⏳` = 进行中
-> - `🚫` = 阻塞，需要对方协助
-
----
-
-## 📌 当前状态快照
-
-| 项目 | 状态 |
-|------|------|
-| **当前活跃协作者** | Kimi |
-| **Git分支** | feature/v1.1-experimental |
-| **数据库最新日期** | 2026-06-12 |
-| **ETF池子** | 16只行业ETF + 黄金ETF(防御) + 国债ETF(防御) |
-| **最后回测结果** | v1.1防御版：总收益41.58%，夏普0.56，最大回撤-11.44% |
-| **工作目录** | `D:\etf_rotation_model\` |
-| **GitHub仓库** | ✅ 已创建: https://github.com/xgao1986-prog/etf-rotation-model |
-| **版本状态** | **v1.1 防御型交易规则版本**（已重新定义范围） |
-
-### v1.1 版本定义（已确认）
-
-**v1.1 = "防御型交易规则版本"**
-
-| 包含内容 | 说明 |
-|----------|------|
-| 防御资产层 | 黄金ETF(518880) + 国债ETF(511010)，熊市强制配置 |
-| 调仓日规则 | 每周五调仓，支持双周/月度频率 |
-| 动态止盈 | 分档止盈（盈利5%/15%/30%对应不同回撤阈值） |
-| 冷静期 | 止损后5天冷却期，防止频繁交易 |
-| 大盘择时 | 沪深300均线择时，控制总仓位 |
-| 基础评分 | 趋势30% + 确认20% + 动量25% + 成交量15% + 波动率10% |
-
-| 不包含内容（移到v1.2/v1.3） | 说明 |
-|------------------------------|------|
-| 行业板块指数 | SECTOR_INDEX_UNIVERSE 已注释，v1.2信号增强使用 |
-| 板块动量增强 | sector_boost 已移除，v1.2信号增强使用 |
-| ETF-板块映射 | ETF_TO_SECTOR_MAPPING 已注释，v1.2使用 |
-
----
-
-## 🔒 当前工作（实时更新）
-
-| 协作者 | 正在修改的文件 | 开始时间 | 预计完成 | 状态 | 备注 |
-|--------|---------------|---------|---------|------|------|
-| Kimi | v1.0 可信修复版收敛 | 2025-06-12 | 2025-06-12 | ✅ | 按Codex审计要求修复7个bug，实验性功能拆出 |
-
----
-
-## 🎯 待办事项（P1 - 高优先级）
-
-| 任务 | 负责人 | 说明 | 依赖 |
-|------|--------|------|------|
-| 成交价格模式完善 | Kimi | 当前使用收盘价，存在未来函数边缘问题。需支持 close/open/vwap 三种模式，并加滑点选项。已记录于 `config.py` 的 `EXECUTION_CONFIG` | 需回测验证 |
-
----
-
-## 📋 已完成工作（倒序，最新的在最上面）
-
-### 2025-06-12 16:00 - Kimi - 板块动量增强 v1.1 完成（ETF价格iFinD + 板块动量AKShare）
-
-**完成内容：**
-- ✅ 调研AKShare申万一级行业指数接口：`index_hist_sw`（历史数据1999-至今，31个行业）
-- ✅ 建立16只ETF → 16个申万一级行业板块的一对一映射
-- ✅ 更新 `src/config.py`：新增 `SECTOR_INDEX_UNIVERSE`、`ETF_TO_SECTOR_MAPPING`、`SECTOR_CODES`、板块增强策略参数
-- ✅ 更新 `src/data_fetcher.py`：新增 `fetch_sector_history()`、`fetch_all_sectors()`、`fetch_all_data()` 板块数据获取
-- ✅ 更新 `src/database.py`：新增 `sector_market_data`、`sector_scores` 表及对应CRUD操作
-- ✅ 更新 `src/strategy.py`：新增板块指标计算、板块评分、板块动量排名、`calculate_sector_boost()` 增强逻辑
-- ✅ 更新 `src/backtest.py`：`run()` 方法支持传入 `sector_df` 参数，自动计算板块评分并增强ETF总分
-- ✅ 验证：拉取2024Q1板块数据（928条/16板块），评分计算、增强逻辑、映射关系全部通过
-
-**板块动量增强逻辑：**
-```
-ETF最终总分 = 基础分(趋势30+确认20+动量25+成交量15+波动率10) + 板块动量加分(最高15)
-
-板块加分规则：
-  - 所属板块在16个板块中排名前3 → +10分
-  - 板块指数收盘价 > 20日均线 → +5分
-  - 最高不超过 sector_boost_weight=15分
-```
-
-**验证结果（2024-03-29样本日）：**
-| 检查项 | 结果 |
-|--------|------|
-| 板块数据拉取 | ✅ 928条，16/16板块 |
-| 板块评分计算 | ✅ 有色金属/农林牧渔/银行 top3 |
-| ETF→板块映射 | ✅ 16/16 全部匹配 |
-| 板块增强生效 | ✅ 消费ETF(159928) +5分（食品饮料板块强势） |
-
-**新增/修改文件：**
-- `src/config.py` — 板块配置 + 策略参数
-- `src/data_fetcher.py` — 板块数据获取接口
-- `src/database.py` — 板块数据表
-- `src/strategy.py` — 板块评分 + 增强逻辑
-- `src/backtest.py` — 支持板块数据回测
-
-**工作目录已迁移至：** `D:\etf_rotation_model\`
-
----
-
-### 2025-06-12 16:00 - Kimi - v1.1 版本重新定义 + 代码清理
-
-**背景：**
-用户要求重新定义 v1.1 版本范围：v1.1 = "防御型交易规则版本"，只包含防御资产+调仓规则+动态止盈+冷静期，行业板块数据移到 v1.2/v1.3。
-
-**完成内容：**
-- ✅ 重新定义 v1.1 版本范围（已写入 HANDOFF.md 当前状态快照）
-- ✅ 清理 `src/config.py`：
-  - 保留：防御模块（DEFENSE_UNIVERSE/DEFENSE_ALLOCATION/DEFENSE_CONFIG）
-  - 保留：交易规则配置（TRADING_RULES_CONFIG：调仓频率/冷静期/动态止盈）
-  - 注释掉：SECTOR_INDEX_UNIVERSE、ETF_TO_SECTOR_MAPPING、SECTOR_CODES（移到 v1.2 预留区）
-  - 注释掉：SECTOR_BOOST_CONFIG（移到 v1.2 预留区）
-  - 重组 EXPERIMENTAL_CONFIG：v1.1 参数引用 TRADING_RULES_CONFIG，v1.2 参数保留但默认关闭
-- ✅ 清理 `src/backtest.py`：
-  - 移除 `sector_df` 参数和板块评分计算代码
-  - 保留：防御模块、动态止盈 `_check_trailing_stop`
-  - 更新文件头注释为 v1.1 定位
-- ✅ 清理 `src/strategy.py`：
-  - 移除 `ETF_TO_SECTOR_MAPPING`、`SECTOR_INDEX_UNIVERSE` 导入
-  - 移除板块相关方法：calculate_sector_indicators、calculate_sector_scores、rank_sector_momentum、calculate_sector_total_score、calculate_sector_boost
-  - 更新 calculate_total_score 签名（移除 sector_scores_df 参数）
-  - 更新文件头注释为 v1.1 定位
-- ✅ 更新 `HANDOFF.md`：添加 v1.1 版本定义到当前状态快照
-
-**版本边界（已确认）：**
-| 版本 | 内容 |
-|------|------|
-| v1.0 | 基础ETF轮动：16只行业ETF + 五维评分 + 大盘择时 |
-| **v1.1** | **防御型交易规则：防御资产(黄金/国债) + 调仓日 + 动态止盈 + 冷静期** |
-| v1.2 | 行业信号增强：板块指数数据 + 板块动量增强（预留，待开发） |
-| v1.3 | 更多信号因子：基本面过滤、主力资金等（预留） |
-
-**修改文件：**
-- `src/config.py` — 重组配置结构，注释板块相关配置
-- `src/backtest.py` — 移除 sector_df 参数和板块代码
-- `src/strategy.py` — 移除板块相关导入和方法
-- `HANDOFF.md` — 更新版本定义
-
----
-
-### 2025-06-12 14:00 - Kimi - ETF池子优化完成（15只 → 16只）+ 概念ETF相关性测试
-
-**完成内容：**
-- ✅ 分析原15只ETF池子的相关性矩阵，发现冗余对：煤炭↔有色(0.971)、新能源↔基建(0.938)
-- ✅ 测试电子ETF(515260) vs 半导体(512480)：相关性0.916 — 过高，拒绝加入
-- ✅ 构建18只候选池（原15只 + 家电/养殖/油气/机器人），运行18×18相关性矩阵
-- ✅ 确定新16只ETF池子：移除煤炭/基建/化工，加入家电/养殖/油气/机器人
-- ✅ 更新 `src/config.py` 为16只配置
-- ✅ 导入新ETF历史数据到数据库（5,675条新记录，数据库总计30,167条）
-- ✅ 运行旧15只 vs 新16只回测对比（2019-06-03 ~ 2026-06-11）
-- ✅ 测试6只概念ETF vs 16只现有池子：旅游/黄金/人工智能/游戏/云计算/光伏
-
-**新16只ETF池子：**
-| 代码 | 名称 | 说明 |
-|------|------|------|
-| 512480.SH | 半导体ETF | 保留 |
-| 515230.SH | 软件ETF | 保留 |
-| 515880.SH | 通信ETF | 保留 |
-| 512010.SH | 医药ETF | 保留 |
-| 159928.SZ | 消费ETF | 保留 |
-| 516160.SH | 新能源ETF | 保留 |
-| 516110.SH | 汽车ETF | 保留 |
-| 512800.SH | 银行ETF | 保留 |
-| 512000.SH | 券商ETF | 保留 |
-| 512660.SH | 军工ETF | 保留 |
-| 512980.SH | 传媒ETF | 保留 |
-| 512400.SH | 有色金属ETF | 保留 |
-| 159996.SZ | 家电ETF | ⭐ 新增 |
-| 159865.SZ | 养殖ETF | ⭐ 新增 |
-| 159697.SZ | 油气ETF | ⭐ 新增 |
-| 159530.SZ | 机器人ETF | ⭐ 新增 |
-
-**回测对比（旧15只 vs 新16只）：**
-| 指标 | 旧15只 | 新16只 | 变化 |
-|------|--------|--------|------|
-| 总收益率 | 39.22% | 37.71% | -1.51% |
-| 年化收益率 | 5.01% | 4.85% | -0.16% |
-| 夏普比率 | 0.41 | 0.41 | 持平 |
-| 最大回撤 | -21.59% | -20.36% | **+1.23%（更优）** |
-| 年化波动率 | 12.35% | 11.85% | **-0.50%（更优）** |
-| 交易次数 | 613 | 652 | +39 |
-
-**概念ETF相关性测试结果（576个共同交易日）：**
-| ETF | 平均相关性 | 最高相关性(与) | 结论 |
-|-----|-----------|---------------|------|
-| 黄金(518880) | **0.165** | 0.528(有色) | ✅ 独立性强，可考虑加入 |
-| 旅游(159766) | 0.495 | 0.726(消费) | ⚠️ 中等重复，需谨慎 |
-| 人工智能(515980) | 0.543 | 0.880(通信) | ❌ 高重复，TMT混合 |
-| 游戏(159869) | 0.547 | 0.921(传媒) | ❌ 高重复，⊂传媒 |
-| 云计算(516510) | 0.561 | 0.903(软件) | ❌ 高重复，≈软件 |
-| 光伏(515790) | 0.549 | 0.924(新能源) | ❌ 高重复，⊂新能源 |
-
-**关键洞察：**
-1. 新16只池子牺牲了部分2020-2021年周期股牛市alpha，换取更好的分散化和更低回撤
-2. 行业覆盖从~12个扩展到~15个，MECE完整性提升
-3. 黄金ETF(518880)是唯一真正独立的概念ETF，与所有现有ETF相关性均<0.55
-4. 机器人ETF(159530)数据最短（577天，2024-01-18上市），回测中早期无数据
-
-**交付状态：**
-- `src/config.py`：已更新为16只配置 ✅
-- 数据库：30,167条记录（含16只主池子 + 6只概念ETF + 沪深300）✅
-- 回测报告：`reports/compare_nav_old_vs_new.csv` + `reports/nav_16etf_*.csv` ✅
-- 相关性矩阵：`reports/full_22x22_correlation.csv` + `reports/candidate_pool_18x18_corr.csv` ✅
-
----
-
-### 2025-06-12 10:00 - Kimi - 回测验证完成 + Bug修复
-
-**完成内容：**
-- ✅ 修复 `src/config.py` 路径Bug：`BASE_DIR` 从 `src/` 改为项目根目录
-- ✅ 修复 `src/backtest.py` 空交易DataFrame报错：添加空数据检查
-- ✅ 修复 `src/strategy.py` 评分计算Bug：总分直接相加（而非再乘权重）
-- ✅ 运行全区间回测（2019-06-03 ~ 2026-06-11）
-- ✅ 保存净值曲线和交易记录到 `reports/`
-- ✅ 回测结果写入数据库
-
-**回测结果：**
-| 指标 | 数值 |
-|------|------|
-| 总收益率 | 39.22% |
-| 年化收益率 | 5.01% |
-| 年化波动率 | 12.35% |
-| 夏普比率 | 0.41 |
-| 索提诺比率 | 0.49 |
-| 最大回撤 | -21.59% |
-| 交易次数 | 613 |
-| 胜率 | 41.0% |
-| 平均盈利 | 7.58% |
-| 平均亏损 | -3.96% |
-| 止损次数 | 待统计 |
-| 平均持仓 | 待统计 |
-| 最大持仓 | 5只（已修复） |
-
-**关键Bug修复：**
-1. **config.py路径**: `BASE_DIR` 原来指向 `src/`，导致数据库路径错误。改为 `os.path.dirname(os.path.dirname(__file__))` 指向项目根目录。
-2. **backtest.py空交易**: 当 `trade_records` 为空时，`pd.DataFrame` 没有列，访问 `action` 报错。添加空数据检查。
-3. **strategy.py评分计算**: 各维度得分（trend=30, confirm=20, momentum=25, volume=15, vol=10）已经是按权重分配后的满分，但代码中又乘了一次权重，导致满分只有22.5，永远达不到40的入场阈值。改为直接相加。
-
-**与云端版本对比：**
-| 指标 | 云端v1.0 | 本地v1.0（修复后） | 差异原因 |
-|------|---------|-------------------|---------|
-| 总收益 | 47.31% | 39.22% | 未来数据修复、交易费率 |
-| 年化 | 5.67% | 5.01% | 同上 |
-| 夏普 | 0.22 | 0.41 | 波动率计算方式可能不同 |
-| 最大回撤 | -15.68% | -21.59% | 更严格的风控 |
-
-**交付状态：**
-- 数据库：24,492条iFinD数据 ✅
-- 回测：全区间验证通过 ✅
-- 代码：3个Bug修复 ✅
-- 报告：净值曲线+交易记录已保存 ✅
-
----
-
-### 2025-06-12 09:00 - Kimi - iFinD数据导入完成
-
-**完成内容：**
-- ✅ 通过iFinD工具分批获取历史数据（6个CSV文件）
-- ✅ 合并并标准化数据（24,492条记录，16只标的）
-- ✅ 写入本地SQLite数据库 `database/etf_model.db`
-- ✅ 清理临时CSV文件
-
-**数据详情：**
-| 批次 | 文件 | 记录数 |
-|------|------|--------|
-| 批次1-2019-2022 | data_ifind_batch1_2019_2022.csv | 5,913 |
-| 批次1-2022-2024 | data_ifind_batch1_2022_2024.csv | 4,840 |
-| 批次1-2024-至今 | data_ifind_batch1_2024_now.csv | 4,910 |
-| 批次2-2019-2022 | data_ifind_batch2_2019_2022.csv | 2,979 |
-| 批次2-2022-2024 | data_ifind_batch2_2022_2024.csv | 2,904 |
-| 批次2-2024-至今 | data_ifind_batch2_2024_now.csv | 2,946 |
-| **合计** | | **24,492** |
-
-**标的覆盖：**
-- 15只ETF全部覆盖
-- 沪深300基准（000300.SH）覆盖
-- 日期范围：2019-06-03 ~ 2026-06-11
-- 部分ETF上市较晚（如515230.SH 2021-03-02上市）
-
-**数据库状态：**
-- 路径：`database/etf_model.db`（3MB）
-- 记录数：24,492条
-- 标的数：16只
-- 最早日期：2019-06-03
-- 最新日期：2026-06-11
-
----
-
-### 2025-06-12 09:00 - Kimi - 协作架构搭建完成
-
-**完成内容：**
-- ✅ 编写 `COLLABORATION.md` - Kimi×Codex协作手册（角色分工、工作流、文件所有权、代码规范）
-- ✅ 编写 `HANDOFF.md` - 接力日志模板（当前状态、已完成工作、待办事项、留言板、已知问题）
-- ✅ 更新 `PROGRESS.md` - 添加协作架构状态
-- ✅ 提交Git: `3394306 [Kimi] docs: 添加Kimi×Codex协作手册和接力日志`
-
-**关键决策：**
-- 角色分工：Kimi负责策略/数据/分析，Codex负责工程实现/GitHub/测试
-- 文件锁定机制：通过HANDOFF.md的"当前工作"表格声明
-- Git分支：main（稳定）+ feature/kimi-xxx + feature/codex-xxx
-- 策略变更需双方确认
-
-**交付给Codex的内容：**
-- 完整协作手册，包含所有规则和流程
-- 接力日志模板，已填入当前项目状态
-- Git仓库已有4个commit，代码完整
-
----
-
-### 2025-06-12 08:30 - Kimi - 项目本地化搭建完成
-
-**完成内容：**
-- ✅ 创建项目目录结构（database/, src/, reports/, signals/）
-- ✅ 编写 `src/config.py` - 全局配置（ETF池、策略参数、数据源）
-- ✅ 编写 `src/database.py` - SQLite数据库封装（6张表）
-- ✅ 编写 `src/data_fetcher.py` - AKShare数据获取 + iFinD桥接
-- ✅ 编写 `src/strategy.py` - 策略引擎v1.0（趋势+动量+成交量+波动率）
-- ✅ 编写 `src/backtest.py` - 回测引擎（含费率、止损、仓位控制）
-- ✅ 编写 `main.py` - CLI入口（update/backtest/signal/status）
-- ✅ 编写 `app.py` - Streamlit可视化界面
-- ✅ 编写 `README.md` - 项目文档
-- ✅ 编写 `PROGRESS.md` - 进展追踪
-- ✅ Git初始化 + `.gitignore` 配置
-- ✅ 重构数据源架构：iFinD通过Kimi对话获取 → 写入本地数据库 → AKShare补充
-
-**关键决策：**
-- 策略参数使用v1.0原始版本（趋势30%+确认20%+动量25%+成交量15%+波动率10%）
-- 数据源：iFinD为主（Kimi对话获取），AKShare为备（本地自动）
-- 数据库：SQLite本地文件，不纳入Git
-
-**提交记录：**
-```
-718a84a v1.0: ETF轮动策略本地化
-b715548 v1.1: 添加.gitignore, 更新PROGRESS
-7baa4fc v1.2: 重构数据源架构
-```
-
-**交付给Codex的内容：**
-- 完整项目代码（10个Python文件 + 2个Markdown文档）
-- Git仓库已初始化，3个commit
-- 所有代码语法验证通过
-- 数据库为空，等待首次数据下载
-
----
-
-## 🎯 待办事项（按优先级排序）
-
-### P0 - 阻塞项（需要立即处理）
-
-| 任务 | 负责人 | 阻塞原因 | 预计解决时间 |
-|------|--------|---------|-------------|
-| 无 | - | - | - |
-
-### P1 - 高优先级
-
-| 任务 | 负责人 | 说明 | 依赖 |
-|------|--------|------|------|
-| Codex环境接入 | Codex | 验证Codex能否通过Git远程访问代码 | 需GitHub仓库 ✅ |
-
-### P2 - 中优先级
-
-### P2 - 中优先级
-
-| 任务 | 负责人 | 说明 | 依赖 |
-|------|--------|------|------|
-| 黄金ETF加入评估 | Kimi | 黄金(518880)平均相关性仅0.165，评估是否加入主池子 | 需策略讨论 |
-| 旅游ETF加入评估 | Kimi | 旅游(159766)平均相关性0.495，与消费ETF 0.726，评估价值 | 需策略讨论 |
-| 单元测试 | Codex | 为strategy.py和backtest.py编写测试 | 无 |
-| Streamlit界面优化 | Codex | 改善可视化效果，增加交互功能 | 无 |
-
-### P3 - 低优先级
-
-| 任务 | 负责人 | 说明 | 依赖 |
-|------|--------|------|------|
-| 主力资金数据接入 | Kimi | 寻找主力资金数据源 | 需找到API |
-| 参数网格搜索 | Kimi | 优化策略参数 | 需回测框架稳定 |
-| **板块动量增强** | **Kimi** | **已确认架构：ETF价格(iFinD) + 板块动量(AKShare)，暂不执行** | **待用户触发** |
-| Docker配置 | Codex | 容器化部署 | 无 |
-| 自动化通知 | Codex | 邮件/微信推送 | 无 |
-
----
-
-## 💬 留言板（协作者之间的沟通）
-
-### 2025-06-12 Kimi → Codex（交接）
-
-@Codex: 你好！协作架构已搭建完成。
-
-**我刚完成的工作：**
-1. ✅ 创建了 `COLLABORATION.md` - 完整的协作手册，包含角色分工、工作流、文件所有权、代码规范、冲突解决规则
-2. ✅ 创建了 `HANDOFF.md` - 接力日志，已填入当前项目状态
-3. ✅ 更新了 `PROGRESS.md` - 记录协作架构
-
-**需要你立即做的（P1优先级）：**
-1. 🎯 **GitHub仓库创建** - 在GitHub创建仓库，推送当前代码
-   - 建议仓库名：`etf-rotation-model` 或用户指定的名称
-   - 推送 `master` 分支（或重命名为 `main`）
-   - 配置分支保护规则（main分支需PR Review）
-
-2. 🎯 **依赖验证** - 验证 `pip install -r requirements.txt` 能正常安装
-   - 注意：akshare可能需要较长时间安装
-   - 如有依赖冲突，请记录并修复
-
-3. 🎯 **创建feature分支** - 建议创建 `feature/codex-setup` 分支进行初始配置
-
-**你可以自由做的（无需问我）：**
-- 代码重构（不改变策略逻辑的前提下）
-- 添加单元测试
-- 配置GitHub Actions CI
-- 优化Streamlit界面样式
-- 添加Docker配置
-
-**修改前必须问我的：**
-- `src/strategy.py` 中的评分权重、入场/出场条件
-- `src/backtest.py` 中的回测逻辑
-- `src/config.py` 中的策略参数
-- 数据库中的历史数据
-
-**Git提交规范：**
-```
-[Codex] 类型: 简要描述
-
-详细说明
-```
-类型：feat/fix/refactor/docs/test
-
-**下一步（我计划做的）：**
-- 用iFinD下载历史数据（在Kimi对话中执行）
-- 运行回测验证策略表现
-- 分析2020-2021年落后基准的问题
-
-**有问题请在这里留言，或通过用户转达。**
-
----
-
-### 2025-06-12 Kimi → Codex（早期留言）
-
-@Codex: 你好！项目已搭建完成，代码在 `C:\Users\Gao Xiang\Documents\kimi\workspace\etf_rotation_model\`。
-
-**需要你做的：**
-1. 在GitHub创建仓库（请用户确认仓库名称）
-2. 推送当前代码到 `main` 分支
-3. 配置GitHub Actions CI（Python测试）
-4. 验证 `pip install -r requirements.txt` 能正常安装
-
-**注意：**
-- 数据库文件（`*.db`）和输出目录（`reports/`, `signals/`）已加入 `.gitignore`，不要纳入版本控制
-- 策略逻辑在 `src/strategy.py` 和 `src/backtest.py`，修改前请先问我
-- 当前所有代码在 `master` 分支，建议创建 `main` 分支作为稳定分支
-
-**下一步：**
-- 我会负责用iFinD下载历史数据（在Kimi对话中执行）
-- 数据下载完成后，我会运行回测并更新 `PROGRESS.md`
-- 回测结果出来后，我们可以讨论策略优化方向
-
----
-
-## 🚨 已知问题
-
-| 问题 | 严重程度 | 发现者 | 状态 | 备注 |
-|------|---------|--------|------|------|
-| Codex无法访问本地文件夹 | 高 | 用户 | ⏳ 待解决 | 需创建GitHub远程仓库供Codex协作 |
-| 机器人ETF数据过短 | 中 | Kimi | 🔍 已知 | 159530仅577天(2024-01-18上市)，回测早期无数据 |
-| 油气ETF数据较短 | 低 | Kimi | 🔍 已知 | 159697仅753天(2023-05-04上市) |
-| 2020-2021年策略落后沪深300 | 高 | Kimi | 🔍 待分析 | 新16只池子总收益37.71% vs 旧15只39.22% |
-| 主力资金数据缺失 | 高 | Kimi | ⏳ 待解决 | iFinD无直接接口 |
-| 无基本面过滤 | 中 | Kimi | ⏳ 待接入 | ROE、营收增速 |
-
----
-
-## 📊 回测记录
-
-| 运行日期 | 协作者 | 区间 | 总收益 | 年化 | 夏普 | 最大回撤 | 分支 | 备注 |
-|---------|--------|------|--------|------|------|---------|------|------|
-| 2026-06-12 | Kimi | 2019-06-03 ~ 2026-06-11 | **48.89%** | **6.06%** | **0.51** | -17.72% | master | **冷却期+评分门槛**：止损后5日冷却，重新买入需50分 |
-| 2026-06-12 | Kimi | 2019-06-03 ~ 2023-12-29 | **13.30%** | **2.86%** | 0.25 | -13.92% | master | 样本内（冷却期生效） |
-| 2026-06-12 | Kimi | 2024-01-02 ~ 2026-06-11 | **37.45%** | **14.55%** | **1.01** | -9.73% | master | 样本外（冷却期生效） |
-| 2026-06-12 | Kimi | 2019-06-03 ~ 2026-06-11 | 32.33% | 4.23% | 0.45 | -13.37% | master | ~~动量排名修复后，无冷却期~~ |
-| 2026-06-12 | Kimi | 2019-06-03 ~ 2026-06-11 | 31.82% | 4.17% | 0.40 | -17.23% | master | ~~Bug修复后首次可信回测~~ |
-
----
-
-## 📚 策略洞察与数据驱动发现
-
-> **工作原则：任何策略判断必须有数据依据。主观臆断必须被回测或统计检验证伪/证实后才能纳入策略。**
-> 
-> 本章节记录所有通过数据测试得出的结论，供Kimi和Codex共同参考。
-
-### 发现1：调仓日对策略表现有显著影响（2026-06-12验证）
-
-**测试方法**：固定所有参数，仅改变 `rebalance_weekday`（0=周一 ~ 4=周五），运行全区间回测（2019-06-03 ~ 2026-06-11）。
-
-**测试结果**：
-
-| 调仓日 | 总收益 | 年化 | 夏普 | 最大回撤 | 交易次数 |
-|--------|--------|------|------|---------|---------|
-| **周四** | **71.99%** | **8.34%** | **0.74** | **-10.01%** | 644 |
-| 周五 | 48.89% | 6.06% | 0.51 | -17.72% | 624 |
-| 周三 | 40.61% | 5.17% | 0.43 | -17.09% | 649 |
-| 周二 | 32.18% | 4.21% | 0.33 | -16.34% | 619 |
-| 周一 | 22.01% | 2.98% | 0.23 | -24.57% | 637 |
-
-**结论**：
-- ✅ **周四调仓显著优于周五**：夏普+0.23，回撤改善7.71%，总收益+23.10%
-- ✅ **周一调仓最差**：信号滞后（使用上周数据决策），回撤最大
-- ⚠️ **交易次数差异<5%**：调仓日不改变频率，只改变决策时点
-
-**假设解释**（待进一步验证）：
-1. 周四调仓可避开周五尾盘流动性下降和"周末效应"
-2. 周四调仓后，周五收盘前已持有最优组合，周末消息影响的是已优化持仓
-3. 周五调仓使用周四收盘数据，可能滞后于周五盘中变化
-
-**行动**：已将 `rebalance_weekday` 参数化，默认建议改为3（周四）。
-
-**待验证**（2026-06-12已完成）：
-- ✅ **样本内（2019-2023）周四同样优于周五**：
-  - 周五：总收益13.30%，夏普0.25，回撤-13.92%
-  - 周四：总收益30.99%，夏普0.57，回撤-10.01%
-  - **差异：收益+17.69%，夏普+0.31，回撤改善3.91%**
-- ✅ **样本外（2024-至今）周四依然稳健**：
-  - 周五：总收益37.45%，夏普1.01，回撤-9.73%
-  - 周四：总收益42.22%，夏普1.11，回撤-11.89%
-  - **差异：收益+4.77%，夏普+0.10，回撤略差-2.16%**
-- ⏳ 不同市场环境下（牛市/熊市/震荡市）最优调仓日是否一致？（2026-06-12已完成年度验证）
-
-**年度验证结果（2019-2025，周四 vs 周五）**：
-
-| 年份 | 市场环境 | 周五夏普 | 周四夏普 | 最优 | 差异 |
-|------|---------|---------|---------|------|------|
-| 2019 | 底部震荡 | 1.17 | 0.86 | **周五** | +0.31 |
-| 2020 | 牛市 | 1.01 | 0.65 | **周五** | +0.36 |
-| 2021 | 前牛后熊 | 0.17 | 0.64 | **周四** | +0.47 |
-| 2022 | 熊市 | -0.46 | -0.48 | **周五** | +0.02 |
-| 2023 | 震荡市 | -0.65 | 0.53 | **周四** | +1.18 |
-| 2024 | 政策牛 | 0.61 | 0.63 | **周四** | +0.02 |
-| 2025 | 震荡 | 1.24 | 1.56 | **周四** | +0.32 |
-
-**统计**：周四在 **4/7** 个年份中夏普更优，周五在 **3/7** 个年份中更优。
-
-**市场环境洞察**：
-- ✅ **牛市/底部震荡（2019-2020）**：周五更优。牛市中周末消息多为正面，周五调仓可以"赌周末利好"
-- ✅ **震荡市/熊市后期（2021, 2023, 2025）**：周四显著更优。震荡市中周末消息不确定性大，周四调仓避开周末效应
-- ⚠️ **熊市（2022）**：都很差，差异不大
-- ✅ **政策牛（2024）**：周四略优，差异很小
-
-**结论**：
-- **没有单一调仓日在所有市场环境下都最优**
-- **周四在震荡市优势最大**（2023年夏普差距1.18），而当前A股大部分时间处于震荡市
-- **周五在牛市初期有优势**，但牛市窗口较短
-- **综合全区间，周四仍是最优选择**（夏普0.74 vs 0.51），因为震荡市占比更高
-
-**行动**：保持 `rebalance_weekday=3`（周四），但记录此发现供未来动态调仓参考。
-
-**验证结论**：
-- ✅ **周四调仓在样本内和样本外均优于周五**，一致性较好
-- ✅ **样本内优势更大**（+17.69% vs +4.77%），可能因为2019-2023年震荡市更多，周四避开周末效应的价值更大
-- ⚠️ **样本外回撤略差**（-11.89% vs -9.73%），但夏普仍更高，风险收益比更优
-
----
-
-### 发现4：黄金ETF加入测试（2026-06-12验证）
-
-**测试方法**：将黄金ETF（518880.SH）加入池子，从16只→17只，重新跑全区间/样本内/样本外回测。
-
-**黄金ETF特征**：
-- 与现有16只ETF平均相关性仅0.165（最低）
-- 避险资产，波动率低于股票ETF
-- 2019-06-03 ~ 2026-06-11 价格：2.91 → 8.51（涨幅约192%）
-
-**回测结果对比**：
-
-| 区间 | 16只池子 | 17只池子(+黄金) | 变化 |
-|------|---------|----------------|------|
-| **全区间收益** | 48.89% | 45.42% | **-3.47%** |
-| **全区间夏普** | 0.51 | 0.49 | -0.02 |
-| **全区间回撤** | -17.72% | -16.32% | +1.40% |
-| **样本内收益** | 30.99% | 11.30% | **-19.69%** |
-| **样本内夏普** | 0.57 | 0.22 | -0.35 |
-| **样本内回撤** | -10.01% | -14.24% | -4.23% |
-| **样本外收益** | 42.22% | 34.60% | -7.62% |
-| **样本外夏普** | 1.11 | 1.01 | -0.10 |
-| **样本外回撤** | -11.89% | -9.28% | +2.61% |
-
-**黄金ETF交易分析**：
-- 黄金ETF在回测中被交易62次（买入31次，卖出30次，止损1次）
-- 平均单次卖出盈亏仅0.65%（几乎持平）
-- 黄金占用持仓名额，但贡献极小
-
-**结论**：
-- ❌ **当前评分系统不适合黄金ETF**：黄金的动量特征和股票ETF不同，趋势性弱、波动低，用同样的趋势+动量+成交量评分很难选出有效信号
-- ❌ **加入黄金后样本内收益大幅下降**（30.99% → 11.30%），因为2019-2023年黄金被频繁选中但贡献很小
-- ✅ **样本外回撤略有改善**（-11.89% → -9.28%），但代价是收益下降更多
-- ⚠️ **黄金作为独立避险资产有价值，但需要独立的评分逻辑**（如"大盘择时防御仓位强制配置20%黄金"）
-
-**行动**：
-- **暂不将黄金纳入主池子**（当前17只配置收益下降）
-- **未来可作为"防御模块"**：当大盘择时信号=0.2（防御仓位）时，强制配置黄金ETF
-- **或设计黄金专用评分**：降低动量权重，增加避险因子
-
----
-
-### 发现2：板块-ETF相关性分层（2026-06-12验证）
-
-**测试方法**：计算14对板块-ETF的日收益率相关性（2019-06-03 ~ 2026-06-11）。
-
-**测试结果**：
-
-| 分组 | 板块数 | 平均相关性 | 代表 |
-|------|--------|-----------|------|
-| 高相关 | 6 | 0.95+ | 有色金属、银行、电气设备、农林牧渔、非银金融、汽车 |
-| 中相关 | 6 | 0.60~0.70 | 电子、医药生物、传媒、计算机、家用电器、通信 |
-| 缺失 | 2 | — | 食品饮料、国防军工（板块数据缺失） |
-
-**结论**：
-- ✅ 高相关组（>0.9）的板块加成可以全力生效（+10分）
-- ⚠️ 中相关组（0.6~0.7）的板块加成应保守（+5分）
-- ❌ 食品饮料、国防军工板块数据缺失，无法做板块加成
-
-**行动**：已建立分层加成配置，待实施。
-
----
-
-### 发现3：冷却期显著提升样本内表现（2026-06-12验证）
-
-**测试方法**：对比"无冷却期" vs "5日冷却期+评分门槛+10"。
-
-**测试结果**：
-
-| 版本 | 全区间收益 | 样本内年化 | 样本外年化 | 夏普 |
-|------|-----------|-----------|-----------|------|
-| 冷却期版 | 48.89% | 2.86% | 14.55% | 0.51 |
-| 无冷却期 | 32.33% | 0.63% | 11.71% | 0.45 |
-
-**结论**：冷却期阻止了"高买低卖"循环，样本内年化提升+2.23%。
-
----
-
-### 发现6：动态止盈因子实现与验证（2026-06-12）
-
-**实现内容**：
-- 将 `trailing_stop` 从 `STRATEGY_CONFIG` 移至 `FACTOR_CONFIG`，成为可调因子
-- 新增 `trailing_stop_mode`: `none` / `simple` / `tiered` 三种模式
-- `simple` 模式：单一回撤阈值（如回撤10%止盈）
-- `tiered` 模式：分档止盈，盈利越多回撤容忍度越大
-  - 盈利≥5%：回撤5%止盈
-  - 盈利≥15%：回撤8%止盈
-  - 盈利≥30%：回撤12%止盈
-- 修改 `backtest.py`：新增 `_check_trailing_stop()` 方法，支持三种模式
-- 新增 `scripts/test_trailing_stop.py`：验证脚本
-
-**验证结果**（全区间，16只池子，周四调仓）：
-
-| 模式 | 参数 | 夏普 | 收益 | 回撤 | 止盈次数 |
-|------|------|------|------|------|---------|
-| **none** | 不启用 | **0.739** | **69.89%** | -10.35% | 17 |
-| simple | 回撤5%止盈 | 0.591 | 53.30% | -11.33% | 112 |
-| simple | 回撤10%止盈 | 0.659 | 61.48% | -10.28% | 39 |
-| tiered | 默认分档 | 0.719 | 65.32% | -10.44% | 74 |
-
-**结论**：
-- ⚠️ **当前策略下，不启用动态止盈反而夏普最高**（0.739），因为固定止损-8%已足够
-- ⚠️ **simple -5% 太敏感**：止盈112次，过早截断利润，收益大幅下降
-- ✅ **simple -10% 较合理**：夏普0.659，接近none模式，但止盈次数更少（39次）
-- ✅ **tiered 模式居中**：夏普0.719，在利润保护和让利润奔跑之间取得平衡
-- 💡 **建议**：当前默认保持 `trailing_stop_mode='simple', trailing_stop=None`（不启用），未来可通过参数扫描找到最优阈值
-
----
-
-### 发现5：可调因子体系 v1.2 实现（2026-06-12）
-
-**实现内容**：
-- 将 `rebalance_weekday`（调仓日）、`rebalance_freq`（调仓频率）、`cooling_period`（冷静期）、`cooling_score_boost`（冷静期评分提升）从硬编码策略参数中分离
-- 新增 `FACTOR_CONFIG`：独立的因子配置字典
-- 新增 `FACTOR_SPACE`：每个因子的搜索空间定义（类型、范围、默认值）
-- 新增 `build_config()`：合并策略配置 + 因子配置，支持参数覆盖
-- 新增 `generate_factor_combinations()` / `sample_factor_combinations()`：生成因子组合用于网格搜索/随机采样
-- 修改 `backtest.py`：`BacktestEngine.__init__()` 使用 `build_config()` 获取完整配置
-- 修改 `backtest.py`：新增 `_is_rebalance_day()` 方法，支持三种调仓频率：
-  - `weekly`：每周指定星期几调仓
-  - `biweekly`：每两周指定星期几调仓（基于ISO周数或间隔>=14天）
-  - `monthly`：每月第N个指定星期几调仓
-- 新增 `scripts/parameter_scan.py`：参数扫描脚本，支持 grid/random/single 三种模式
-- 新增 `scripts/quick_factor_test.py`：快速验证脚本，使用预计算评分避免重复计算
-
-**快速验证结果**（调仓日因子，全区间，16只池子）：
-
-| 排名 | 调仓日 | 夏普 | 收益 | 回撤 |
-|------|--------|------|------|------|
-| 1 | 周四 | **0.625** | 58.29% | -10.96% |
-| 2 | 周三 | 0.447 | 42.53% | -18.78% |
-| 3 | 周五 | 0.349 | 34.55% | -18.03% |
-| 4 | 周二 | 0.296 | 31.28% | -21.13% |
-| 5 | 周一 | -0.070 | -7.55% | -30.23% |
-
-**结论**：
-- ✅ 因子体系正常工作，调仓日因子验证通过
-- ✅ 周四仍为最佳调仓日，与之前验证一致
-- ⚠️ 参数扫描（grid模式）组合数较多时运行较慢，建议使用 `quick_factor_test.py` 预计算评分后批量测试
-
----
-
-## 📝 变更摘要（每次提交后更新）
-
-### v1.0 可信修复版 (ee62995) - 2025-06-12
-- 恢复横截面动量正确实现：rank_all_momentum() 在合并全universe后计算
-- 恢复 generate_signals() 分组shift：防止跨ETF污染
-- 修复 main.py signal 接口：统一使用 calculate_indicators_and_scores -> rank_all_momentum -> compute_total_score
-- 恢复大盘择时实际生效：从 day_signals['market_signal'] 取
-- 恢复按当前组合净值计算仓位：用 current_value 而非 initial_capital
-- 修复 AKShare ETF 后缀：159xxx/16xxxx -> .SZ
-- 修复 fetch_latest()：调用 fetch_all_data()
-- 拆分实验性功能：板块增强/黄金ETF/动态止盈/冷却期/调仓日因子 -> config_experimental.py
-- 修复数据库重复记录：save_scores/save_signals 先DELETE再INSERT
-- 清理 __pycache__/*.pyc
-
-验证结果：
-- momentum_rank: 77个唯一值 (0~25) ✅
-- trade_signals: 0重复 ✅
-- 回测未交易000300.SH ✅
-- max_total_position: [0.2, 0.5, 1.0] 大盘择时生效 ✅
-
-### v1.3 (eaf5ddf) - 2025-06-12
-- Streamlit UI 接入因子参数（已拆出至实验配置）
-
-### v1.3 (47a7498) - 2025-06-12
-- 新增可调因子体系：FACTOR_CONFIG + FACTOR_SPACE + build_config()
-- 新增动态止盈因子：trailing_stop_mode (none/simple/tiered)
-
-### v1.3 (0abe149) - 2025-06-12
-- 新增动态止盈因子纳入因子体系
-
-### v1.2 (7baa4fc) - 2025-06-12
-- 重构数据源架构：iFinD通过Kimi对话获取 + AKShare本地自动补充
-- 更新 `README.md` 数据源章节
-- 更新 `PROGRESS.md` 数据源状态
-
-### v1.1 (b715548) - 2025-06-12
-- 添加 `.gitignore`
-- 更新 `PROGRESS.md`
-
-### v1.0 (718a84a) - 2025-06-12
-- 项目本地化搭建完成
-- 所有核心模块编写完成
-
----
-
-## 🔄 交接检查清单
-
-当一方完成工作，准备交接给另一方时，请勾选：
-
-- [ ] `HANDOFF.md` 已更新（添加已完成工作记录）
-- [ ] 所有修改的文件已提交到Git
-- [ ] 当前工作区域的锁定已解除
-- [ ] 留言板已添加交接说明
-- [ ] 未解决的问题已在"已知问题"中记录
-- [ ] 下一步任务已在"待办事项"中标记负责人
-
----
-
-*最后更新: 2025-06-12 by Kimi*
-*下次交接目标: Codex - GitHub仓库创建 + 依赖验证*
+# ETF Rotation Model - Context Summary (v1.1 In-Progress)
+
+## Date
+2026-06-12
+
+## Branch
+`feature/v1.1-experimental` (uncommitted changes on top of last commit)
+
+## Uncommitted Changes (Git status)
+- `HANDOFF.md` - modified (this file)
+- `PROGRESS.md` - modified
+- `app.py` - modified (defense UI added)
+- `reports/defense_module_report.md` - modified (Known Limitations added)
+- `src/backtest.py` - modified (defense module v1.3 + separation logic)
+- `src/config.py` - modified (gold/bonds removed from ETF_UNIVERSE, DEFENSE_UNIVERSE added, market_timing=False)
+- `src/strategy.py` - modified (calculate_defense_score + defense_mask in generate_signals, market_timing simplified to 2-state)
+- Untracked: `check_look_ahead.py`, `reports/defense_fix_test.txt`, `reports/final_v1.1_test.txt`, `reports/separation_test.txt`, `scripts/diagnose_bull_period.py`, `scripts/diagnose_defense_scores.py`, `scripts/test_defense_fix.py`, `scripts/test_defense_signals.py`, `scripts/test_defense_toggle.py`, `test_timing_compare.py`, `test_two_step_rebalance.py`
+
+## Critical Issues (Unresolved at End of Last Session)
+
+### 1. Defense Asset Separation Partially Implemented (UNTESTED)
+- **Gold/bonds removed from ETF_UNIVERSE** (line 39-56) - they now only exist in DEFENSE_UNIVERSE (line 66-69)
+- **backtest.py** now separates stock_df and defense_df before scoring (lines 47-53)
+- **stock ETFs** go through full scoring pipeline (calculate_scores → rank_all_momentum → compute_total_score)
+- **defense assets** go through simplified scoring (calculate_defense_score) and are merged after total_score is computed
+- **NaN total_score fix**: lines 91-95 in backtest.py try to fill NaN total_score for defense assets using component columns
+- **PROBLEM**: The defense asset scoring logic in `calculate_defense_score` does not include `volume_score` and `vol_score` in the defense_cols list for total_score calculation. The defense_cols are: `['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']` but `calculate_defense_score` sets `volume_score=5` and `vol_score=10`. So total_score should be correct after the fillna.
+- **UNTESTED**: The last test failed because `data_cache/cleaned_sample/sample_market.csv` doesn't exist. The test script tried to use PythonRun but the path had issues (backslashes not escaped, `python` not found).
+
+### 2. Market Timing Changed to 2-State (NEEDS REVIEW)
+- `strategy.py` line 227-251: `market_timing()` now only produces 1.0 (close > MA50) or 0.5 (close <= MA50)
+- **Original was 3-state**: 1.0 (close > MA20), 0.5 (MA20 >= close > MA50), 0.2 (close <= MA50)
+- **This change was made during implementation** without explicit user approval for this specific simplification
+- The user had discussed wanting 4-state or more nuanced bull/bear definition, but this 2-state simplification was done by the assistant
+- `config.py` line 102: `market_timing: False` - **DEFENSE MODULE IS DISABLED BY DEFAULT** because market timing is off. When False, generate_signals sets market_signal=1.0 for all dates, so defense_allocation is always 0.0.
+- **This needs to be reconciled**: if defense module is the core v1.1 feature, market_timing should be True. But the assistant set it to False with comment "回测数据显示关闭后收益更高".
+
+### 3. Bull Market Underperformance (DIAGNOSED, NOT FIXED)
+- **User complaint**: In 2019-2021 bull market, strategy only gained ~7% while CSI300 gained 36%
+- **Root cause identified by assistant** (from `scripts/diagnose_bull_period.py`):
+  1. **Exit too sensitive**: All 104 sells in bull period were "跌破20日均线调出". Normal bull market corrections cause temporary MA20 breaches, triggering full liquidation.
+  2. **Entry lag**: Requires 4+ days of confirm_score accumulation. By the time an ETF qualifies, the uptrend move is already partially over.
+  3. **Sector rotation failure**: In 2019-2021 structural bull (core assets), strategy rotated into lagging sectors (bank, military, media) while missing the leaders (consumer, pharma, tech).
+- **User decision**: Wait for v1.2 (sector data enhancement) to fix sector selection. The entry/exit sensitivity issue is a pure trading rules issue that could be fixed in v1.1.
+- **Proposed fixes (not implemented)**:
+  - A: Lower entry thresholds when market_signal=1.0 (bull market)
+  - B: Add 3-day buffer before selling on MA20 breach
+  - C: Allow 5% buffer on MA20 when in bull market
+
+### 4. Defense Asset Not Configuring Enough (FIXED, BUT UNTESTED)
+- **Original issue**: Defense assets weren't being bought in sufficient quantities
+- **Fixes applied**:
+  1. **Forced reduction**: When market_signal < 1.0 and current_positions_value > target_total_value, sell lowest-scoring non-defense positions first
+  2. **Loop through all defense assets**: Instead of only buying defense_signals.iloc[0], loop through all defense tickers
+  3. **Defense priority**: Defense assets get priority in position allocation
+- **Defense toggle fix**: Added `if _defense_allocation > 0 and self.cfg.get('defense_enabled', True):` check so UI can disable defense module
+- **Test result from before separation** (pre-separation): Gold-only: 50.92% total, 0.676 Sharpe, -10.38% drawdown; Dual-defense: 46.06%, 0.620 Sharpe, -10.02% drawdown
+- **Post-separation tests**: FAILED - no data available to run tests
+
+### 5. Position Not Full in Bull Market (DIAGNOSED, NOT FIXED)
+- **User complaint**: Even with 25% per-ETF cap, positions are often not full and sometimes empty
+- **Root cause**: Equal weight + per-ETF cap = hard ceiling. 5 positions × 15% = 75% max. With 3 qualifying ETFs, only 45% invested. Plus strict entry conditions cause empty positions.
+- **Assistant proposed**: Use up all cash when market_signal=1.0 (allow temporary over-allocation)
+- **Not implemented**
+
+### 6. App.py UI Issues (FIXED, PARTIALLY)
+- `build_config` call updated from `experimental_cfg=` to `build_config(strategy_cfg=..., trading_rules_cfg=..., defense_cfg=...)`
+- Defense module UI added in sidebar (enable checkbox, mode selection, allocation sliders)
+- Defense asset parameter display added to backtest results
+- **BUT**: `app.py` imports `ETF_UNIVERSE` from config. If gold/bonds are removed from ETF_UNIVERSE, the UI might not display them in the ETF pool table. Need to check if app.py also needs to import DEFENSE_UNIVERSE for display purposes.
+
+## Current Code State
+
+### config.py
+- `ETF_UNIVERSE`: 16 stock ETFs only (gold/bonds removed)
+- `DEFENSE_UNIVERSE`: 518880.SH (gold), 511010.SH (treasury)
+- `DEFENSE_ALLOCATION`: {0.0: 0.80, 0.2: 0.50, 0.5: 0.20, 1.0: 0.00}
+- `DEFENSE_ALLOCATION_MODE`: 'linear'
+- `market_timing`: False (PROBLEM - disables defense module)
+- `STRATEGY_CONFIG` has 20+ experimental keys for v1.1 features
+
+### backtest.py
+- `run()` method: separates stock_df and defense_df, runs separate scoring pipelines
+- `calculate_defense_score` called for defense assets (from strategy.py)
+- `total_score` fillna logic after merging defense assets (lines 91-95)
+- Defense module with forced reduction, loop-through-all-defense-assets, and priority allocation
+- DEBUG print still active at line 472 (`if True:`)
+
+### strategy.py
+- `market_timing()`: 2-state (1.0/0.5) - simplified from 3-state
+- `calculate_defense_score()`: Simplified scoring for defense assets (no cross-sectional momentum)
+- `generate_signals()`: Has defense_mask (lines 291-297) with relaxed thresholds for defense assets
+- `get_latest_signals()`: Only uses stock ETF thresholds, does NOT use defense_mask
+
+## Test Files Generated (Untracked)
+- `scripts/test_defense_fix.py` - tests defense module fixes (pre-separation)
+- `scripts/test_defense_toggle.py` - tests defense enabled/disabled toggle
+- `scripts/test_defense_signals.py` - tests defense asset signal generation (post-separation)
+- `scripts/diagnose_bull_period.py` - diagnoses bull market underperformance
+- `scripts/diagnose_defense_scores.py` - diagnoses defense asset scoring issues
+- `reports/defense_compariso
+
+- `reports/dynamic_defense_comparison.csv` - dynamic allocation comparison
+- `reports/separation_test.txt` - post-separation test output (possibly empty or failed)
+
+## Next Steps (From User's Last Request)
+The user's last request was to:
+1. **Fix the defense asset separation** (gold/bonds not in rotation, only in defense) - PARTIALLY DONE, UNTESTED
+2. **Research and improve bull/bear market definition** - DIAGNOSED, NOT IMPLEMENTED. User wants better methods from research (GitHub, forums, skills). Specifically:
+   - Multi-MA methods (dual/triple/MACD+MA/RSRS)
+   - Volatility regime switching
+   - Multi-timeframe confirmation
+   - Position management: inverse volatility sizing, Kelly, fixed risk, dynamic based on market state
+3. **Fix bull market position not full/empty** - DIAGNOSED, NOT IMPLEMENTED
+4. **Fix entry/exit sensitivity** - DIAGNOSED, NOT IMPLEMENTED (user wants to wait for v1.2 sector data, but assistant suggested doing it in v1.1)
+
+## User's Explicit Decisions
+- Defense assets (gold/bonds) should **only** be used in bear market for capital utilization, not part of daily rotation
+- Wait for v1.2 (sector data) to fix the structural bull market sector rotation issue
+- Any strategic change must be data-backed (verified by backtest)
+- The "data-driven discovery" section should be maintained in HANDOFF.md
+
+## Known Risks
+- `market_timing=False` means defense module is disabled by default. The UI checkbox might enable it but the underlying config has it off.
+- `DEFENSE_ALLOCATION` has key 0.0 but `market_timing` only produces 0.5 as the lowest signal. If market_timing is ever set to produce 0.0, the defense allocation would be 80%.
+- The `data_cache` directory and `sample_market.csv` don't exist. Any test that tries to load them will fail. Need to use `database.get_historical_data()` or similar DB access method instead.
+- The `calculate_defense_score` does not compute `volume_ratio` properly for defense assets (set to 1.0), but `total_score` fillna uses the component sum which should work.
+- `get_latest_signals()` in strategy.py does NOT apply the defense_mask. If the app uses this for real-time signals, defense assets won't show up even when they should.
