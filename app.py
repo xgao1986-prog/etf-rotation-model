@@ -656,7 +656,7 @@ def render_dashboard(cfg):
     stats = load_stats()
     signal_df = scores[scores["qualified"]] if not scores.empty else pd.DataFrame()
 
-    # 获取大盘择时信号
+    # v1.2: 获取市场状态
     db_dash = get_database()
     bench_df_dash = load_market_data(ticker=BENCHMARK)
     market_signal_val = 1.0
@@ -666,6 +666,15 @@ def render_dashboard(cfg):
         bench_latest = bench_signals[bench_signals["date"] == latest] if latest else pd.DataFrame()
         if not bench_latest.empty:
             market_signal_val = bench_latest["market_signal"].iloc[0]
+
+    # v1.2: 市场状态检测
+    regime_info = None
+    if not bench_df_dash.empty:
+        from market_regime import MarketRegimeDetector
+        detector = MarketRegimeDetector(cfg)
+        market_df_dash = load_market_data(ticker=list(ETF_UNIVERSE.keys()))
+        stock_df_dash = market_df_dash[market_df_dash["ticker"].isin(ETF_UNIVERSE.keys())].copy() if not market_df_dash.empty else None
+        regime_info = detector.detect(bench_df_dash, stock_df_dash)
 
     if market_signal_val >= 0.9:
         mkt_text, mkt_color = "满仓", "#2e9d75"
@@ -680,16 +689,43 @@ def render_dashboard(cfg):
     kpi3.metric("最高评分", f"{scores['total_score'].max():.1f}" if not scores.empty else "N/A")
     kpi4.metric("数据记录", f"{stats.get('market_data_count', 0):,}")
     with kpi5:
-        st.markdown(
-            f"""
-            <div style='background:#ffffff;border:1px solid #e6edf5;border-radius:8px;padding:14px 16px;box-shadow:0 4px 14px rgba(20,39,68,0.05);text-align:center;'>
-                <div style='font-size:0.86rem;color:#506176;'>大盘择时</div>
-                <div style='font-size:1.5rem;font-weight:700;color:{mkt_color};'>{mkt_text}</div>
-                <div style='font-size:0.78rem;color:#66758a;'>仓位 {market_signal_val:.0%}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        if regime_info:
+            regime_colors = {1: "#d64f4f", 2: "#f0a202", 3: "#5b8db8", 4: "#2e9d75"}
+            rc = regime_colors.get(regime_info["regime_id"], "#66758a")
+            st.markdown(
+                f"""
+                <div style='background:#ffffff;border:1px solid #e6edf5;border-radius:8px;padding:14px 16px;box-shadow:0 4px 14px rgba(20,39,68,0.05);text-align:center;'>
+                    <div style='font-size:0.86rem;color:#506176;'>市场状态 (v1.2)</div>
+                    <div style='font-size:1.5rem;font-weight:700;color:{rc};'>{regime_info["regime_name"]}</div>
+                    <div style='font-size:0.78rem;color:#66758a;'>置信度 {regime_info["confidence"]:.0%}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"""
+                <div style='background:#ffffff;border:1px solid #e6edf5;border-radius:8px;padding:14px 16px;box-shadow:0 4px 14px rgba(20,39,68,0.05);text-align:center;'>
+                    <div style='font-size:0.86rem;color:#506176;'>大盘择时</div>
+                    <div style='font-size:1.5rem;font-weight:700;color:{mkt_color};'>{mkt_text}</div>
+                    <div style='font-size:0.78rem;color:#66758a;'>仓位 {market_signal_val:.0%}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # v1.2: 市场状态详情（如果 regime 可用）
+    if regime_info:
+        with st.expander("🔍 市场状态详情", expanded=False):
+            c1, c2, c3 = st.columns(3)
+            c1.metric("趋势位置", f"{regime_info['trend_position']:.3f}")
+            c2.metric("MA50斜率", f"{regime_info['ma50_slope']:.4f}")
+            c3.metric("波动率", f"{regime_info['vol_20']:.2%}", regime_info['vol_regime'])
+            if not pd.isna(regime_info['market_breadth']):
+                c4, c5 = st.columns(2)
+                c4.metric("市场宽度", f"{regime_info['market_breadth']:.1%}")
+                c5.metric("斜率加速度", f"{regime_info['slope_accel']:.3f}")
+            st.caption(f"原因: {regime_info['reason']}")
 
     left, right = st.columns([1.25, 1])
     with left:
@@ -861,6 +897,24 @@ def render_backtest(cfg):
         s3.metric("止损次数", result["stop_loss_count"])
         s4.metric("平均持仓数", f"{result['avg_holdings']:.1f}")
         s5.metric("总佣金", format_money(result["total_commission"]))
+
+        # v1.2: 市场状态分布
+        if "regime_summary" in result:
+            st.subheader("📊 市场状态分布 (v1.2 observer)")
+            summary = result["regime_summary"]
+            r1, r2, r3, r4 = st.columns(4)
+            regime_colors = {1: "#d64f4f", 2: "#f0a202", 3: "#5b8db8", 4: "#2e9d75"}
+            for state_id, info in summary["state_distribution"].items():
+                color = regime_colors.get(state_id, "#66758a")
+                if state_id == 1:
+                    r1.metric(info["name"], f"{info['days']}天", f"{info['percentage']:.1%}")
+                elif state_id == 2:
+                    r2.metric(info["name"], f"{info['days']}天", f"{info['percentage']:.1%}")
+                elif state_id == 3:
+                    r3.metric(info["name"], f"{info['days']}天", f"{info['percentage']:.1%}")
+                elif state_id == 4:
+                    r4.metric(info["name"], f"{info['days']}天", f"{info['percentage']:.1%}")
+            st.caption(f"状态切换: {summary['switch_count']}次 | 平均置信度: {summary['avg_confidence']:.1%}")
 
         trades = result["trades_df"]
 
