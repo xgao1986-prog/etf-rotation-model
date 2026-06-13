@@ -25,7 +25,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import json
 
-from config import STRATEGY_CONFIG, ETF_UNIVERSE, BENCHMARK
+from config import STRATEGY_CONFIG, ETF_UNIVERSE, DEFENSE_UNIVERSE, FALLBACK_EQUITY_UNIVERSE, BENCHMARK
 
 
 class StrategyEngine:
@@ -35,6 +35,11 @@ class StrategyEngine:
         self.cfg = cfg or STRATEGY_CONFIG
         self.tickers = list(ETF_UNIVERSE.keys())
         self.benchmark = BENCHMARK
+        # 三类资产分类
+        self.stock_tickers = list(ETF_UNIVERSE.keys())
+        self.fallback_tickers = list(FALLBACK_EQUITY_UNIVERSE.keys())
+        self.defense_tickers = list(DEFENSE_UNIVERSE.keys())
+        self.all_tickers = self.stock_tickers + self.fallback_tickers + self.defense_tickers
     
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -185,31 +190,109 @@ class StrategyEngine:
         这是backtest.py run()中逐ETF调用的接口。
         """
         return self.calculate_scores(df)
-        return result
+    
+    def calculate_defense_score(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        防御资产简化评分（不参与横截面动量排名）
+        
+        防御资产（黄金/国债）不参与日常轮动，只在防御仓位时配置。
+        简化评分逻辑：
+          - 趋势强度：价>MA20(+15) + 价>MA50(+10) + MA20斜率>0(+5) = 30分
+          - 动量排名：固定12.5分（不参与排名）
+          - 总评分 = 趋势 + 确认 + 动量固定分
+        
+        入场门槛比股票ETF低，确保熊市中更容易达标。
+        """
+        df = self.calculate_indicators(df)
+        
+        # 1. 趋势强度 (30分)
+        df['trend_score'] = 0
+        df.loc[df['close'].shift(1) > df['ma20'], 'trend_score'] += 15
+        df.loc[df['close'].shift(1) > df['ma50'], 'trend_score'] += 10
+        df.loc[df['ma20_slope'] > 0, 'trend_score'] += 5
+        
+        # 2. 趋势确认 (20分) - 连续在均线之上的天数
+        df['confirm_score'] = np.minimum(df['above_ma20_days'] * 4, 20)
+        
+        # 3. 动量：固定12.5分（不参与横截面排名）
+        df['momentum_rank'] = 12.5
+        df['momentum_valid'] = True
+        
+        # 4. 成交量：防御资产不依赖成交量，给默认5分
+        df['volume_score'] = 5
+        df['volume_ratio'] = 1.0
+        
+        # 5. 波动率：防御资产偏好低波动，适中波动给10分
+        df['vol_score'] = 10
+        vol = df['volatility_20'].abs()
+        df.loc[vol > 0.10, 'vol_score'] = 5  # 波动过高减分
+        
+        return df
+    
+    def calculate_fallback_equity_score(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        宽基补仓ETF简化评分（不参与横截面动量排名）
+        
+        宽基ETF（沪深300/中证500/创业板/科创50）不参与日常轮动排名。
+        当行业ETF买不满时，用简化趋势条件判断宽基是否可以补仓：
+          - 收盘价 > MA20 或 MA50（至少站上一条均线）
+          - MA20斜率不急剧向下（> -0.01）
+          - 总评分达到较宽松阈值（默认25分）
+        
+        简化评分逻辑：
+          - 趋势强度：价>MA20(+15) + 价>MA50(+10) + MA20斜率>0(+5) = 30分
+          - 动量排名：固定12.5分（不参与排名）
+          - 总评分 = 趋势 + 确认 + 动量固定分
+        """
+        df = self.calculate_indicators(df)
+        
+        # 1. 趋势强度 (30分) - 只要站上一条均线就给分
+        df['trend_score'] = 0
+        df.loc[df['close'].shift(1) > df['ma20'], 'trend_score'] += 15
+        df.loc[df['close'].shift(1) > df['ma50'], 'trend_score'] += 10
+        df.loc[df['ma20_slope'] > 0, 'trend_score'] += 5
+        
+        # 2. 趋势确认 (20分) - 连续在均线之上的天数
+        df['confirm_score'] = np.minimum(df['above_ma20_days'] * 4, 20)
+        
+        # 3. 动量：固定12.5分（不参与横截面排名）
+        df['momentum_rank'] = 12.5
+        df['momentum_valid'] = True
+        
+        # 4. 成交量：给默认5分
+        df['volume_score'] = 5
+        df['volume_ratio'] = 1.0
+        
+        # 5. 波动率：适中波动给10分
+        df['vol_score'] = 10
+        vol = df['volatility_20'].abs()
+        df.loc[vol > 0.15, 'vol_score'] = 5  # 波动过高减分
+        
+        return df
     
     def market_timing(self, bench_df: pd.DataFrame) -> pd.DataFrame:
         """
         大盘择时：根据沪深300趋势确定总仓位上限
         
+        优化版(v1.1)：只用单均线(ma50)，避免牛市中正常回调触发半仓
+        原三档(1.0/0.5/0.2)触发太频繁，改为两档更简洁：
+          - 1.0(满仓): close > ma50（中期趋势向上）
+          - 0.5(半仓): close <= ma50（跌破中期趋势）
+        
         Returns:
-            DataFrame with 'market_signal' column: 1.0(满仓) / 0.5(半仓) / 0.2(防御)
+            DataFrame with 'market_signal' column: 1.0(满仓) / 0.5(半仓)
         """
         df = bench_df.copy().sort_values('date')
         
-        # 计算大盘均线（用前一日）
-        df['bench_ma20'] = df['close'].rolling(self.cfg['market_ma_short']).mean().shift(1)
+        # 计算大盘50日均线（用前一日，避免未来信息泄露）
         df['bench_ma50'] = df['close'].rolling(self.cfg['market_ma_long']).mean().shift(1)
         
-        # 大盘信号
+        # 两档信号：只在明确跌破 ma50 时降低仓位
         df['market_signal'] = 1.0  # 默认满仓
         
-        # 收盘价在20-50日均线之间 -> 半仓
-        mask_half = (df['close'].shift(1) <= df['bench_ma20']) & (df['close'].shift(1) > df['bench_ma50'])
-        df.loc[mask_half, 'market_signal'] = 0.5
-        
-        # 收盘价跌破50日均线 -> 防御仓位20%
-        mask_defense = df['close'].shift(1) <= df['bench_ma50']
-        df.loc[mask_defense, 'market_signal'] = 0.2
+        # 收盘价跌破50日均线 -> 半仓（不再到0.2的极端防御）
+        mask_reduce = df['close'].shift(1) <= df['bench_ma50']
+        df.loc[mask_reduce, 'market_signal'] = 0.5
         
         return df
     
@@ -240,6 +323,23 @@ class StrategyEngine:
         # 入场信号
         scores_df['signal_type'] = 'HOLD'
         
+        # 计算大盘强势标志（用于宽基补仓判断）
+        # 大盘强势 = 收盘价 > MA50 且 MA50斜率 > 0
+        # 这个条件独立于 market_timing，专门用于宽基补仓的"时机"判断
+        # 只有在大盘趋势向上时，才允许用宽基补仓，避免弱势反弹时追涨
+        if bench_df is not None and not bench_df.empty:
+            bench_sorted = bench_df.sort_values('date').copy()
+            bench_sorted['bench_ma50'] = bench_sorted['close'].rolling(self.cfg['market_ma_long']).mean().shift(1)
+            bench_sorted['bench_ma50_slope'] = bench_sorted['bench_ma50'].diff().shift(1)
+            bench_sorted['bull_market'] = (
+                (bench_sorted['close'].shift(1) > bench_sorted['bench_ma50']) &
+                (bench_sorted['bench_ma50_slope'] > 0)
+            )
+            scores_df = scores_df.merge(bench_sorted[['date', 'bull_market']], on='date', how='left')
+            scores_df['bull_market'] = scores_df['bull_market'].fillna(False)
+        else:
+            scores_df['bull_market'] = True  # 无基准数据时默认允许（向后兼容）
+        
         buy_mask = (
             (scores_df['trend_score'] >= self.cfg['min_trend_score']) &
             (scores_df['confirm_score'] >= self.cfg['min_confirm_score']) &
@@ -248,7 +348,28 @@ class StrategyEngine:
             (scores_df['ma20_slope'] > 0)
         )
         
-        scores_df.loc[buy_mask, 'signal_type'] = 'BUY'
+        # 宽基补仓ETF：只在大盘强势时触发，补足beta
+        import config as _cfg_module
+        _fallback_tickers = list(getattr(_cfg_module, 'FALLBACK_EQUITY_UNIVERSE', {}).keys())
+        fallback_mask = scores_df['ticker'].isin(_fallback_tickers) & scores_df['bull_market'] & (
+            (scores_df['trend_score'] >= 10) &  # 比股票ETF低5分
+            (scores_df['confirm_score'] >= 2) &  # 比股票ETF低2分
+            (scores_df['total_score'] >= 25) &   # 比股票ETF低15分
+            (scores_df['prev_close'] > scores_df['ma20'] * 0.98) &  # 允许2%缓冲
+            (scores_df['ma20_slope'] > -0.01)   # 允许均线轻微向下
+        )
+        
+        # 防御资产更宽松的入场条件（低相关补仓，不依赖大盘强势）
+        _defense_tickers = list(_cfg_module.DEFENSE_UNIVERSE.keys())
+        defense_mask = scores_df['ticker'].isin(_defense_tickers) & (
+            (scores_df['trend_score'] >= 10) &  # 比股票ETF低5分
+            (scores_df['confirm_score'] >= 2) &  # 比股票ETF低2分
+            (scores_df['total_score'] >= 30) &   # 比股票ETF低10分
+            (scores_df['prev_close'] > scores_df['ma20'] * 0.98) &  # 允许2%缓冲
+            (scores_df['ma20_slope'] > -0.001)   # 允许均线微跌
+        )
+        
+        scores_df.loc[buy_mask | fallback_mask | defense_mask, 'signal_type'] = 'BUY'
         
         # 出场信号：前一日收盘价跌破均线
         sell_mask = scores_df['prev_close'] < scores_df['ma20']

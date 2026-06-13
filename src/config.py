@@ -35,7 +35,7 @@ for d in [DATA_DIR, REPORT_DIR, SIGNAL_DIR]:
 DB_PATH = os.path.join(DATA_DIR, 'etf_model.db')
 
 # ==================== ETF标的池 ====================
-# 16只行业ETF + 黄金ETF(防御资产) + 国债ETF(防御资产) + 沪深300基准
+# 16只行业ETF（A股板块轮动主体）+ 沪深300基准
 ETF_UNIVERSE = {
     '512480.SH': '半导体ETF',
     '515230.SH': '软件ETF',
@@ -53,8 +53,6 @@ ETF_UNIVERSE = {
     '159865.SZ': '养殖ETF',
     '159697.SZ': '油气ETF',
     '159530.SZ': '机器人ETF',
-    '518880.SH': '黄金ETF',   # 防御资产
-    '511010.SH': '国债ETF',   # 防御资产
 }
 
 BENCHMARK = '000300.SH'  # 沪深300
@@ -62,6 +60,26 @@ BENCHMARK = '000300.SH'  # 沪深300
 # 提取纯代码（不带后缀）用于AKShare等数据源
 ETF_CODES = [code.split('.')[0] for code in ETF_UNIVERSE.keys()]
 BENCHMARK_CODE = '000300'
+
+# ==================== 防御资产池（低相关补仓资产）====================
+# 不参与日常轮动，只在行业ETF和宽基ETF都买不满时作为低相关补仓资产
+DEFENSE_UNIVERSE = {
+    '518880.SH': '黄金ETF',
+    '511010.SH': '国债ETF',
+}
+
+# ==================== 宽基补仓ETF（第二层补仓）====================
+# 当行业/主题ETF信号不足时，优先用宽基ETF补足股票敞口
+# 不参与日常轮动排名，只在仓位打不满时补仓
+FALLBACK_EQUITY_UNIVERSE = {
+    '510300.SH': '沪深300ETF',
+    '510500.SH': '中证500ETF',
+    '159915.SZ': '创业板ETF',
+    '588000.SH': '科创50ETF',
+}
+
+# 所有可交易标的（用于数据下载等）
+ALL_TRADABLE_ETFS = {**ETF_UNIVERSE, **FALLBACK_EQUITY_UNIVERSE, **DEFENSE_UNIVERSE}
 
 # ==================== 策略参数 ====================
 STRATEGY_CONFIG = {
@@ -83,8 +101,17 @@ STRATEGY_CONFIG = {
     'min_confirm_score': 4,     # 确认最低分（至少1天在均线之上）
     'min_total_score': 40,      # 总评分最低分
     
-    # 持仓控制
-    'max_holdings': 5,          # 最多持有几只
+    # 持仓控制（v1.1 三层补仓结构）
+    # 行业/主题ETF：第一层，核心alpha来源
+    'stock_max_holdings': 5,       # 行业ETF最多持有几只
+    # 宽基补仓ETF：第二层，补足股票beta
+    'fallback_equity_max_holdings': 3,  # 宽基ETF最多持有几只（在股票ETF买不满时补仓）
+    # 黄金/国债：第三层，低相关现金替代
+    'defense_max_holdings': 2,     # 防御资产最多持有几只
+    # 总持仓上限（向后兼容，可用可不用）
+    'total_max_holdings': 5,       # 总持仓上限（与 max_holdings 一致，保持向后兼容）
+    # 向后兼容：max_holdings 保留为 stock_max_holdings 的别名
+    'max_holdings': 5,             # 最多持有几只（= stock_max_holdings）
     'max_position_per_etf': 0.15,  # 单只上限15%
     
     # 风控
@@ -94,7 +121,7 @@ STRATEGY_CONFIG = {
     'rebalance_weekday': 4,     # 调仓日（0=周一, 1=周二, 2=周三, 3=周四, 4=周五）
     
     # 大盘择时
-    'market_timing': True,      # 是否启用大盘择时
+    'market_timing': False,      # 是否启用大盘择时（默认关闭，回测数据显示关闭后收益更高）
     'market_ma_short': 20,      # 大盘短期均线
     'market_ma_long': 50,       # 大盘长期均线
     
@@ -182,12 +209,26 @@ VOLATILITY_ENHANCEMENT = {
     'min_allocation': 0.00,     # 防御比例下限
 }
 
+# 宽基补仓ETF评分参数（简化趋势条件）
+FALLBACK_EQUITY_CONFIG = {
+    'fallback_equity_enabled': False,      # 默认关闭：回测显示当前参数下宽基补仓为负贡献
+                                           # 设为 True 可启用，未来可配合更严格的强势条件测试
+    'min_fallback_trend_score': 10,          # 宽基趋势最低分（比行业ETF宽松）
+    'min_fallback_confirm_score': 2,       # 宽基确认最低分
+    'min_fallback_total_score': 25,          # 宽基总评分最低分（比行业ETF宽松）
+    'fallback_ma_check': 'ma20_or_ma50',   # 趋势条件：收盘价>MA20 或 >MA50
+    'fallback_ma_slope_check': 'not_steep_down',  # MA20斜率不急剧向下
+}
+
 # 防御资产评分参数（简化版，不依赖动量排名）
 DEFENSE_CONFIG = {
     'defense_enabled': True,        # 是否启用防御模块
     'defense_mode': 'mandatory',    # 'mandatory'=强制配置, 'optional'=可选
     'min_defense_trend_score': 10,  # 防御资产趋势最低分（比股票ETF宽松）
     'min_defense_total_score': 25,  # 防御资产总评分最低分
+    # v1.1新增：防御资产填充上限（当股票ETF信号不足时）
+    'defense_fill_max_ratio_bull': 0.30,  # 牛市时防御资产最多占总资产30%
+    'defense_fill_max_ratio_bear': 0.50,  # 熊市/弱市时防御资产最多占总资产50%
 }
 
 # ==================== v1.1 交易规则配置 ====================
@@ -322,12 +363,14 @@ EXPERIMENTAL_CONFIG = {
 }
 
 # 合并配置工具（v1.1 使用）
-def build_config(strategy_cfg=None, trading_rules_cfg=None, defense_cfg=None):
-    """合并策略配置、交易规则配置和防御配置"""
+def build_config(strategy_cfg=None, trading_rules_cfg=None, defense_cfg=None, fallback_equity_cfg=None, backtest_cfg=None):
+    """合并策略配置、交易规则配置、防御配置、宽基补仓配置和回测配置"""
     import copy
     cfg = copy.deepcopy(STRATEGY_CONFIG)
+    cfg.update(copy.deepcopy(BACKTEST_CONFIG))
     cfg.update(copy.deepcopy(TRADING_RULES_CONFIG))
     cfg.update(copy.deepcopy(DEFENSE_CONFIG))
+    cfg.update(copy.deepcopy(FALLBACK_EQUITY_CONFIG))
     cfg.update(copy.deepcopy(EXPERIMENTAL_CONFIG))
     if strategy_cfg:
         cfg.update(strategy_cfg)
@@ -335,4 +378,8 @@ def build_config(strategy_cfg=None, trading_rules_cfg=None, defense_cfg=None):
         cfg.update(trading_rules_cfg)
     if defense_cfg:
         cfg.update(defense_cfg)
+    if fallback_equity_cfg:
+        cfg.update(fallback_equity_cfg)
+    if backtest_cfg:
+        cfg.update(backtest_cfg)
     return cfg

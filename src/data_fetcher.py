@@ -22,8 +22,23 @@ from datetime import datetime, timedelta
 import time
 import warnings
 
-from config import (ETF_UNIVERSE, BENCHMARK, ETF_CODES, BENCHMARK_CODE)
-from config import SECTOR_CODES, SECTOR_INDEX_UNIVERSE, ETF_TO_SECTOR_MAPPING
+from config import (ETF_UNIVERSE, BENCHMARK, ETF_CODES, BENCHMARK_CODE,
+                    FALLBACK_EQUITY_UNIVERSE, DEFENSE_UNIVERSE, ALL_TRADABLE_ETFS)
+
+# v1.2板块数据导入（已注释，未来使用）
+try:
+    from config import SECTOR_CODES, SECTOR_INDEX_UNIVERSE, ETF_TO_SECTOR_MAPPING
+except ImportError:
+    SECTOR_CODES = []
+    SECTOR_INDEX_UNIVERSE = {}
+    ETF_TO_SECTOR_MAPPING = {}
+
+# 宽基补仓ETF代码（不带后缀）
+FALLBACK_EQUITY_CODES = [code.split('.')[0] for code in FALLBACK_EQUITY_UNIVERSE.keys()]
+# 防御资产代码（不带后缀）
+DEFENSE_CODES = [code.split('.')[0] for code in DEFENSE_UNIVERSE.keys()]
+# 所有可交易ETF代码
+ALL_ETF_CODES = [code.split('.')[0] for code in ALL_TRADABLE_ETFS.keys()]
 
 
 class DataFetcher:
@@ -203,14 +218,28 @@ class DataFetcher:
         return pd.concat(all_data, ignore_index=True)
     
     def fetch_all_data(self, start_date, end_date=None, db=None, delay=0.5) -> pd.DataFrame:
-        """批量获取所有数据：ETF + 基准 + 板块指数"""
+        """批量获取所有数据：ETF + 宽基补仓 + 防御资产 + 基准 + 板块指数"""
         if end_date is None:
             end_date = datetime.now().strftime('%Y-%m-%d')
         
         all_data = []
         
-        # 获取ETF数据
+        # 获取行业ETF数据
         for code in ETF_CODES:
+            df = self.fetch_etf_history(code, start_date, end_date)
+            if not df.empty:
+                all_data.append(df)
+            time.sleep(delay)
+        
+        # 获取宽基补仓ETF数据
+        for code in FALLBACK_EQUITY_CODES:
+            df = self.fetch_etf_history(code, start_date, end_date)
+            if not df.empty:
+                all_data.append(df)
+            time.sleep(delay)
+        
+        # 获取防御资产数据（黄金/国债）
+        for code in DEFENSE_CODES:
             df = self.fetch_etf_history(code, start_date, end_date)
             if not df.empty:
                 all_data.append(df)

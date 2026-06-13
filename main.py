@@ -11,7 +11,7 @@ from datetime import datetime
 # 添加src到路径
 sys.path.insert(0, 'src')
 
-from config import DB_PATH, ETF_UNIVERSE, BENCHMARK, BACKTEST_CONFIG
+from config import DB_PATH, ETF_UNIVERSE, BENCHMARK, BACKTEST_CONFIG, DEFENSE_UNIVERSE, FALLBACK_EQUITY_UNIVERSE, ALL_TRADABLE_ETFS
 from database import ETFDatabase
 from data_fetcher import download_all_data, update_latest_data
 from strategy import StrategyEngine
@@ -43,9 +43,10 @@ def cmd_backtest(args):
     """运行回测"""
     db = ETFDatabase()
     
-    # 加载数据 - 只读取ETF_UNIVERSE中的标的，排除基准
+    # 加载数据 - 包含所有三类资产
     print("加载数据...")
-    etf_tickers = list(ETF_UNIVERSE.keys())
+    from config import ALL_TRADABLE_ETFS
+    etf_tickers = list(ALL_TRADABLE_ETFS.keys())
     market_df = db.get_market_data(ticker=etf_tickers)
     bench_df = db.get_market_data(ticker=BENCHMARK)
     
@@ -138,8 +139,9 @@ def cmd_signal(args):
             print(f"更新失败（可能数据已存在）: {e}")
             print("继续使用现有数据生成信号...")
     
-    # 加载数据（限定universe为16只ETF）
-    etf_tickers = list(ETF_UNIVERSE.keys())
+    # 加载数据（包含所有三类资产）
+    from config import ALL_TRADABLE_ETFS, FALLBACK_EQUITY_UNIVERSE, DEFENSE_UNIVERSE
+    etf_tickers = list(ALL_TRADABLE_ETFS.keys())
     market_df = db.get_market_data(ticker=etf_tickers)
     bench_df = db.get_market_data(ticker=BENCHMARK)
     
@@ -147,25 +149,69 @@ def cmd_signal(args):
         print("数据库无数据，请先运行: python main.py update --full")
         return
     
-    # 计算评分（先逐ETF计算技术指标，再合并做横截面动量排名）
+    # 计算评分（按回测一致的三层评分逻辑）
     engine = StrategyEngine()
-    all_scores = []
-    for ticker in market_df['ticker'].unique():
-        ticker_df = market_df[market_df['ticker'] == ticker].copy()
+    
+    # 分离三类资产
+    stock_df = market_df[market_df['ticker'].isin(ETF_UNIVERSE.keys())].copy()
+    fallback_df = market_df[market_df['ticker'].isin(FALLBACK_EQUITY_UNIVERSE.keys())].copy()
+    defense_df = market_df[market_df['ticker'].isin(DEFENSE_UNIVERSE.keys())].copy()
+    
+    # 步骤1-2：对行业ETF逐只计算指标和评分
+    stock_scores = []
+    for ticker in stock_df['ticker'].unique():
+        ticker_df = stock_df[stock_df['ticker'] == ticker].copy()
         if len(ticker_df) < 50:
             continue
         scored = engine.calculate_indicators_and_scores(ticker_df)
-        all_scores.append(scored)
+        stock_scores.append(scored)
     
-    if not all_scores:
-        print("无有效数据")
+    if not stock_scores:
+        print("无有效行业ETF数据")
         return
     
-    scores_df = pd.concat(all_scores, ignore_index=True)
+    scores_df = pd.concat(stock_scores, ignore_index=True)
     
-    # 横截面动量排名（必须在全universe合并后计算）
+    # 步骤3：行业ETF全池横截面动量排名
     scores_df = engine.rank_all_momentum(scores_df)
+    
+    # 步骤4：计算行业ETF总评分
     scores_df = engine.compute_total_score(scores_df)
+    
+    # 步骤5：对宽基补仓ETF单独计算简化评分
+    fallback_scores = []
+    for ticker in fallback_df['ticker'].unique():
+        ticker_df = fallback_df[fallback_df['ticker'] == ticker].copy()
+        if len(ticker_df) < 50:
+            continue
+        scored = engine.calculate_fallback_equity_score(ticker_df)
+        fallback_scores.append(scored)
+    
+    if fallback_scores:
+        fallback_scores_df = pd.concat(fallback_scores, ignore_index=True)
+        fallback_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
+        fallback_scores_df['total_score'] = fallback_scores_df[fallback_cols].fillna(0).sum(axis=1)
+        scores_df = pd.concat([scores_df, fallback_scores_df], ignore_index=True)
+    
+    # 步骤6：对防御资产单独计算简化评分
+    defense_scores = []
+    for ticker in defense_df['ticker'].unique():
+        ticker_df = defense_df[defense_df['ticker'] == ticker].copy()
+        if len(ticker_df) < 50:
+            continue
+        scored = engine.calculate_defense_score(ticker_df)
+        defense_scores.append(scored)
+    
+    if defense_scores:
+        defense_scores_df = pd.concat(defense_scores, ignore_index=True)
+        defense_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
+        defense_scores_df['total_score'] = defense_scores_df[defense_cols].fillna(0).sum(axis=1)
+        scores_df = pd.concat([scores_df, defense_scores_df], ignore_index=True)
+    
+    # 确保所有total_score已计算（防御/宽基已单独计算，这里fillna保险）
+    if 'total_score' not in scores_df.columns:
+        scores_df['total_score'] = 0
+    scores_df['total_score'] = scores_df['total_score'].fillna(0)
     
     # 过滤列：只保留daily_scores表存在的列
     db_score_cols = ['ticker', 'date', 'ma20', 'ma50', 'ma20_slope', 
@@ -174,28 +220,41 @@ def cmd_signal(args):
                      'momentum_rank', 'volume_score', 'vol_score', 'total_score']
     scores_to_save = scores_df[[c for c in db_score_cols if c in scores_df.columns]].copy()
     
-    # 保存评分到数据库（解决daily_scores=0的问题）
+    # 保存评分到数据库
     saved_scores = db.save_scores(scores_to_save)
     print(f"评分已保存到数据库: {saved_scores} 条")
     
     # 生成信号
     signals_df = engine.generate_signals(scores_df, bench_df)
     
-    # 保存信号到数据库（解决trade_signals=0的问题）
-    # 构造trade_signals表需要的格式
+    # 保存信号到数据库
     signal_records = []
     for _, row in signals_df.iterrows():
+        ticker = row['ticker']
+        if ticker in ETF_UNIVERSE:
+            name = ETF_UNIVERSE[ticker]
+            asset_type = '行业ETF'
+        elif ticker in FALLBACK_EQUITY_UNIVERSE:
+            name = FALLBACK_EQUITY_UNIVERSE[ticker]
+            asset_type = '宽基补仓'
+        elif ticker in DEFENSE_UNIVERSE:
+            name = DEFENSE_UNIVERSE[ticker]
+            asset_type = '防御资产'
+        else:
+            name = ticker
+            asset_type = '其他'
+        
         signal_records.append({
             'date': row['date'],
             'ticker': row['ticker'],
-            'name': ETF_UNIVERSE.get(row['ticker'], row['ticker']),
+            'name': name,
             'signal_type': row['signal_type'],
             'close_price': row['close'],
             'ma20': row['ma20'],
             'total_score': row['total_score'],
             'target_weight': 0.0,
             'actual_weight': 0.0,
-            'reason': f"评分{row['total_score']:.1f}"
+            'reason': f"{asset_type}:评分{row['total_score']:.1f}"
         })
     
     if signal_records:
@@ -218,20 +277,45 @@ def cmd_signal(args):
         print(f"{'='*50}")
         return
     
-    # 显示信号
+    # 显示信号（按资产类型分组）
     print(f"\n{'='*50}")
     print(f"最新交易信号 ({latest})")
     print(f"{'='*50}")
     
-    for _, row in buy_signals.iterrows():
-        ticker = row['ticker']
-        name = ETF_UNIVERSE.get(ticker, ticker)
-        print(f"[BUY] {name} ({ticker})")
-        print(f"   评分: {row['total_score']:.1f}")
-        print(f"   趋势: {row['trend_score']:.0f}/30  确认: {row['confirm_score']:.0f}/20")
-        print(f"   动量: {row['momentum_rank']:.1f}/25  成交: {row['volume_score']:.0f}/15")
-        print(f"   波动: {row['vol_score']:.0f}/10")
-        print()
+    # 行业ETF
+    stock_buys = buy_signals[buy_signals['ticker'].isin(ETF_UNIVERSE.keys())]
+    if not stock_buys.empty:
+        print("\n【行业/主题ETF】（第一层 - 核心alpha）")
+        for _, row in stock_buys.iterrows():
+            ticker = row['ticker']
+            name = ETF_UNIVERSE.get(ticker, ticker)
+            print(f"  [BUY] {name} ({ticker})")
+            print(f"     评分: {row['total_score']:.1f}")
+            print(f"     趋势: {row['trend_score']:.0f}/30  确认: {row['confirm_score']:.0f}/20")
+            print(f"     动量: {row['momentum_rank']:.1f}/25  成交: {row['volume_score']:.0f}/15")
+            print(f"     波动: {row['vol_score']:.0f}/10")
+    
+    # 宽基补仓
+    fallback_buys = buy_signals[buy_signals['ticker'].isin(FALLBACK_EQUITY_UNIVERSE.keys())]
+    if not fallback_buys.empty:
+        print("\n【宽基补仓ETF】（第二层 - 补足beta）")
+        for _, row in fallback_buys.iterrows():
+            ticker = row['ticker']
+            name = FALLBACK_EQUITY_UNIVERSE.get(ticker, ticker)
+            print(f"  [BUY] {name} ({ticker})")
+            print(f"     评分: {row['total_score']:.1f}")
+    
+    # 防御资产
+    defense_buys = buy_signals[buy_signals['ticker'].isin(DEFENSE_UNIVERSE.keys())]
+    if not defense_buys.empty:
+        print("\n【防御资产】（第三层 - 低相关补仓）")
+        for _, row in defense_buys.iterrows():
+            ticker = row['ticker']
+            name = DEFENSE_UNIVERSE.get(ticker, ticker)
+            print(f"  [BUY] {name} ({ticker})")
+            print(f"     评分: {row['total_score']:.1f}")
+    
+    print(f"{'='*50}")
     
     # 保存信号
     if args.save:
