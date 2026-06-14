@@ -108,7 +108,10 @@ CORE_UNIVERSE = {**ETF_UNIVERSE, **CONCEPT_UNIVERSE}
 FALLBACK_UNIVERSE = {**FALLBACK_EQUITY_UNIVERSE, **DEFENSE_UNIVERSE}
 
 # 相关性去重阈值
-CORRELATION_THRESHOLD = 0.70
+# 0.90 = 经验测试最优（收益107%，回撤-21%）
+# 0.70 = 数据驱动但回测表现差（收益59%）
+# 999 = 不去重，收益最高但回撤大（155%，-24%）
+CORRELATION_THRESHOLD = 0.90
 
 
 # ==================== 策略参数 ====================

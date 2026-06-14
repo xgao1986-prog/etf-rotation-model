@@ -220,16 +220,22 @@ class BacktestEngine:
         """
         预计算核心池的滚动相关性矩阵
         
-        对每对ETF，计算最近window日的收盘价相关性。
-        返回：{date: {ticker1: {ticker2: corr, ...}, ...}, ...}
+        使用 pct_change(fill_method=None) 避免前向填充污染。
+        要求每对ETF在窗口内有至少 window*0.67 个有效共同交易日。
         
-        注意：使用收盘价计算相关性，但用前一日数据避免未来泄露。
+        返回：{date: {ticker1: {ticker2: corr, ...}, ...}, ...}
         """
         # 将数据转为宽格式（日期为行，ticker为列）
         pivot = core_df.pivot_table(index='date', columns='ticker', values='close')
         
-        # 计算每日收益率
-        returns = pivot.pct_change().fillna(0)
+        # 计算每日收益率，不使用前向填充
+        returns = pivot.pct_change(fill_method=None)
+        
+        min_valid_pairs = int(window * 0.67)  # 至少67%的共同交易日
+        
+        # 使用 rolling.corr 批量计算，min_periods 确保有效数据量
+        # rolling.corr 返回 MultiIndex: (date, ticker1, ticker2)
+        rolling_corr = returns.rolling(window=window, min_periods=min_valid_pairs).corr()
         
         corr_history = {}
         dates = returns.index.tolist()
@@ -238,21 +244,21 @@ class BacktestEngine:
             if i < window:
                 continue
             
-            # 取最近window日的收益率
-            window_returns = returns.iloc[i-window:i]
-            
-            # 计算相关性矩阵
-            corr = window_returns.corr()
-            
-            # 转为字典格式
-            corr_dict = {}
-            for t1 in corr.columns:
-                corr_dict[t1] = {}
-                for t2 in corr.columns:
-                    if t1 != t2 and pd.notna(corr.loc[t1, t2]):
-                        corr_dict[t1][t2] = corr.loc[t1, t2]
-            
-            corr_history[date] = corr_dict
+            # 获取该日期的相关性矩阵切片
+            if date in rolling_corr.index.get_level_values(0):
+                day_corr = rolling_corr.loc[date]
+                
+                # 转为字典格式，只保留非NaN且ticker不同的项
+                corr_dict = {}
+                for t1 in day_corr.columns:
+                    corr_dict[t1] = {}
+                    for t2 in day_corr.columns:
+                        if t1 != t2:
+                            val = day_corr.loc[t1, t2]
+                            if pd.notna(val):
+                                corr_dict[t1][t2] = val
+                
+                corr_history[date] = corr_dict
         
         return corr_history
     
@@ -784,9 +790,8 @@ class BacktestEngine:
                             })
                     
                     # ========== 备选池兜底（核心池选不满时补充）==========
-                    # 默认关闭：回测显示当前参数下宽基补仓为负贡献
-                    # 未来可通过 cfg['fallback_equity_enabled'] = True 启用测试
-                    if max_new > 0 and available_cash > 1000 and self.cfg.get('fallback_equity_enabled', False):
+                    # 备选池兜底（核心池选不满时自动启用）
+                    if max_new > 0 and available_cash > 1000:
                         fallback_signals = buy_signals[buy_signals['ticker'].isin(_fallback_tickers)]
                         # 过滤掉已在持仓中的宽基
                         fallback_signals = fallback_signals[~fallback_signals['ticker'].isin(portfolio['positions'].keys())]
