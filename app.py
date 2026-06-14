@@ -1151,34 +1151,89 @@ def render_backtest(cfg):
         # ========== 年度收益对比 ==========
         st.subheader("📅 年度收益对比")
         nav_df = result["nav_df"].copy()
+        trades_df = result.get("trades_df", pd.DataFrame())
         if not nav_df.empty:
             nav_df["year"] = nav_df["date"].dt.year
-            yearly = nav_df.groupby("year").agg({
-                "nav": lambda x: (x.iloc[-1] / x.iloc[0]) - 1 if len(x) > 1 and x.iloc[0] > 0 else 0,
-            }).reset_index()
-            yearly.columns = ["年份", "策略收益"]
-
-            if "bench_return" in nav_df.columns:
-                bench_yearly = nav_df.groupby("year").agg({
-                    "bench_return": lambda x: x.iloc[-1] - x.iloc[0] if len(x) > 1 else 0,
-                }).reset_index()
-                bench_yearly.columns = ["年份", "基准收益"]
-                yearly = yearly.merge(bench_yearly, on="年份", how="left")
-            else:
-                yearly["基准收益"] = 0
-
-            yearly["超额"] = yearly["策略收益"] - yearly["基准收益"]
-
-            display_yearly = yearly.copy()
-            display_yearly["策略"] = display_yearly["策略收益"].apply(lambda x: format_pct(x, 1))
-            display_yearly["基准"] = display_yearly["基准收益"].apply(lambda x: format_pct(x, 1))
-            display_yearly["超额"] = display_yearly["超额"].apply(lambda x: format_pct(x, 1))
-
-            st.dataframe(
-                display_yearly[["年份", "策略", "基准", "超额"]],
-                use_container_width=True,
-                hide_index=True,
-            )
+            nav_df["daily_return"] = nav_df["nav"].pct_change()
+            nav_df["peak"] = nav_df["nav"].cummax()
+            nav_df["drawdown"] = (nav_df["nav"] - nav_df["peak"]) / nav_df["peak"]
+            
+            yearly_stats = []
+            for year, group in nav_df.groupby("year"):
+                if len(group) < 5:  # 数据不足，跳过
+                    continue
+                
+                nav_start = group["nav"].iloc[0]
+                nav_end = group["nav"].iloc[-1]
+                strategy_return = (nav_end / nav_start) - 1 if nav_start > 0 else 0
+                
+                # 基准收益
+                bench_return = 0
+                if "bench_return" in group.columns and group["bench_return"].notna().any():
+                    bench_start = group["bench_return"].iloc[0]
+                    bench_end = group["bench_return"].iloc[-1]
+                    bench_return = bench_end - bench_start
+                
+                # 日收益率统计
+                daily_rets = group["daily_return"].dropna()
+                trading_days = len(daily_rets)
+                
+                # 夏普率
+                vol = daily_rets.std() * np.sqrt(252) if len(daily_rets) > 1 else 0
+                years = trading_days / 252
+                annual_ret = (1 + strategy_return) ** (1 / max(years, 0.01)) - 1
+                sharpe = annual_ret / vol if vol > 0 else 0
+                
+                # 胜率（正收益交易日占比）
+                win_days = (daily_rets > 0).sum()
+                win_rate_days = win_days / len(daily_rets) if len(daily_rets) > 0 else 0
+                
+                # 最大回撤
+                max_dd = group["drawdown"].min()
+                
+                # 交易次数
+                year_trades = 0
+                if not trades_df.empty and "date" in trades_df.columns:
+                    year_trades = len(trades_df[pd.to_datetime(trades_df["date"]).dt.year == year])
+                
+                # 平均持仓
+                avg_hold = group["num_positions"].mean() if "num_positions" in group.columns else 0
+                
+                yearly_stats.append({
+                    "年份": int(year),
+                    "策略收益": strategy_return,
+                    "基准收益": bench_return,
+                    "超额": strategy_return - bench_return,
+                    "夏普率": sharpe,
+                    "胜率": win_rate_days,
+                    "波动率": vol,
+                    "最大回撤": max_dd,
+                    "交易次数": year_trades,
+                    "平均持仓": avg_hold,
+                })
+            
+            if yearly_stats:
+                yearly = pd.DataFrame(yearly_stats)
+                
+                # 格式化显示
+                display_yearly = yearly.copy()
+                display_yearly["策略"] = display_yearly["策略收益"].apply(lambda x: format_pct(x, 1))
+                display_yearly["基准"] = display_yearly["基准收益"].apply(lambda x: format_pct(x, 1))
+                display_yearly["超额"] = display_yearly["超额"].apply(lambda x: format_pct(x, 1))
+                display_yearly["夏普率"] = display_yearly["夏普率"].apply(lambda x: f"{x:.2f}")
+                display_yearly["胜率"] = display_yearly["胜率"].apply(lambda x: format_pct(x, 1))
+                display_yearly["波动率"] = display_yearly["波动率"].apply(lambda x: format_pct(x, 1))
+                display_yearly["最大回撤"] = display_yearly["最大回撤"].apply(lambda x: format_pct(x, 1))
+                display_yearly["交易次数"] = display_yearly["交易次数"].astype(int)
+                display_yearly["平均持仓"] = display_yearly["平均持仓"].apply(lambda x: f"{x:.1f}")
+                
+                # 按列顺序显示
+                cols = ["年份", "策略", "基准", "超额", "夏普率", "胜率", "波动率", "最大回撤", "交易次数", "平均持仓"]
+                st.dataframe(
+                    display_yearly[cols],
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
 
 def render_etf_analysis(cfg):

@@ -23,8 +23,10 @@ class BacktestEngine:
     def __init__(self, cfg=None):
         self.cfg = cfg or STRATEGY_CONFIG.copy()
         # v1.2: 自动合并市场状态配置（observer 模式，不改变交易逻辑）
+        # 仅当用户未显式设置 enabled 时，才注入默认 MARKET_REGIME_CONFIG
+        # 用户显式设置 enabled=False 时可以关闭 v1.2 observer
         from config import MARKET_REGIME_CONFIG
-        if not self.cfg.get('enabled', False):
+        if 'enabled' not in self.cfg:
             self.cfg.update(MARKET_REGIME_CONFIG)
         self.strategy = StrategyEngine(self.cfg)
         self.initial_capital = self.cfg.get('initial_capital', BACKTEST_CONFIG['initial_capital'])
