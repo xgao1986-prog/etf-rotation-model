@@ -25,7 +25,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import json
 
-from config import STRATEGY_CONFIG, ETF_UNIVERSE, DEFENSE_UNIVERSE, FALLBACK_EQUITY_UNIVERSE, BENCHMARK
+from config import STRATEGY_CONFIG, ETF_UNIVERSE, CONCEPT_UNIVERSE, DEFENSE_UNIVERSE, FALLBACK_EQUITY_UNIVERSE, BENCHMARK, CORE_UNIVERSE
 
 
 class StrategyEngine:
@@ -33,13 +33,13 @@ class StrategyEngine:
     
     def __init__(self, cfg=None):
         self.cfg = cfg or STRATEGY_CONFIG
-        self.tickers = list(ETF_UNIVERSE.keys())
+        self.tickers = list(CORE_UNIVERSE.keys())  # 核心池：行业+概念
         self.benchmark = BENCHMARK
         # 三类资产分类
-        self.stock_tickers = list(ETF_UNIVERSE.keys())
+        self.core_tickers = list(CORE_UNIVERSE.keys())  # 核心池（统一排序）
         self.fallback_tickers = list(FALLBACK_EQUITY_UNIVERSE.keys())
         self.defense_tickers = list(DEFENSE_UNIVERSE.keys())
-        self.all_tickers = self.stock_tickers + self.fallback_tickers + self.defense_tickers
+        self.all_tickers = self.core_tickers + self.fallback_tickers + self.defense_tickers
     
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -340,7 +340,10 @@ class StrategyEngine:
         else:
             scores_df['bull_market'] = True  # 无基准数据时默认允许（向后兼容）
         
-        buy_mask = (
+        # 核心池统一评分：标准入场条件（32只核心池统一）
+        import config as _cfg_module
+        _core_tickers = list(getattr(_cfg_module, 'CORE_UNIVERSE', {}).keys())
+        core_mask = scores_df['ticker'].isin(_core_tickers) & (
             (scores_df['trend_score'] >= self.cfg['min_trend_score']) &
             (scores_df['confirm_score'] >= self.cfg['min_confirm_score']) &
             (scores_df['total_score'] >= self.cfg['min_total_score']) &
@@ -348,13 +351,12 @@ class StrategyEngine:
             (scores_df['ma20_slope'] > 0)
         )
         
-        # 宽基补仓ETF：只在大盘强势时触发，补足beta
-        import config as _cfg_module
+        # 备选池：宽松入场条件（宽基ETF）
         _fallback_tickers = list(getattr(_cfg_module, 'FALLBACK_EQUITY_UNIVERSE', {}).keys())
         fallback_mask = scores_df['ticker'].isin(_fallback_tickers) & scores_df['bull_market'] & (
-            (scores_df['trend_score'] >= 10) &  # 比股票ETF低5分
-            (scores_df['confirm_score'] >= 2) &  # 比股票ETF低2分
-            (scores_df['total_score'] >= 25) &   # 比股票ETF低15分
+            (scores_df['trend_score'] >= 10) &  # 比核心池低5分
+            (scores_df['confirm_score'] >= 2) &  # 比核心池低2分
+            (scores_df['total_score'] >= 25) &   # 比核心池低15分
             (scores_df['prev_close'] > scores_df['ma20'] * 0.98) &  # 允许2%缓冲
             (scores_df['ma20_slope'] > -0.01)   # 允许均线轻微向下
         )
@@ -362,14 +364,14 @@ class StrategyEngine:
         # 防御资产更宽松的入场条件（低相关补仓，不依赖大盘强势）
         _defense_tickers = list(_cfg_module.DEFENSE_UNIVERSE.keys())
         defense_mask = scores_df['ticker'].isin(_defense_tickers) & (
-            (scores_df['trend_score'] >= 10) &  # 比股票ETF低5分
-            (scores_df['confirm_score'] >= 2) &  # 比股票ETF低2分
-            (scores_df['total_score'] >= 30) &   # 比股票ETF低10分
+            (scores_df['trend_score'] >= 10) &  # 比核心池低5分
+            (scores_df['confirm_score'] >= 2) &  # 比核心池低2分
+            (scores_df['total_score'] >= 30) &   # 比核心池低10分
             (scores_df['prev_close'] > scores_df['ma20'] * 0.98) &  # 允许2%缓冲
             (scores_df['ma20_slope'] > -0.001)   # 允许均线微跌
         )
         
-        scores_df.loc[buy_mask | fallback_mask | defense_mask, 'signal_type'] = 'BUY'
+        scores_df.loc[core_mask | fallback_mask | defense_mask, 'signal_type'] = 'BUY'
         
         # 出场信号：前一日收盘价跌破均线
         sell_mask = scores_df['prev_close'] < scores_df['ma20']

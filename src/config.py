@@ -61,6 +61,26 @@ BENCHMARK = '000300.SH'  # 沪深300
 ETF_CODES = [code.split('.')[0] for code in ETF_UNIVERSE.keys()]
 BENCHMARK_CODE = '000300'
 
+# ==================== 概念ETF池（新增）====================
+CONCEPT_UNIVERSE = {
+    '588200.SH': '科创芯片ETF',
+    '159869.SZ': '游戏ETF',
+    '516510.SH': '云计算ETF',
+    '562500.SH': '机器人ETF',
+    '159740.SZ': '碳中和ETF',
+    '515050.SH': '5GETF',
+    '512690.SH': '白酒ETF',
+    '515170.SH': '食品饮料ETF',
+    '159766.SZ': '旅游ETF',
+    '159992.SZ': '创新药ETF',
+    '159898.SZ': '医疗器械ETF',
+    '515790.SH': '光伏ETF',
+    '159566.SZ': '储能电池ETF',
+    '513160.SH': '港股科技30ETF',
+    '510880.SH': '红利ETF',
+    '560700.SH': '央企改革ETF',
+}
+
 # ==================== 防御资产池（低相关补仓资产）====================
 # 不参与日常轮动，只在行业ETF和宽基ETF都买不满时作为低相关补仓资产
 DEFENSE_UNIVERSE = {
@@ -79,7 +99,17 @@ FALLBACK_EQUITY_UNIVERSE = {
 }
 
 # 所有可交易标的（用于数据下载等）
-ALL_TRADABLE_ETFS = {**ETF_UNIVERSE, **FALLBACK_EQUITY_UNIVERSE, **DEFENSE_UNIVERSE}
+ALL_TRADABLE_ETFS = {**ETF_UNIVERSE, **CONCEPT_UNIVERSE, **FALLBACK_EQUITY_UNIVERSE, **DEFENSE_UNIVERSE}
+
+# 核心池（统一排序）：行业ETF + 概念ETF
+CORE_UNIVERSE = {**ETF_UNIVERSE, **CONCEPT_UNIVERSE}
+
+# 备选池（兜底）：宽基 + 防御
+FALLBACK_UNIVERSE = {**FALLBACK_EQUITY_UNIVERSE, **DEFENSE_UNIVERSE}
+
+# 相关性去重阈值
+CORRELATION_THRESHOLD = 0.70
+
 
 # ==================== 策略参数 ====================
 STRATEGY_CONFIG = {

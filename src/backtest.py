@@ -12,7 +12,7 @@ import numpy as np
 from datetime import datetime
 import json
 
-from config import STRATEGY_CONFIG, ETF_UNIVERSE, DEFENSE_UNIVERSE, DEFENSE_ALLOCATION, BACKTEST_CONFIG
+from config import STRATEGY_CONFIG, ETF_UNIVERSE, CONCEPT_UNIVERSE, DEFENSE_UNIVERSE, DEFENSE_ALLOCATION, BACKTEST_CONFIG, CORE_UNIVERSE, CORRELATION_THRESHOLD, FALLBACK_EQUITY_UNIVERSE
 from strategy import StrategyEngine
 
 
@@ -52,33 +52,33 @@ class BacktestEngine:
             dict with backtest results
         """
         import config as _cfg_module
-        _stock_tickers = list(_cfg_module.ETF_UNIVERSE.keys())
+        _core_tickers = list(getattr(_cfg_module, 'CORE_UNIVERSE', {}).keys())
         _fallback_tickers = list(getattr(_cfg_module, 'FALLBACK_EQUITY_UNIVERSE', {}).keys())
         _defense_tickers = list(_cfg_module.DEFENSE_UNIVERSE.keys())
         
         # 分离三类资产
-        stock_df = market_df[market_df['ticker'].isin(_stock_tickers)].copy()
+        core_df = market_df[market_df['ticker'].isin(_core_tickers)].copy()
         fallback_df = market_df[market_df['ticker'].isin(_fallback_tickers)].copy()
         defense_df = market_df[market_df['ticker'].isin(_defense_tickers)].copy()
         
-        # 步骤1-2：对行业ETF逐只计算指标和评分
+        # 步骤1-2：对核心池（行业+概念）逐只计算指标和评分
         all_scores = []
-        for ticker in stock_df['ticker'].unique():
-            ticker_df = stock_df[stock_df['ticker'] == ticker].copy()
+        for ticker in core_df['ticker'].unique():
+            ticker_df = core_df[core_df['ticker'] == ticker].copy()
             if len(ticker_df) < 50:  # 数据不足跳过
                 continue
             scored = self.strategy.calculate_total_score(ticker_df)
             all_scores.append(scored)
         
         if not all_scores:
-            return {'error': '无有效行业ETF数据'}
+            return {'error': '无有效核心池数据'}
         
         scores_df = pd.concat(all_scores, ignore_index=True)
         
-        # 步骤3：行业ETF全池横截面动量排名
+        # 步骤3：核心池全池横截面动量排名（32只统一排名）
         scores_df = self.strategy.rank_all_momentum(scores_df)
         
-        # 步骤4：计算行业ETF总评分
+        # 步骤4：计算核心池总评分
         scores_df = self.strategy.compute_total_score(scores_df)
         
         # 步骤5：对宽基补仓ETF单独计算简化评分（不参与横截面动量排名）
@@ -119,17 +119,22 @@ class BacktestEngine:
                 scores_df[defense_cols].fillna(0).sum(axis=1)
             )
         
-        # 步骤6：生成信号（含大盘择时合并）
+        # 预计算核心池的相关性矩阵（用于相关性去重）
+        # 使用最近60日收盘价计算滚动相关性
+        _corr_threshold = getattr(_cfg_module, 'CORRELATION_THRESHOLD', 0.70)
+        corr_matrix = self._compute_correlation_matrix(core_df, window=60)
+        
+        # 步骤7：生成信号（含大盘择时合并）
         signals_df = self.strategy.generate_signals(scores_df, bench_df)
         
-        # 步骤7：执行回测
-        result = self._execute_backtest(signals_df, market_df, bench_df)
+        # 步骤8：执行回测（含相关性去重 + 防御模块 + 动态止盈）
+        result = self._execute_backtest(signals_df, market_df, bench_df, corr_matrix, _corr_threshold)
         
         # v1.2: 市场状态检测（observer 模式，不改变交易逻辑）
         if self.cfg.get('enabled', False) and self.cfg.get('mode', '') == 'observer' and 'error' not in result:
             from market_regime import MarketRegimeDetector
             detector = MarketRegimeDetector(self.cfg)
-            regime_history = detector.detect_history(bench_df, stock_df)
+            regime_history = detector.detect_history(bench_df, core_df)
             
             if not regime_history.empty and 'nav_df' in result and not result['nav_df'].empty:
                 # 合并 regime 到 nav_df
@@ -211,8 +216,48 @@ class BacktestEngine:
         
         return True
     
-    def _execute_backtest(self, signals_df, market_df, bench_df) -> dict:
-        """执行回测逻辑"""
+    def _compute_correlation_matrix(self, core_df: pd.DataFrame, window: int = 60) -> dict:
+        """
+        预计算核心池的滚动相关性矩阵
+        
+        对每对ETF，计算最近window日的收盘价相关性。
+        返回：{date: {ticker1: {ticker2: corr, ...}, ...}, ...}
+        
+        注意：使用收盘价计算相关性，但用前一日数据避免未来泄露。
+        """
+        # 将数据转为宽格式（日期为行，ticker为列）
+        pivot = core_df.pivot_table(index='date', columns='ticker', values='close')
+        
+        # 计算每日收益率
+        returns = pivot.pct_change().fillna(0)
+        
+        corr_history = {}
+        dates = returns.index.tolist()
+        
+        for i, date in enumerate(dates):
+            if i < window:
+                continue
+            
+            # 取最近window日的收益率
+            window_returns = returns.iloc[i-window:i]
+            
+            # 计算相关性矩阵
+            corr = window_returns.corr()
+            
+            # 转为字典格式
+            corr_dict = {}
+            for t1 in corr.columns:
+                corr_dict[t1] = {}
+                for t2 in corr.columns:
+                    if t1 != t2 and pd.notna(corr.loc[t1, t2]):
+                        corr_dict[t1][t2] = corr.loc[t1, t2]
+            
+            corr_history[date] = corr_dict
+        
+        return corr_history
+    
+    def _execute_backtest(self, signals_df, market_df, bench_df, corr_matrix=None, corr_threshold=0.70) -> dict:
+        """执行回测逻辑（含相关性去重）"""
         
         # 获取所有交易日
         dates = sorted(signals_df['date'].unique())
@@ -451,7 +496,7 @@ class BacktestEngine:
                     # 当大盘择时信号低时，强制配置防御资产（黄金/国债）
                     import config as _config_module
                     _defense_tickers = list(_config_module.DEFENSE_UNIVERSE.keys())
-                    _stock_tickers = list(_config_module.ETF_UNIVERSE.keys())
+                    _core_tickers = list(getattr(_config_module, 'CORE_UNIVERSE', {}).keys())
                     _fallback_tickers = list(getattr(_config_module, 'FALLBACK_EQUITY_UNIVERSE', {}).keys())
                     
                     # 动态防御比例计算
@@ -635,87 +680,110 @@ class BacktestEngine:
                                                 'reason': f"防御配置({max_total_position:.0%}仓位): 评分{defense_row['total_score']:.1f}"
                                             })
                     
-                    # ========== 买入行业ETF（第二层） ==========
+                    # ========== 买入核心池ETF（统一排序 + 相关性去重）==========
                     if max_new > 0:
-                        # 只买入行业ETF（不含宽基和防御）
-                        stock_signals = buy_signals[buy_signals['ticker'].isin(_stock_tickers)]
-                        current_stock_holdings = sum(1 for t in portfolio['positions'] if t in _stock_tickers)
-                        stock_slots = min(max_new, self.cfg['max_holdings'] - current_stock_holdings)
-                        n_buy = min(stock_slots, len(stock_signals))
+                        # 核心池买入信号（含行业和概念ETF）
+                        core_signals = buy_signals[buy_signals['ticker'].isin(_core_tickers)]
+                        current_core_holdings = sum(1 for t in portfolio['positions'] if t in _core_tickers)
+                        core_slots = min(max_new, self.cfg['max_holdings'] - current_core_holdings)
                         
-                        if n_buy > 0:
-                            base_weight = min(self.cfg['max_position_per_etf'], 1.0 / n_buy)
+                        # 按总评分排序
+                        core_signals = core_signals.sort_values('total_score', ascending=False)
+                        
+                        # 已选中的核心池ETF（用于相关性去重）
+                        selected_core = [t for t in portfolio['positions'] if t in _core_tickers]
+                        
+                        for _, row in core_signals.iterrows():
+                            if core_slots <= 0:
+                                break
                             
-                            for _, row in stock_signals.head(n_buy).iterrows():
-                                ticker = row['ticker']
-                                
-                                # 检查冷却期（实验性v1.2）
-                                if ticker in cooling_list:
-                                    days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
-                                    if days_since_stop < self.cfg.get('cooling_period', 0):
-                                        continue  # 仍在冷却期内，跳过买入
-                                
-                                if ticker in day_prices and ticker not in portfolio['positions']:
-                                    price = day_prices[ticker]
-                                    
-                                    # 冷却期后重新买入需要更高评分（实验性v1.2）
-                                    min_score = self.cfg['min_total_score']
-                                    if ticker in cooling_list:
-                                        days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
-                                        if days_since_stop >= self.cfg.get('cooling_period', 0):
-                                            min_score += self.cfg.get('cooling_score_boost', 0)
-                                    
-                                    # 评分不达标则跳过
-                                    if row['total_score'] < min_score:
-                                        continue
-                                    
-                                    # 目标金额 = 当前净值 × 单只权重 × 大盘择时仓位
-                                    target_amount = current_value * base_weight * max_total_position
-                                    target_amount = min(target_amount, available_cash * 0.95)
-                                    
-                                    if target_amount < 1000:
-                                        continue
-                                    
-                                    shares = int(target_amount / price)
-                                    if shares < 1:
-                                        continue
-                                    
-                                    cost = shares * price
-                                    commission = calc_commission(cost)
-                                    total_cost = cost + commission
-                                    
-                                    if total_cost > portfolio['cash']:
-                                        continue
-                                    
-                                    portfolio['cash'] -= total_cost
-                                    available_cash -= total_cost
-                                    
-                                    portfolio['positions'][ticker] = {
-                                        'shares': shares,
-                                        'cost': price,
-                                        'entry_date': date_str,
-                                        'high_water': price  # 初始化最高价（动态止盈用）
-                                    }
-                                    
-                                    # 从冷却期列表中移除（已重新买入）
-                                    if ticker in cooling_list:
-                                        del cooling_list[ticker]
-                                    
-                                    max_new -= 1
-                                    
-                                    trade_records.append({
-                                        'date': date_str,
-                                        'ticker': ticker,
-                                        'action': 'BUY',
-                                        'price': price,
-                                        'shares': shares,
-                                        'amount': cost,
-                                        'commission': commission,
-                                        'pnl_pct': 0,
-                                        'reason': f"评分{row['total_score']:.1f}"
-                                    })
+                            ticker = row['ticker']
+                            
+                            # 检查冷却期（实验性v1.2）
+                            if ticker in cooling_list:
+                                days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
+                                if days_since_stop < self.cfg.get('cooling_period', 0):
+                                    continue  # 仍在冷却期内，跳过买入
+                            
+                            if ticker not in day_prices or ticker in portfolio['positions']:
+                                continue
+                            
+                            # 相关性去重：检查与已选中ETF的相关性
+                            if corr_matrix and date in corr_matrix and ticker in corr_matrix[date]:
+                                skip = False
+                                for selected_ticker in selected_core:
+                                    if selected_ticker in corr_matrix[date][ticker]:
+                                        corr = corr_matrix[date][ticker][selected_ticker]
+                                        if corr > corr_threshold:
+                                            skip = True
+                                            break
+                                if skip:
+                                    continue  # 相关性过高，跳过
+                            
+                            # 冷却期后重新买入需要更高评分（实验性v1.2）
+                            min_score = self.cfg['min_total_score']
+                            if ticker in cooling_list:
+                                days_since_stop = (pd.to_datetime(date) - pd.to_datetime(cooling_list[ticker])).days
+                                if days_since_stop >= self.cfg.get('cooling_period', 0):
+                                    min_score += self.cfg.get('cooling_score_boost', 0)
+                            
+                            # 评分不达标则跳过
+                            if row['total_score'] < min_score:
+                                continue
+                            
+                            price = day_prices[ticker]
+                            
+                            # 目标金额 = 当前净值 × 单只权重 × 大盘择时仓位
+                            # 统一分配：核心池最多5只，每只均分
+                            base_weight = min(self.cfg['max_position_per_etf'], 1.0 / self.cfg['max_holdings'])
+                            target_amount = current_value * base_weight * max_total_position
+                            target_amount = min(target_amount, available_cash * 0.95)
+                            
+                            if target_amount < 1000:
+                                continue
+                            
+                            shares = int(target_amount / price)
+                            if shares < 1:
+                                continue
+                            
+                            cost = shares * price
+                            commission = calc_commission(cost)
+                            total_cost = cost + commission
+                            
+                            if total_cost > portfolio['cash']:
+                                continue
+                            
+                            portfolio['cash'] -= total_cost
+                            available_cash -= total_cost
+                            
+                            portfolio['positions'][ticker] = {
+                                'shares': shares,
+                                'cost': price,
+                                'entry_date': date_str,
+                                'high_water': price  # 初始化最高价（动态止盈用）
+                            }
+                            
+                            # 从冷却期列表中移除（已重新买入）
+                            if ticker in cooling_list:
+                                del cooling_list[ticker]
+                            
+                            selected_core.append(ticker)
+                            core_slots -= 1
+                            max_new -= 1
+                            
+                            trade_records.append({
+                                'date': date_str,
+                                'ticker': ticker,
+                                'action': 'BUY',
+                                'price': price,
+                                'shares': shares,
+                                'amount': cost,
+                                'commission': commission,
+                                'pnl_pct': 0,
+                                'reason': f"核心池(评分{row['total_score']:.1f})"
+                            })
                     
-                    # ========== 买入宽基补仓ETF（第二层）==========
+                    # ========== 备选池兜底（核心池选不满时补充）==========
                     # 默认关闭：回测显示当前参数下宽基补仓为负贡献
                     # 未来可通过 cfg['fallback_equity_enabled'] = True 启用测试
                     if max_new > 0 and available_cash > 1000 and self.cfg.get('fallback_equity_enabled', False):
@@ -796,7 +864,7 @@ class BacktestEngine:
                                         'amount': cost,
                                         'commission': commission,
                                         'pnl_pct': 0,
-                                        'reason': f"宽基补仓(评分{row['total_score']:.1f})"
+                                        'reason': f"备选池兜底(评分{row['total_score']:.1f})"
                                     })
                     
                     # ========== 防御资产填充（第三层，优先级最低）==========
