@@ -394,18 +394,21 @@ def cmd_status(args):
         stock_df = market_df[market_df['ticker'].isin(ETF_UNIVERSE.keys())].copy()
         
         if not bench_df.empty:
-            regime = detector.detect(bench_df, stock_df)
-            print(f"\n{'='*50}")
-            print(f"市场状态 (v1.2)")
-            print(f"{'='*50}")
-            print(f"  状态: {regime['regime_name']} (ID={regime['regime_id']})")
-            print(f"  置信度: {regime['confidence']:.1%}")
-            print(f"  原因: {regime['reason']}")
-            print(f"  趋势位置: {regime['trend_position']:.3f}")
-            print(f"  波动率: {regime['vol_20']:.2%} ({regime['vol_regime']})")
-            if not pd.isna(regime['market_breadth']):
-                print(f"  市场宽度: {regime['market_breadth']:.1%}")
-            print(f"{'='*50}")
+            regime_history = detector.detect_history(bench_df, stock_df)
+            if not regime_history.empty:
+                regime = regime_history.iloc[-1].to_dict()
+                regime['regime_name'] = detector.STATE_NAMES.get(regime.get('regime_id', 3), '震荡')
+                print(f"\n{'='*50}")
+                print(f"市场状态 (v1.2)")
+                print(f"{'='*50}")
+                print(f"  状态: {regime['regime_name']} (ID={regime['regime_id']})")
+                print(f"  置信度: {regime['confidence']:.1%}")
+                print(f"  原因: {regime['reason']}")
+                print(f"  趋势位置: {regime['trend_position']:.3f}")
+                print(f"  波动率: {regime['vol_20']:.2%} ({regime['vol_regime']})")
+                if not pd.isna(regime['market_breadth']):
+                    print(f"  市场宽度: {regime['market_breadth']:.1%}")
+                print(f"{'='*50}")
     
     # 显示最近日志
     logs = db.get_logs(limit=5)

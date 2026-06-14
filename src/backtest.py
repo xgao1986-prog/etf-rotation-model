@@ -21,7 +21,11 @@ class BacktestEngine:
     """回测引擎"""
     
     def __init__(self, cfg=None):
-        self.cfg = cfg or STRATEGY_CONFIG
+        self.cfg = cfg or STRATEGY_CONFIG.copy()
+        # v1.2: 自动合并市场状态配置（observer 模式，不改变交易逻辑）
+        from config import MARKET_REGIME_CONFIG
+        if not self.cfg.get('enabled', False):
+            self.cfg.update(MARKET_REGIME_CONFIG)
         self.strategy = StrategyEngine(self.cfg)
         self.initial_capital = self.cfg.get('initial_capital', BACKTEST_CONFIG['initial_capital'])
     
