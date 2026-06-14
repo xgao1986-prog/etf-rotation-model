@@ -466,6 +466,54 @@ def make_nav_figure(result):
         row_heights=[0.7, 0.3],
     )
 
+    # v1.2: 市场状态背景着色（连续 regime 段）
+    if "regime_id" in nav_df.columns and nav_df["regime_id"].notna().any():
+        regime_colors = {
+            1: "rgba(214, 79, 79, 0.08)",   # 强牛 - 红
+            2: "rgba(240, 162, 2, 0.08)",   # 弱牛 - 橙
+            3: "rgba(91, 141, 184, 0.08)",  # 震荡 - 蓝
+            4: "rgba(46, 157, 117, 0.08)",  # 熊市 - 绿
+        }
+        # 找连续 regime 段
+        nav_df_sorted = nav_df.sort_values("date").reset_index(drop=True)
+        current_regime = None
+        seg_start = None
+        for i, row in nav_df_sorted.iterrows():
+            rid = row["regime_id"]
+            if pd.isna(rid):
+                continue
+            if rid != current_regime:
+                # 结束上一个段
+                if current_regime is not None and seg_start is not None:
+                    end_date = nav_df_sorted.iloc[i - 1]["date"]
+                    color = regime_colors.get(int(current_regime), "rgba(128,128,128,0.05)")
+                    fig.add_vrect(
+                        x0=seg_start, x1=end_date,
+                        fillcolor=color, opacity=1, line_width=0,
+                        row=1, col=1,
+                    )
+                    fig.add_vrect(
+                        x0=seg_start, x1=end_date,
+                        fillcolor=color, opacity=1, line_width=0,
+                        row=2, col=1,
+                    )
+                current_regime = rid
+                seg_start = row["date"]
+        # 结束最后一个段
+        if current_regime is not None and seg_start is not None:
+            end_date = nav_df_sorted.iloc[-1]["date"]
+            color = regime_colors.get(int(current_regime), "rgba(128,128,128,0.05)")
+            fig.add_vrect(
+                x0=seg_start, x1=end_date,
+                fillcolor=color, opacity=1, line_width=0,
+                row=1, col=1,
+            )
+            fig.add_vrect(
+                x0=seg_start, x1=end_date,
+                fillcolor=color, opacity=1, line_width=0,
+                row=2, col=1,
+            )
+
     base_nav = nav_df["nav"].iloc[0]
     fig.add_trace(
         go.Scatter(
