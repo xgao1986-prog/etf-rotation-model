@@ -276,13 +276,15 @@ def cmd_signal(args):
     # 获取最新日期的买入信号
     latest = scores_df['date'].max()
     
-    # v1.2: 检测当前市场状态
+    # v1.2: 检测当前市场状态（使用 detect_history 确保状态确认逻辑正确）
     from market_regime import MarketRegimeDetector
-    from config import build_config
     regime_cfg = build_config()
     detector = MarketRegimeDetector(regime_cfg)
     stock_df = market_df[market_df['ticker'].isin(ETF_UNIVERSE.keys())].copy()
-    regime = detector.detect(bench_df, stock_df)
+    regime_history = detector.detect_history(bench_df, stock_df)
+    regime = regime_history.iloc[-1].to_dict() if not regime_history.empty else None
+    if regime:
+        regime['regime_name'] = detector.STATE_NAMES.get(regime.get('regime_id', 3), '震荡')
     
     latest_signals = signals_df[signals_df['date'] == latest]
     buy_signals = latest_signals[

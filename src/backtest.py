@@ -120,7 +120,7 @@ class BacktestEngine:
         result = self._execute_backtest(signals_df, market_df, bench_df)
         
         # v1.2: 市场状态检测（observer 模式，不改变交易逻辑）
-        if self.cfg.get('market_regime_enabled', True) and 'error' not in result:
+        if self.cfg.get('enabled', False) and self.cfg.get('mode', '') == 'observer' and 'error' not in result:
             from market_regime import MarketRegimeDetector
             detector = MarketRegimeDetector(self.cfg)
             regime_history = detector.detect_history(bench_df, stock_df)

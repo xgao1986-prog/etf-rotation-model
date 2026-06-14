@@ -667,14 +667,17 @@ def render_dashboard(cfg):
         if not bench_latest.empty:
             market_signal_val = bench_latest["market_signal"].iloc[0]
 
-    # v1.2: 市场状态检测
+    # v1.2: 市场状态检测（使用 detect_history 确保状态确认逻辑正确）
     regime_info = None
     if not bench_df_dash.empty:
         from market_regime import MarketRegimeDetector
         detector = MarketRegimeDetector(cfg)
         market_df_dash = load_market_data(ticker=list(ETF_UNIVERSE.keys()))
         stock_df_dash = market_df_dash[market_df_dash["ticker"].isin(ETF_UNIVERSE.keys())].copy() if not market_df_dash.empty else None
-        regime_info = detector.detect(bench_df_dash, stock_df_dash)
+        regime_history = detector.detect_history(bench_df_dash, stock_df_dash)
+        if not regime_history.empty:
+            regime_info = regime_history.iloc[-1].to_dict()
+            regime_info['regime_name'] = detector.STATE_NAMES.get(regime_info.get('regime_id', 3), '震荡')
 
     if market_signal_val >= 0.9:
         mkt_text, mkt_color = "满仓", "#2e9d75"

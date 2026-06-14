@@ -133,11 +133,15 @@ class MarketRegimeDetector:
             lambda x: x.rolling(self.ma_long).mean().shift(1)
         )
         
-        # 收盘价是否高于MA50（用前一日收盘）
-        df['above_ma50'] = (df['close'].shift(1) > df['ma50']).astype(int)
+        # 收盘价是否高于MA50（用前一日收盘，按 ticker 分组避免跨 ETF 污染）
+        df['prev_close'] = df.groupby('ticker')['close'].shift(1)
+        df['above_ma50'] = (df['prev_close'] > df['ma50']).astype(int)
         
-        # 每日宽度 = 高于MA50的ETF比例
-        breadth = df.groupby('date')['above_ma50'].mean().reset_index()
+        # 过滤 MA50 不足的早期数据（NaN 不应当 0 参与平均）
+        df_valid = df.dropna(subset=['ma50', 'prev_close'])
+        
+        # 每日宽度 = 高于MA50的ETF比例（只统计有效数据）
+        breadth = df_valid.groupby('date')['above_ma50'].mean().reset_index()
         breadth.columns = ['date', 'market_breadth']
         
         return breadth

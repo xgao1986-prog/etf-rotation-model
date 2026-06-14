@@ -14,12 +14,16 @@ import numpy as np
 sys.path.insert(0, 'src')
 
 from database import ETFDatabase
-from config import ALL_TRADABLE_ETFS, BENCHMARK, build_config, ETF_UNIVERSE, DEFENSE_UNIVERSE
+from config import ALL_TRADABLE_ETFS, BENCHMARK, STRATEGY_CONFIG, ETF_UNIVERSE, DEFENSE_UNIVERSE
 from backtest import BacktestEngine
 from market_regime import MarketRegimeDetector
 
-# 运行回测（observer 模式）
-cfg = build_config()
+# 运行回测（observer 模式，使用与 CLI 一致的默认配置）
+# CLI 用 BacktestEngine() 默认读取 STRATEGY_CONFIG，分析脚本也应统一
+cfg = STRATEGY_CONFIG.copy()
+# 补充市场状态模块必需的键（与 MARKET_REGIME_CONFIG 保持一致）
+from config import MARKET_REGIME_CONFIG
+cfg.update(MARKET_REGIME_CONFIG)
 engine = BacktestEngine(cfg)
 
 db = ETFDatabase()
@@ -35,43 +39,43 @@ nav_df = result['nav_df']
 # backtest.py 已经合并了 regime 到 nav_df，直接使用
 analysis = nav_df.copy()
 
-# 计算防御资产占比（从 positions_pct 中提取）
+# 计算防御资产占比（NAV占比：positions_pct 中每个值已经是占总 NAV 的比例）
 def get_defense_pct(row):
     if pd.isna(row['positions_pct']) or not isinstance(row['positions_pct'], dict):
         return 0.0
     defense_tickers = set(DEFENSE_UNIVERSE.keys())
-    total = sum(row['positions_pct'].values())
-    defense = sum(v for k, v in row['positions_pct'].items() if k in defense_tickers)
-    return defense / total if total > 0 else 0.0
+    return sum(v for k, v in row['positions_pct'].items() if k in defense_tickers)
 
 analysis['defense_pct'] = analysis.apply(get_defense_pct, axis=1)
 
-# 从 positions_pct 计算股票ETF和宽基占比
+# 从 positions_pct 计算股票ETF和宽基占比（NAV占比）
 stock_tickers = set(ETF_UNIVERSE.keys())
 
 def get_stock_pct(row):
     if pd.isna(row['positions_pct']) or not isinstance(row['positions_pct'], dict):
         return 0.0
-    total = sum(row['positions_pct'].values())
-    stock = sum(v for k, v in row['positions_pct'].items() if k in stock_tickers)
-    return stock / total if total > 0 else 0.0
+    return sum(v for k, v in row['positions_pct'].items() if k in stock_tickers)
 
 analysis['stock_pct'] = analysis.apply(get_stock_pct, axis=1)
 
 def get_fallback_pct(row):
     if pd.isna(row['positions_pct']) or not isinstance(row['positions_pct'], dict):
         return 0.0
-    total = sum(row['positions_pct'].values())
-    fallback = sum(v for k, v in row['positions_pct'].items() if k not in stock_tickers and k not in set(DEFENSE_UNIVERSE.keys()))
-    return fallback / total if total > 0 else 0.0
+    return sum(v for k, v in row['positions_pct'].items() if k not in stock_tickers and k not in set(DEFENSE_UNIVERSE.keys()))
 
 analysis['fallback_pct'] = analysis.apply(get_fallback_pct, axis=1)
 
 # 沪深300日收益
 analysis['bench_daily_return'] = analysis['bench_price'].pct_change()
 
-# 现金占比
+# 现金占比（NAV占比）
 analysis['cash_pct'] = analysis['cash'] / analysis['nav']
+
+# 验证：各占比之和应接近 1.0（允许小数误差）
+analysis['total_pct'] = analysis['stock_pct'] + analysis['defense_pct'] + analysis['fallback_pct'] + analysis['cash_pct']
+print(f"占比验证: min={analysis['total_pct'].min():.4f}, max={analysis['total_pct'].max():.4f}, mean={analysis['total_pct'].mean():.4f}")
+print(f"（股票 + 防御 + 宽基 + 现金 = 1.0 表示 NAV 占比口径一致）")
+print()
 
 # 按状态统计
 print("=" * 70)
