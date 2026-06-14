@@ -47,6 +47,8 @@ class ETFDatabase:
                     volume REAL,
                     amount REAL,
                     adj_close REAL,
+                    source TEXT,
+                    adjust_type TEXT DEFAULT 'qfq',
                     PRIMARY KEY (ticker, date)
                 )
             ''')

@@ -87,8 +87,9 @@ class DataFetcher:
             df['ticker'] = f"{code}.SH" if code.startswith('5') else f"{code}.SZ"
             df['adj_close'] = df['close']
             df['source'] = 'AKShare'
+            df['adjust_type'] = 'qfq'  # 前复权
             
-            cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'adj_close', 'source']
+            cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'adj_close', 'source', 'adjust_type']
             df = df[[c for c in cols if c in df.columns]]
             
             return df.sort_values('date').reset_index(drop=True)
@@ -348,12 +349,13 @@ def import_from_kimi(df: pd.DataFrame, db=None, source_label='iFinD') -> int:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # 添加adj_close和source标记
+    # 添加adj_close、source和adjust_type标记
     df['adj_close'] = df['close']
     df['source'] = source_label
+    df['adjust_type'] = 'forward'  # iFinD默认前复权
     
     # 选择标准列
-    cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'adj_close', 'source']
+    cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'adj_close', 'source', 'adjust_type']
     df = df[[c for c in cols if c in df.columns]]
     
     # 保存到数据库
