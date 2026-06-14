@@ -466,13 +466,13 @@ def make_nav_figure(result):
         row_heights=[0.7, 0.3],
     )
 
-    # v1.2: 市场状态背景着色（连续 regime 段）
+    # v1.2: 市场状态背景着色（连续 regime 段，更明显的透明度）
     if "regime_id" in nav_df.columns and nav_df["regime_id"].notna().any():
         regime_colors = {
-            1: "rgba(214, 79, 79, 0.08)",   # 强牛 - 红
-            2: "rgba(240, 162, 2, 0.08)",   # 弱牛 - 橙
-            3: "rgba(91, 141, 184, 0.08)",  # 震荡 - 蓝
-            4: "rgba(46, 157, 117, 0.08)",  # 熊市 - 绿
+            1: "rgba(214, 79, 79, 0.15)",   # 强牛 - 红
+            2: "rgba(240, 162, 2, 0.15)",   # 弱牛 - 橙
+            3: "rgba(91, 141, 184, 0.15)",  # 震荡 - 蓝
+            4: "rgba(46, 157, 117, 0.15)",  # 熊市 - 绿
         }
         # 找连续 regime 段
         nav_df_sorted = nav_df.sort_values("date").reset_index(drop=True)
@@ -1045,6 +1045,8 @@ def render_backtest(cfg):
                 fig_pos.update_layout(bargap=0, bargroupgap=0)
                 
                 # 下子图：仓位分配堆叠面积
+                import config as _config_module
+                
                 colors = [
                     "#1769aa", "#2e9d75", "#f0a202", "#d64f4f", "#9c27b0",
                     "#607d8b", "#795548", "#e91e63", "#3f51b5", "#009688",
@@ -1060,6 +1062,42 @@ def render_backtest(cfg):
                             x=pos_df["date"],
                             y=pos_df[ticker],
                             name=name,
+                            mode="lines",
+                            stackgroup="one",
+                            line=dict(width=0.5, color=color),
+                            fillcolor=color,
+                            hovertemplate=f"<b>{name}</b><br>仓位: %{{y:.1%}}<extra></extra>",
+                        ), row=2, col=1)
+                
+                # 宽基ETF（fallback equity）
+                fallback_tickers = list(getattr(_config_module, "FALLBACK_EQUITY_UNIVERSE", {}).keys())
+                fallback_colors = ["#a0aec0", "#718096"]  # 灰色系
+                for i, ticker in enumerate(fallback_tickers):
+                    if ticker in pos_df.columns:
+                        name = _config_module.FALLBACK_EQUITY_UNIVERSE.get(ticker, ticker)
+                        color = fallback_colors[i % len(fallback_colors)]
+                        fig_pos.add_trace(go.Scatter(
+                            x=pos_df["date"],
+                            y=pos_df[ticker],
+                            name=f"【宽基】{name}",
+                            mode="lines",
+                            stackgroup="one",
+                            line=dict(width=0.5, color=color),
+                            fillcolor=color,
+                            hovertemplate=f"<b>{name}</b><br>仓位: %{{y:.1%}}<extra></extra>",
+                        ), row=2, col=1)
+                
+                # 防御资产（黄金/国债）
+                defense_tickers = list(getattr(_config_module, "DEFENSE_UNIVERSE", {}).keys())
+                defense_colors = ["#ffd700", "#2b6cb0"]  # 金色、蓝色
+                for i, ticker in enumerate(defense_tickers):
+                    if ticker in pos_df.columns:
+                        name = _config_module.DEFENSE_UNIVERSE.get(ticker, ticker)
+                        color = defense_colors[i % len(defense_colors)]
+                        fig_pos.add_trace(go.Scatter(
+                            x=pos_df["date"],
+                            y=pos_df[ticker],
+                            name=f"【防御】{name}",
                             mode="lines",
                             stackgroup="one",
                             line=dict(width=0.5, color=color),
@@ -1098,7 +1136,6 @@ def render_backtest(cfg):
         
         # 防御资产交易统计
         if cfg.get("defense_enabled", False):
-            import config as _config_module
             defense_tickers = list(_config_module.DEFENSE_UNIVERSE.keys())
             defense_trades = trades[trades["ticker"].isin(defense_tickers)] if not trades.empty else pd.DataFrame()
             if not defense_trades.empty:
