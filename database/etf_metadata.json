@@ -1,0 +1,254 @@
+{
+  "512480.SH": {
+    "name": "CSI Semiconductor",
+    "tracking_index": "CSI Semiconductor",
+    "fee_rate": 0.002,
+    "scale_yi": 45.0,
+    "listing_date": "2019-05-16"
+  },
+  "515230.SH": {
+    "name": "CSI Software Services",
+    "tracking_index": "CSI Software Services",
+    "fee_rate": 0.002,
+    "scale_yi": 30.0,
+    "listing_date": "2020-04-24"
+  },
+  "515880.SH": {
+    "name": "CSI Communication",
+    "tracking_index": "CSI Communication",
+    "fee_rate": 0.0015,
+    "scale_yi": 25.0,
+    "listing_date": "2019-08-16"
+  },
+  "512010.SH": {
+    "name": "CSI Medical",
+    "tracking_index": "CSI Medical",
+    "fee_rate": 0.002,
+    "scale_yi": 80.0,
+    "listing_date": "2019-04-12"
+  },
+  "159928.SZ": {
+    "name": "CSI Consumer",
+    "tracking_index": "CSI Consumer",
+    "fee_rate": 0.002,
+    "scale_yi": 35.0,
+    "listing_date": "2019-06-12"
+  },
+  "516160.SH": {
+    "name": "CSI New Energy",
+    "tracking_index": "CSI New Energy",
+    "fee_rate": 0.002,
+    "scale_yi": 60.0,
+    "listing_date": "2020-03-20"
+  },
+  "516110.SH": {
+    "name": "CSI Auto",
+    "tracking_index": "CSI Auto",
+    "fee_rate": 0.002,
+    "scale_yi": 40.0,
+    "listing_date": "2020-04-24"
+  },
+  "512800.SH": {
+    "name": "CSI Bank",
+    "tracking_index": "CSI Bank",
+    "fee_rate": 0.0015,
+    "scale_yi": 120.0,
+    "listing_date": "2018-07-19"
+  },
+  "512000.SH": {
+    "name": "CSI Securities",
+    "tracking_index": "CSI Securities",
+    "fee_rate": 0.002,
+    "scale_yi": 90.0,
+    "listing_date": "2016-08-30"
+  },
+  "512660.SH": {
+    "name": "CSI Defense",
+    "tracking_index": "CSI Defense",
+    "fee_rate": 0.002,
+    "scale_yi": 55.0,
+    "listing_date": "2016-08-11"
+  },
+  "512980.SH": {
+    "name": "CSI Media",
+    "tracking_index": "CSI Media",
+    "fee_rate": 0.002,
+    "scale_yi": 28.0,
+    "listing_date": "2019-05-16"
+  },
+  "512400.SH": {
+    "name": "CSI Non-ferrous Metal",
+    "tracking_index": "CSI Non-ferrous Metal",
+    "fee_rate": 0.002,
+    "scale_yi": 70.0,
+    "listing_date": "2017-08-03"
+  },
+  "159996.SZ": {
+    "name": "CSI Home Appliances",
+    "tracking_index": "CSI Home Appliances",
+    "fee_rate": 0.002,
+    "scale_yi": 15.0,
+    "listing_date": "2020-04-24"
+  },
+  "159865.SZ": {
+    "name": "CSI Livestock",
+    "tracking_index": "CSI Livestock",
+    "fee_rate": 0.002,
+    "scale_yi": 12.0,
+    "listing_date": "2021-03-18"
+  },
+  "159697.SZ": {
+    "name": "CSI Oil & Gas",
+    "tracking_index": "CSI Oil & Gas",
+    "fee_rate": 0.002,
+    "scale_yi": 8.0,
+    "listing_date": "2021-05-07"
+  },
+  "159530.SZ": {
+    "name": "CSI Robotics",
+    "tracking_index": "CSI Robotics",
+    "fee_rate": 0.002,
+    "scale_yi": 10.0,
+    "listing_date": "2021-04-16"
+  },
+  "588200.SH": {
+    "name": "STAR Chip",
+    "tracking_index": "STAR Chip",
+    "fee_rate": 0.002,
+    "scale_yi": 50.0,
+    "listing_date": "2022-09-30"
+  },
+  "159869.SZ": {
+    "name": "CSI Animation & Game",
+    "tracking_index": "CSI Animation & Game",
+    "fee_rate": 0.002,
+    "scale_yi": 35.0,
+    "listing_date": "2021-02-25"
+  },
+  "516510.SH": {
+    "name": "CSI Cloud Computing",
+    "tracking_index": "CSI Cloud Computing",
+    "fee_rate": 0.002,
+    "scale_yi": 22.0,
+    "listing_date": "2020-04-24"
+  },
+  "562500.SH": {
+    "name": "CSI Robotics",
+    "tracking_index": "CSI Robotics",
+    "fee_rate": 0.002,
+    "scale_yi": 8.0,
+    "listing_date": "2021-05-07"
+  },
+  "159740.SZ": {
+    "name": "CSI Environmental",
+    "tracking_index": "CSI Environmental",
+    "fee_rate": 0.002,
+    "scale_yi": 18.0,
+    "listing_date": "2020-04-24"
+  },
+  "515050.SH": {
+    "name": "CSI 5G Communication",
+    "tracking_index": "CSI 5G Communication",
+    "fee_rate": 0.0015,
+    "scale_yi": 40.0,
+    "listing_date": "2019-09-17"
+  },
+  "512690.SH": {
+    "name": "CSI Alcohol",
+    "tracking_index": "CSI Alcohol",
+    "fee_rate": 0.002,
+    "scale_yi": 120.0,
+    "listing_date": "2019-04-12"
+  },
+  "515170.SH": {
+    "name": "CSI Food & Beverage",
+    "tracking_index": "CSI Food & Beverage",
+    "fee_rate": 0.002,
+    "scale_yi": 80.0,
+    "listing_date": "2020-04-24"
+  },
+  "159766.SZ": {
+    "name": "CSI Tourism",
+    "tracking_index": "CSI Tourism",
+    "fee_rate": 0.002,
+    "scale_yi": 15.0,
+    "listing_date": "2021-03-18"
+  },
+  "159992.SZ": {
+    "name": "CSI Innovative Medicine",
+    "tracking_index": "CSI Innovative Medicine",
+    "fee_rate": 0.002,
+    "scale_yi": 45.0,
+    "listing_date": "2020-04-24"
+  },
+  "159898.SZ": {
+    "name": "CSI Medical Devices",
+    "tracking_index": "CSI Medical Devices",
+    "fee_rate": 0.002,
+    "scale_yi": 20.0,
+    "listing_date": "2020-04-24"
+  },
+  "515790.SH": {
+    "name": "CSI Photovoltaic",
+    "tracking_index": "CSI Photovoltaic",
+    "fee_rate": 0.002,
+    "scale_yi": 85.0,
+    "listing_date": "2020-12-18"
+  },
+  "159566.SZ": {
+    "name": "CSI Energy Storage",
+    "tracking_index": "CSI Energy Storage",
+    "fee_rate": 0.002,
+    "scale_yi": 6.0,
+    "listing_date": "2021-03-18"
+  },
+  "513160.SH": {
+    "name": "CSI HK Tech",
+    "tracking_index": "CSI HK Tech",
+    "fee_rate": 0.002,
+    "scale_yi": 12.0,
+    "listing_date": "2021-05-07"
+  },
+  "510880.SH": {
+    "name": "CSI Dividend",
+    "tracking_index": "CSI Dividend",
+    "fee_rate": 0.0015,
+    "scale_yi": 150.0,
+    "listing_date": "2006-11-17"
+  },
+  "560700.SH": {
+    "name": "CSI SOE Reform",
+    "tracking_index": "CSI SOE Reform",
+    "fee_rate": 0.002,
+    "scale_yi": 25.0,
+    "listing_date": "2021-03-18"
+  },
+  "516120.SH": {
+    "name": "CSI Chemical",
+    "tracking_index": "CSI Chemical",
+    "fee_rate": 0.002,
+    "scale_yi": 5.0,
+    "listing_date": "2021-03-09"
+  },
+  "516960.SH": {
+    "name": "CSI Machinery",
+    "tracking_index": "CSI Machinery",
+    "fee_rate": 0.002,
+    "scale_yi": 4.0,
+    "listing_date": "2021-03-18"
+  },
+  "516650.SH": {
+    "name": "CSI Non-ferrous Metal Theme",
+    "tracking_index": "CSI Non-ferrous Metal Theme",
+    "fee_rate": 0.002,
+    "scale_yi": 3.0,
+    "listing_date": "2021-06-21"
+  },
+  "_holding_overlap": {
+    "516650.SH,512400.SH": 0.85,
+    "512690.SH,515170.SH": 0.9,
+    "159530.SZ,562500.SH": 0.88,
+    "516120.SH,516160.SH": 0.6,
+    "516960.SH,516160.SH": 0.55
+  }
+}
