@@ -61,6 +61,62 @@ class BacktestEngine:
         fallback_df = market_df[market_df['ticker'].isin(_fallback_tickers)].copy()
         defense_df = market_df[market_df['ticker'].isin(_defense_tickers)].copy()
         
+        # ========== v1.2.1: 事前硬去重（Pool Pre-filter）==========
+        # 在评分前自动剔除高度冗余ETF，避免"同一敞口两种包装"的问题
+        # 规则：滚动60日相关性均值 >= 0.97 视为冗余对
+        # 保留：历史数据天数更多的（上市更长的）
+        HARD_REDUNDANCY_THRESHOLD = 0.97
+        
+        _excluded_tickers = set()
+        _exclusion_reasons = {}
+        
+        if len(core_df['ticker'].unique()) > 1:
+            # 计算滚动60日相关性
+            pivot = core_df.pivot_table(index='date', columns='ticker', values='close')
+            returns = pivot.pct_change(fill_method=None)
+            min_valid = int(60 * 0.67)
+            
+            # 计算每对ETF的滚动60日相关性均值
+            tickers = returns.columns.tolist()
+            for i, t1 in enumerate(tickers):
+                for t2 in tickers[i+1:]:
+                    if t1 in _excluded_tickers or t2 in _excluded_tickers:
+                        continue
+                    
+                    # 计算滚动相关性
+                    rolling_corr = returns[t1].rolling(60, min_periods=min_valid).corr(returns[t2])
+                    valid_corr = rolling_corr.dropna()
+                    
+                    if len(valid_corr) > 0:
+                        mean_corr = valid_corr.mean()
+                        if mean_corr >= HARD_REDUNDANCY_THRESHOLD:
+                            # 冗余对：保留数据天数更多的
+                            days1 = len(core_df[core_df['ticker'] == t1])
+                            days2 = len(core_df[core_df['ticker'] == t2])
+                            
+                            if days1 >= days2:
+                                exclude = t2
+                                keep = t1
+                            else:
+                                exclude = t1
+                                keep = t2
+                            
+                            _excluded_tickers.add(exclude)
+                            _exclusion_reasons[exclude] = (
+                                f"Redundant: corr={mean_corr:.4f} with {keep} >= {HARD_REDUNDANCY_THRESHOLD}, "
+                                f"keep {keep}({days1}d) vs exclude {exclude}({days2}d)"
+                            )
+        
+        # 从核心池剔除冗余ETF
+        if _excluded_tickers:
+            # 避免编码问题：使用英文日志
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"[Pool Pre-filter] Excluded: {_excluded_tickers}")
+            for t, reason in _exclusion_reasons.items():
+                logger.info(f"  {t}: {reason}")
+            core_df = core_df[~core_df['ticker'].isin(_excluded_tickers)].copy()
+        
         # 步骤1-2：对核心池（行业+概念）逐只计算指标和评分
         all_scores = []
         for ticker in core_df['ticker'].unique():
@@ -80,6 +136,44 @@ class BacktestEngine:
         
         # 步骤4：计算核心池总评分
         scores_df = self.strategy.compute_total_score(scores_df)
+        
+        # 步骤4.5：软惩罚（Soft Penalty）
+        # 对于与池中其他ETF相关性在0.85-0.97之间的，降低total_score
+        # 目的：解决"不同主题但高度相关"的冗余问题
+        SOFT_PENALTY_MIN = 0.85
+        SOFT_PENALTY_MAX = 0.97
+        SOFT_PENALTY_MAX_REDUCTION = 0.15  # 最多减少15%（原为30%）
+        
+        if len(core_df['ticker'].unique()) > 1:
+            # 计算全池滚动相关性
+            pivot_sp = core_df.pivot_table(index='date', columns='ticker', values='close')
+            returns_sp = pivot_sp.pct_change(fill_method=None)
+            min_valid_sp = int(60 * 0.67)
+            
+            tickers_sp = returns_sp.columns.tolist()
+            max_corr = {}
+            for t in tickers_sp:
+                max_corr[t] = 0.0
+                for other in tickers_sp:
+                    if other == t:
+                        continue
+                    rolling_corr = returns_sp[t].rolling(60, min_periods=min_valid_sp).corr(returns_sp[other])
+                    valid = rolling_corr.dropna()
+                    if len(valid) > 0:
+                        mean_corr = valid.mean()
+                        if mean_corr > max_corr[t]:
+                            max_corr[t] = mean_corr
+            
+            # 应用penalty
+            scores_df['soft_penalty'] = 0.0
+            scores_df['max_corr_peer'] = 0.0
+            for t, corr in max_corr.items():
+                if SOFT_PENALTY_MIN <= corr < SOFT_PENALTY_MAX:
+                    reduction = SOFT_PENALTY_MAX_REDUCTION * (corr - SOFT_PENALTY_MIN) / (SOFT_PENALTY_MAX - SOFT_PENALTY_MIN)
+                    mask = scores_df['ticker'] == t
+                    scores_df.loc[mask, 'total_score'] = scores_df.loc[mask, 'total_score'] * (1 - reduction)
+                    scores_df.loc[mask, 'soft_penalty'] = reduction
+                    scores_df.loc[mask, 'max_corr_peer'] = corr
         
         # 步骤5：对宽基补仓ETF单独计算简化评分（不参与横截面动量排名）
         fallback_scores = []
@@ -128,7 +222,11 @@ class BacktestEngine:
         signals_df = self.strategy.generate_signals(scores_df, bench_df)
         
         # 步骤8：执行回测（含相关性去重 + 防御模块 + 动态止盈）
-        result = self._execute_backtest(signals_df, market_df, bench_df, corr_matrix, _corr_threshold)
+        result = self._execute_backtest(signals_df, market_df, bench_df, corr_matrix, _corr_threshold, _excluded_tickers)
+        
+        # 记录排除信息（供审计）
+        result['excluded_tickers'] = list(_excluded_tickers)
+        result['exclusion_reasons'] = _exclusion_reasons
         
         # v1.2: 市场状态检测（observer 模式，不改变交易逻辑）
         if self.cfg.get('enabled', False) and self.cfg.get('mode', '') == 'observer' and 'error' not in result:
@@ -262,8 +360,10 @@ class BacktestEngine:
         
         return corr_history
     
-    def _execute_backtest(self, signals_df, market_df, bench_df, corr_matrix=None, corr_threshold=0.70) -> dict:
+    def _execute_backtest(self, signals_df, market_df, bench_df, corr_matrix=None, corr_threshold=0.70, excluded_tickers=None) -> dict:
         """执行回测逻辑（含相关性去重）"""
+        
+        excluded_tickers = set(excluded_tickers or [])
         
         # 获取所有交易日
         dates = sorted(signals_df['date'].unique())
@@ -498,11 +598,11 @@ class BacktestEngine:
                     available_cash = min(portfolio['cash'], target_total_value - (current_value - portfolio['cash']))
                     available_cash = max(available_cash, 0)
                     
-                    # ========== 防御模块（v1.3）==========
+                    # 防御模块（v1.3）
                     # 当大盘择时信号低时，强制配置防御资产（黄金/国债）
                     import config as _config_module
                     _defense_tickers = list(_config_module.DEFENSE_UNIVERSE.keys())
-                    _core_tickers = list(getattr(_config_module, 'CORE_UNIVERSE', {}).keys())
+                    _core_tickers = [t for t in list(getattr(_config_module, 'CORE_UNIVERSE', {}).keys()) if t not in excluded_tickers]
                     _fallback_tickers = list(getattr(_config_module, 'FALLBACK_EQUITY_UNIVERSE', {}).keys())
                     
                     # 动态防御比例计算
