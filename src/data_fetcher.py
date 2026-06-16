@@ -413,6 +413,8 @@ def download_all_data(start_date='2019-06-03', end_date=None, db=None, include_s
     """
     通过AKShare下载所有数据并保存到数据库
     
+    v1.2.2: 导入前自动备份数据库
+    
     Parameters:
         include_sectors: 是否同时下载板块指数数据（默认True）
     
@@ -420,6 +422,15 @@ def download_all_data(start_date='2019-06-03', end_date=None, db=None, include_s
           请在Kimi对话中说"用iFinD获取数据"，
           我会调用工具获取并导入。
     """
+    # 导入前自动备份
+    if db is not None:
+        try:
+            import backup_database
+            backup_database.backup_database()
+            print("✅ 数据库已备份")
+        except Exception as e:
+            print(f"⚠️ 备份失败（继续导入）: {e}")
+    
     fetcher = DataFetcher()
     
     print(f"="*60)
@@ -457,7 +468,19 @@ def download_all_data(start_date='2019-06-03', end_date=None, db=None, include_s
 
 
 def update_latest_data(db=None):
-    """增量更新最新数据（AKShare）"""
+    """增量更新最新数据（AKShare）
+    
+    v1.2.2: 更新前自动备份数据库
+    """
+    # 更新前自动备份
+    if db is not None:
+        try:
+            import backup_database
+            backup_database.backup_database()
+            print("✅ 数据库已备份")
+        except Exception as e:
+            print(f"⚠️ 备份失败（继续更新）: {e}")
+    
     fetcher = DataFetcher()
     
     print(f"AKShare增量更新...")

@@ -1,0 +1,13 @@
+Backup Info
+=============
+Date: 2026-06-16 13:46:44
+Original: database\etf_model.db
+Backup: database\backups\etf_model_20260616_134644.db
+Size: 21,000,192 bytes
+
+Database Stats:
+- Rows: 57312
+- Tickers: 42
+- Latest Date: 2026-06-12
+
+Backup by: manual
