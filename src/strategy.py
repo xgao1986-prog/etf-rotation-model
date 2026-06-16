@@ -361,7 +361,11 @@ class StrategyEngine:
         
         # v1.2.2: 全场质量检测 - 当所有行业ETF的momentum_20中位数<0时，
         # 提高入场门槛，不再"矬子里拔将军"
-        scores_df['market_quality_median'] = scores_df.groupby('date')['momentum_20'].transform('median')
+        # 注意：只基于CORE_UNIVERSE股票型ETF计算，不包含防御资产或宽基补仓
+        core_only = scores_df[scores_df['ticker'].isin(_core_tickers)]
+        market_quality = core_only.groupby('date')['momentum_20'].median().reset_index()
+        market_quality.columns = ['date', 'market_quality_median']
+        scores_df = scores_df.merge(market_quality, on='date', how='left')
         scores_df['market_quality_poor'] = scores_df['market_quality_median'] < 0
         
         # 差市场：提高total_score门槛到55（momentum_rank已为0）

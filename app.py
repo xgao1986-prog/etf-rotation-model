@@ -554,14 +554,40 @@ def make_nav_figure(result):
     return fig
 
 
-def make_candlestick(ticker, days=180):
+def _resample_weekly(df, end_weekday=4):
+    """按周聚合日K线为周K线，以当周最后一个交易日为结束"""
+    df = df.copy().sort_values("date").reset_index(drop=True)
+    df["date"] = pd.to_datetime(df["date"])
+    # 按自然周（ISO week）分组
+    df["year"] = df["date"].dt.isocalendar().year.astype(int)
+    df["week"] = df["date"].dt.isocalendar().week.astype(int)
+    weekly = df.groupby(["year", "week"]).agg({
+        "date": "last",
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }).reset_index(drop=True)
+    return weekly
+
+
+def make_candlestick(ticker, days=180, weekly=False, rebalance_weekday=4, trades_df=None):
     market = load_market_data(ticker=ticker)
     if market.empty:
         return go.Figure()
 
     market = market.sort_values("date").tail(days).copy()
-    market["ma20"] = market["close"].rolling(20).mean()
-    market["ma50"] = market["close"].rolling(50).mean()
+    market["date"] = pd.to_datetime(market["date"])
+
+    # 周K线聚合
+    if weekly:
+        market = _resample_weekly(market, end_weekday=rebalance_weekday)
+        market["ma20"] = market["close"].rolling(20).mean()
+        market["ma50"] = market["close"].rolling(50).mean()
+    else:
+        market["ma20"] = market["close"].rolling(20).mean()
+        market["ma50"] = market["close"].rolling(50).mean()
 
     fig = make_subplots(
         rows=2,
@@ -577,7 +603,7 @@ def make_candlestick(ticker, days=180):
             high=market["high"],
             low=market["low"],
             close=market["close"],
-            name="K线",
+            name= "周K线" if weekly else "日K线",
             increasing_line_color="#d64f4f",
             decreasing_line_color="#2e9d75",
         ),
@@ -586,27 +612,69 @@ def make_candlestick(ticker, days=180):
     )
     fig.add_trace(go.Scatter(x=market["date"], y=market["ma20"], name="MA20", line=dict(color="#1769aa")), row=1, col=1)
     fig.add_trace(go.Scatter(x=market["date"], y=market["ma50"], name="MA50", line=dict(color="#f0a202")), row=1, col=1)
+
+    # 交易标记（买入/卖出）
+    if trades_df is not None and not trades_df.empty:
+        trades_df = trades_df.copy()
+        trades_df["date"] = pd.to_datetime(trades_df["date"])
+        # 日K线：精确匹配日期；周K线：映射到当周最后一个交易日
+        if weekly:
+            trades_df["year"] = trades_df["date"].dt.isocalendar().year.astype(int)
+            trades_df["week"] = trades_df["date"].dt.isocalendar().week.astype(int)
+            market["year"] = market["date"].dt.isocalendar().year.astype(int)
+            market["week"] = market["date"].dt.isocalendar().week.astype(int)
+            trade_weeks = trades_df.merge(market[["date", "year", "week"]], on=["year", "week"], how="left", suffixes=("", "_mapped"))
+            trade_weeks = trade_weeks.rename(columns={"date_mapped": "plot_date"})
+        else:
+            trade_weeks = trades_df.copy()
+            trade_weeks["plot_date"] = trade_weeks["date"]
+
+        buy_trades = trade_weeks[trade_weeks["action"] == "BUY"]
+        sell_trades = trade_weeks[trade_weeks["action"].isin(["SELL", "STOP_LOSS"])]
+
+        if not buy_trades.empty:
+            buy_dates = buy_trades["plot_date"].dropna().unique()
+            buy_y = market["high"].max() * 1.03
+            fig.add_trace(go.Scatter(
+                x=buy_dates,
+                y=[buy_y] * len(buy_dates),
+                mode="markers",
+                marker=dict(symbol="triangle-up", size=14, color="#2e9d75", line=dict(width=1, color="white")),
+                name="买入",
+                hovertemplate="买入: %{x}<extra></extra>",
+            ), row=1, col=1)
+
+        if not sell_trades.empty:
+            sell_dates = sell_trades["plot_date"].dropna().unique()
+            sell_y = market["low"].min() * 0.97
+            fig.add_trace(go.Scatter(
+                x=sell_dates,
+                y=[sell_y] * len(sell_dates),
+                mode="markers",
+                marker=dict(symbol="triangle-down", size=14, color="#d64f4f", line=dict(width=1, color="white")),
+                name="卖出",
+                hovertemplate="卖出: %{x}<extra></extra>",
+            ), row=1, col=1)
+
     fig.add_trace(
         go.Bar(x=market["date"], y=market["volume"], name="成交量", marker_color="#9fb3c8", opacity=0.65),
         row=2,
         col=1,
     )
 
-    # 自动检测长假期（非周末的连续缺失交易日 > 3天）
-    market["date"] = pd.to_datetime(market["date"])
-    market["prev_date"] = market["date"].shift(1)
-    market["gap_days"] = (market["date"] - market["prev_date"]).dt.days
-    # 找出大于3天且跨越周末后仍有额外天数的间隙
-    long_gaps = market[market["gap_days"] > 3][["prev_date", "date", "gap_days"]].copy()
-    
-    rangebreaks = [dict(bounds=["sat", "mon"])]  # 移除周末
-    
-    for _, gap in long_gaps.iterrows():
-        start_dt = gap["prev_date"] + pd.Timedelta(days=1)
-        end_dt = gap["date"] - pd.Timedelta(days=1)
-        # 只添加非周末的假期段
-        if start_dt < end_dt:
-            rangebreaks.append(dict(values=[d.strftime("%Y-%m-%d") for d in pd.date_range(start_dt, end_dt) if d.weekday() < 5]))
+    # 自动检测长假期（非周末的连续缺失交易日 > 3天）——仅日K线
+    rangebreaks = []
+    if not weekly:
+        market = market.sort_values("date").reset_index(drop=True)
+        market["prev_date"] = market["date"].shift(1)
+        market["gap_days"] = (market["date"] - market["prev_date"]).dt.days
+        long_gaps = market[market["gap_days"] > 3][["prev_date", "date", "gap_days"]].copy()
+        rangebreaks = [dict(bounds=["sat", "mon"])]
+        for _, gap in long_gaps.iterrows():
+            start_dt = gap["prev_date"] + pd.Timedelta(days=1)
+            end_dt = gap["date"] - pd.Timedelta(days=1)
+            if start_dt < end_dt:
+                rangebreaks.append(dict(values=[d.strftime("%Y-%m-%d") for d in pd.date_range(start_dt, end_dt) if d.weekday() < 5]))
 
     fig.update_layout(
         height=560,
@@ -1247,16 +1315,30 @@ def render_etf_analysis(cfg):
         default_ticker = scores.iloc[0]["ticker"]
         default_index = tickers.index(default_ticker) if default_ticker in tickers else 0
 
-    top_controls = st.columns([1.4, 0.7, 1.4])
+    top_controls = st.columns([1.4, 0.7, 0.7, 1.4])
     ticker = top_controls[0].selectbox("选择ETF", tickers, index=default_index, format_func=etf_label)
     window = top_controls[1].selectbox("分析窗口", [90, 180, 360], index=1, format_func=lambda x: f"{x}日")
+    kline_mode = top_controls[2].selectbox("K线周期", ["日K", "周K"], index=0)
+    weekly = kline_mode == "周K"
+    # 获取调仓日（周K聚合用）
+    rebalance_weekday = cfg.get("rebalance_weekday", 4)
+    # 获取回测交易记录
+    trades_df = None
+    if "backtest_result" in st.session_state:
+        trades = st.session_state["backtest_result"].get("trades_df", pd.DataFrame())
+        if not trades.empty and ticker in trades["ticker"].values:
+            trades_df = trades[trades["ticker"] == ticker].copy()
+    if trades_df is not None and not trades_df.empty:
+        top_controls[3].caption(f"📝 回测交易: {len(trades_df)} 次")
+    else:
+        top_controls[3].caption("📝 先运行回测以显示交易标记")
 
     ticker_scores = scores[scores["ticker"] == ticker] if not scores.empty else pd.DataFrame()
     if ticker_scores.empty:
-        top_controls[2].info("该标的暂无最新评分。")
+        st.info("该标的暂无最新评分。")
     else:
         row = ticker_scores.iloc[0]
-        top_controls[2].metric("最新实时评分", f"{row['total_score']:.1f}", f"截至 {latest}")
+        st.metric("最新实时评分", f"{row['total_score']:.1f}", f"截至 {latest}")
 
     k1, k2, k3, k4 = st.columns(4)
     if not ticker_scores.empty:
@@ -1267,7 +1349,7 @@ def render_etf_analysis(cfg):
         k4.metric("收盘价", f"{row.get('close', np.nan):.3f}" if pd.notna(row.get("close", np.nan)) else "N/A")
 
     st.subheader("K线与成交量")
-    st.plotly_chart(make_candlestick(ticker, window), use_container_width=True)
+    st.plotly_chart(make_candlestick(ticker, window, weekly=weekly, rebalance_weekday=rebalance_weekday, trades_df=trades_df), use_container_width=True)
 
     left, right = st.columns([1, 1.25])
     with left:

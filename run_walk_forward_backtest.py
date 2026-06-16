@@ -117,9 +117,11 @@ def main():
     print(f"\n统一回测区间: {eval_start} ~ {eval_end}（与v1.1基线一致）")
     print(f"数据覆盖: {market_df['date'].min().strftime('%Y-%m-%d')} ~ {market_df['date'].max().strftime('%Y-%m-%d')}")
     
-    # 过滤数据到回测区间
-    market_df = market_df[market_df['date'] >= eval_start].copy()
+    # 修复预热数据截断：不要过滤 market_df，保留完整预热数据用于指标计算
+    # 只过滤 bench_df 以确定回测起始日期
     bench_df = bench_df[bench_df['date'] >= eval_start].copy()
+    # market_df 不过滤，保留完整历史数据用于MA20/momentum_20等指标预热
+    # 回测引擎会自动取 market_df 和 bench_df 的交集作为实际回测区间
     
     # 初始化 UniverseBuilder
     builder = UniverseBuilder(db_path=DB_PATH)
@@ -198,7 +200,7 @@ def main():
             "",
             f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"**回测区间**: {eval_start} ~ {eval_end}",
-            f"**数据终点**: 2026-06-05（统一口径）",
+            f"**数据终点**: {eval_end}（真实数据终点）",
             "**版本**: v1.2.2 - 空仓机制修复（market quality gate）",
             "",
             "## v1.2.2 核心修复",
@@ -223,8 +225,8 @@ def main():
             "|--------|------|----------|",
             "| v1.2_baseline | v1.2基线（固定32只） | 无动态池，v1.2.2空仓机制 |",
             "| fixed_32_new_code | 固定32只 + 新代码 | 验证代码改动无回归 |",
-            "| dynamic_pool | 动态池评估 | 启用universe_builder，按上市天数分层 |",
-            "| dynamic_pool_enhanced_limit | 动态池 + enhanced限仓 | enhanced池单只仓位减半（0.075） |",
+            "| dynamic_pool | 动态池评估（固定起点） | 回测起点评估一次，非滚动 |",
+            "| dynamic_pool_enhanced_limit | 动态池 + enhanced限仓（固定起点） | 回测起点评估一次，非滚动 |",
             "",
             "## 关键假设",
             "",
@@ -233,6 +235,7 @@ def main():
             "- **Watch池**: <120天，不参与交易",
             "- **Fallback池**: 宽基补仓，不受动态池影响",
             "- **空仓机制（v1.2.2）**: 当市场整体动量<0时，momentum_rank=0且门槛提高到55",
+            "- **动态池评估方式**: 当前为'固定起点评估'（回测起始日评估一次），非严格Walk-forward滚动评估。严格Walk-forward需按年/季度重新评估池子。",
             "",
             "## 回测结果汇总",
             "",
