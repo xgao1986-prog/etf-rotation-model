@@ -132,6 +132,9 @@ class StrategyEngine:
         """
         全universe横截面动量排名（必须在合并所有ETF后调用）
         
+        v1.2.2修复：当市场整体动量为负（median_momentum_20 < 0）时，
+        所有ETF的momentum_rank=0。不再"矬子里拔将军"。
+        
         按日期分组，对所有ETF的20日动量进行排名，百分位×25
         
         Parameters:
@@ -151,9 +154,21 @@ class StrategyEngine:
             valid = day_df[day_df['momentum_valid'] == True]
             
             if len(valid) > 1:
-                day_df.loc[valid.index, 'momentum_rank'] = valid['momentum_20'].rank(pct=True) * 25
+                # v1.2.2: 全场质量检测 - 当市场整体在跌时，不分配动量排名分
+                median_momentum = valid['momentum_20'].median()
+                if median_momentum > 0:
+                    # 好市场：正常排名
+                    day_df.loc[valid.index, 'momentum_rank'] = valid['momentum_20'].rank(pct=True) * 25
+                else:
+                    # 差市场：所有ETF的momentum_rank=0，不再"矬子里拔将军"
+                    day_df.loc[valid.index, 'momentum_rank'] = 0
             elif len(valid) == 1:
-                day_df.loc[valid.index, 'momentum_rank'] = 12.5
+                # 只有一只ETF时，根据市场环境决定是否给分
+                median_momentum = valid['momentum_20'].iloc[0]
+                if median_momentum > 0:
+                    day_df.loc[valid.index, 'momentum_rank'] = 12.5
+                else:
+                    day_df.loc[valid.index, 'momentum_rank'] = 0
             
             result_dfs.append(day_df)
         
@@ -343,10 +358,24 @@ class StrategyEngine:
         # 核心池统一评分：标准入场条件（32只核心池统一）
         import config as _cfg_module
         _core_tickers = list(getattr(_cfg_module, 'CORE_UNIVERSE', {}).keys())
+        
+        # v1.2.2: 全场质量检测 - 当所有行业ETF的momentum_20中位数<0时，
+        # 提高入场门槛，不再"矬子里拔将军"
+        scores_df['market_quality_median'] = scores_df.groupby('date')['momentum_20'].transform('median')
+        scores_df['market_quality_poor'] = scores_df['market_quality_median'] < 0
+        
+        # 差市场：提高total_score门槛到55（momentum_rank已为0）
+        # 好市场：保持原有门槛40
+        effective_min_total = np.where(
+            scores_df['market_quality_poor'],
+            55,  # 差市场：只有真正强势的ETF才能入选
+            self.cfg['min_total_score']  # 好市场：正常门槛
+        )
+        
         core_mask = scores_df['ticker'].isin(_core_tickers) & (
             (scores_df['trend_score'] >= self.cfg['min_trend_score']) &
             (scores_df['confirm_score'] >= self.cfg['min_confirm_score']) &
-            (scores_df['total_score'] >= self.cfg['min_total_score']) &
+            (scores_df['total_score'] >= effective_min_total) &
             (scores_df['prev_close'] > scores_df['ma20']) &
             (scores_df['ma20_slope'] > 0)
         )
