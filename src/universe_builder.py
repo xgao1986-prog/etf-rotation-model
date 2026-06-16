@@ -265,7 +265,7 @@ class UniverseBuilder:
         data_start = self._data_start_dates.get(ticker)
         if data_start:
             data_start_dt = pd.to_datetime(data_start)
-            data_days = (eval_dt - data_start_dt).days
+            data_days = max(0, (eval_dt - data_start_dt).days)
         else:
             data_days = 0
         
@@ -308,7 +308,9 @@ class UniverseBuilder:
             reasons.append(f"Phase 3: listed {history_days}d >= {self.rules['phase2_enhanced_days']}d")
         
         # 检查数据完整性
-        if data_days < 60:
+        if data_days == 0:
+            reasons.append("WARNING: no market data available as of eval_date")
+        elif data_days < 60:
             reasons.append(f"WARNING: only {data_days}d of data available (need 60d for indicators)")
         
         return self._build_decision(ticker, meta, pool, reasons, early_entry, early_entry_reasons, history_days, data_days, data_start)

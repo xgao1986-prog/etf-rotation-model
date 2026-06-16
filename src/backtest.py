@@ -31,7 +31,7 @@ class BacktestEngine:
         self.strategy = StrategyEngine(self.cfg)
         self.initial_capital = self.cfg.get('initial_capital', BACKTEST_CONFIG['initial_capital'])
     
-    def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame) -> dict:
+    def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame, universe_builder=None, eval_date=None) -> dict:
         """
         运行回测
         
@@ -47,6 +47,8 @@ class BacktestEngine:
         Parameters:
             market_df: 所有ETF的行情数据（含股票ETF+防御资产）
             bench_df: 基准（沪深300）行情数据
+            universe_builder: UniverseBuilder 实例（可选，用于动态池评估）
+            eval_date: 评估日期（可选，用于动态池评估）
         
         Returns:
             dict with backtest results
@@ -56,10 +58,34 @@ class BacktestEngine:
         _fallback_tickers = list(getattr(_cfg_module, 'FALLBACK_EQUITY_UNIVERSE', {}).keys())
         _defense_tickers = list(_cfg_module.DEFENSE_UNIVERSE.keys())
         
+        # ========== v1.2.1: 动态池评估（Walk-forward）==========
+        # 如果提供了 universe_builder 和 eval_date，则使用动态池评估
+        # 否则回退到使用 config 中的静态池
+        core_tickers = set(_core_tickers)
+        fallback_tickers = set(_fallback_tickers)
+        defense_tickers = set(_defense_tickers)
+        
+        if universe_builder and eval_date:
+            # 动态池评估：在 eval_date 时点，使用当时已知的数据
+            all_equity_tickers = list(core_tickers | fallback_tickers)
+            eval_result = universe_builder.evaluate_at_date(all_equity_tickers, eval_date)
+            pools = eval_result['pools']
+            
+            # 过滤：只使用 core + enhanced + fallback 池中的ETF
+            # watch 和 excluded 池不参与交易（流动性不足或数据太少）
+            allowed_equity = set(pools.get('core', [])) | set(pools.get('enhanced', [])) | set(pools.get('fallback', []))
+            
+            # 记录池状态用于日志
+            print(f"\n[Pool Status at {eval_date}] Core={len(pools.get('core',[]))}, Enhanced={len(pools.get('enhanced',[]))}, Watch={len(pools.get('watch',[]))}, Fallback={len(pools.get('fallback',[]))}, Excluded={len(pools.get('excluded',[]))}")
+            
+            # 更新 ticker 集合用于过滤行情数据
+            core_tickers = core_tickers & allowed_equity
+            fallback_tickers = fallback_tickers & allowed_equity
+        
         # 分离三类资产
-        core_df = market_df[market_df['ticker'].isin(_core_tickers)].copy()
-        fallback_df = market_df[market_df['ticker'].isin(_fallback_tickers)].copy()
-        defense_df = market_df[market_df['ticker'].isin(_defense_tickers)].copy()
+        core_df = market_df[market_df['ticker'].isin(core_tickers)].copy()
+        fallback_df = market_df[market_df['ticker'].isin(fallback_tickers)].copy()
+        defense_df = market_df[market_df['ticker'].isin(defense_tickers)].copy()
         
         # ========== v1.2.1: 事前硬去重（Pool Pre-filter）==========
         # 在评分前自动剔除高度冗余ETF，避免"同一敞口两种包装"的问题
@@ -222,7 +248,12 @@ class BacktestEngine:
         signals_df = self.strategy.generate_signals(scores_df, bench_df)
         
         # 步骤8：执行回测（含相关性去重 + 防御模块 + 动态止盈）
-        result = self._execute_backtest(signals_df, market_df, bench_df, corr_matrix, _corr_threshold, _excluded_tickers)
+        # v1.2.1: 传递 enhanced_tickers 用于区分仓位限制
+        if universe_builder and eval_date:
+            _enhanced_tickers = set(pools.get('enhanced', []))
+        else:
+            _enhanced_tickers = set()
+        result = self._execute_backtest(signals_df, market_df, bench_df, corr_matrix, _corr_threshold, _excluded_tickers, _enhanced_tickers)
         
         # 记录排除信息（供审计）
         result['excluded_tickers'] = list(_excluded_tickers)
@@ -360,10 +391,11 @@ class BacktestEngine:
         
         return corr_history
     
-    def _execute_backtest(self, signals_df, market_df, bench_df, corr_matrix=None, corr_threshold=0.70, excluded_tickers=None) -> dict:
+    def _execute_backtest(self, signals_df, market_df, bench_df, corr_matrix=None, corr_threshold=0.70, excluded_tickers=None, enhanced_tickers=None) -> dict:
         """执行回测逻辑（含相关性去重）"""
         
         excluded_tickers = set(excluded_tickers or [])
+        enhanced_tickers = set(enhanced_tickers or [])
         
         # 获取所有交易日
         dates = sorted(signals_df['date'].unique())
@@ -839,9 +871,16 @@ class BacktestEngine:
                             
                             price = day_prices[ticker]
                             
-                            # 目标金额 = 当前净值 × 单只权重 × 大盘择时仓位
-                            # 统一分配：核心池最多5只，每只均分
-                            base_weight = min(self.cfg['max_position_per_etf'], 1.0 / self.cfg['max_holdings'])
+                            # v1.2.1: enhanced 池单只仓位减半（0.075 vs 0.15）
+                            if ticker in enhanced_tickers:
+                                # enhanced 池：单只仓位上限减半，且总持仓限制更严格
+                                max_position_for_ticker = min(self.cfg['max_position_per_etf'] / 2, 0.075)
+                                max_total_for_ticker = min(self.cfg['max_holdings'], 4)  # enhanced 总持仓最多4只
+                            else:
+                                max_position_for_ticker = self.cfg['max_position_per_etf']
+                                max_total_for_ticker = self.cfg['max_holdings']
+                            
+                            base_weight = min(max_position_for_ticker, 1.0 / max_total_for_ticker)
                             target_amount = current_value * base_weight * max_total_position
                             target_amount = min(target_amount, available_cash * 0.95)
                             
