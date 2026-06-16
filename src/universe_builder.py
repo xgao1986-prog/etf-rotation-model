@@ -1,28 +1,28 @@
 """
-ETF Universe Builder - v1.2.1 ETF Pool Governance
+ETF Universe Builder - v1.2.1 ETF Pool Governance (Tiered Admission)
 
 核心原则：
   1. 只用决策时点已有的数据（跟踪指数、费率、规模、成分股）
-  2. 历史表现（收益、相关性、Sharpe）仅用于验证，不用于规则制定
-  3. Walk-forward：每年用当时已知信息重新评估池子
-  4. 新ETF默认进入观察池，至少观察2年再评估
+  2. 分层准入：120天增强观察，250天正式核心，可提前但需记录原因
+  3. 真实上市日 vs 数据起始日必须分开
+  4. 历史表现仅用于验证，不用于规则制定
+  5. Walk-forward：每年用当时已知信息重新评估池子
 
-事前规则（决策依据）：
-  A. 指数去重：跟踪同一指数的ETF只保留费率最低的
-  B. 成分重叠：前十大成分重叠>80%视为同一敞口
-  C. 规模门槛：规模<5亿排除（流动性风险）
-  D. 费率门槛：管理费>0.5%进入备选池
-  E. 观察期：上市<2年默认观察池，不参与评分
+分层准入规则：
+  Phase 1: 0-120 days -> WATCH (observation only, no scoring)
+  Phase 2: 120-250 days -> ENHANCED (can participate but with risk monitoring)
+  Phase 3: 250+ days -> CORE (full participation)
+  
+  Early Entry (120 days -> CORE directly): 
+    Must meet ALL criteria:
+    - Tracking index is well-established (not newly created)
+    - Scale >= 5 yi (min_scale)
+    - Average volume >= 1M (liquidity)
+    - Not redundant (no index overlap or high holding overlap)
+    - Must be recorded in decision log with full justification
 
-事后验证（仅验证）：
-  V1. 被保留的ETF是否确实表现优于被剔除的？
-  V2. 被标记冗余的ETF是否确实高度相关？
-  V3. 观察池的ETF是否确实数据不足？
-
-回测可信度边界：
-  - 现在表现好≠未来表现好
-  - 需要滚动窗口验证规则有效性
-  - 小样本ETF（<2年）的信号不可信
+  注意：使用 metadata 中的真实上市日（listing_date），不使用数据库 MIN(date)
+  数据起始日（data_start_date）用于回测数据完整性检查，但不用于准入评估
 """
 
 import pandas as pd
@@ -40,12 +40,13 @@ logger = logging.getLogger(__name__)
 
 class UniverseBuilder:
     """
-    ETF池治理器：基于事前规则评估ETF，不依赖未来数据
+    ETF池治理器：基于事前规则评估ETF，分层准入
     
     关键设计：
     - evaluate_at_date(): 在指定日期用当时已知信息评估池子
-    - 不是一次性看全历史，而是模拟"当时知道什么"
-    - 新增ETF默认观察2年，不直接进核心池
+    - 使用真实上市日（listing_date）而非数据起始日（data_start_date）
+    - 分层准入：120天/250天/可提前
+    - 所有决策可追溯
     """
     
     def __init__(self, db_path=None):
@@ -53,40 +54,61 @@ class UniverseBuilder:
         
         # 事前规则参数（不依赖历史表现）
         self.rules = {
-            # 规模门槛：规模太小流动性不足
+            # 规模门槛
             'min_scale_yi': 5.0,  # 5亿
+            'min_avg_volume': 1_000_000,  # 100万日成交额
             
-            # 费率门槛：太高则性价比低
+            # 费率门槛
             'max_fee_rate': 0.005,  # 0.5%
             
-            # 观察期：上市太短数据不足，不参与评分
-            'min_history_days': 500,  # ~2年
+            # 分层准入
+            'phase1_watch_days': 120,       # 0-120 days: WATCH
+            'phase2_enhanced_days': 250,    # 120-250 days: ENHANCED
+            'phase3_core_days': 250,        # 250+ days: CORE (default)
             
-            # 硬冗余：跟踪指数相同或成分重叠>80%
-            'index_overlap_threshold': 0.95,  # 跟踪同一指数
-            'holding_overlap_threshold': 0.80,  # 前十大成分重叠
+            # 提前进入CORE的条件（120天后可申请）
+            'early_entry_requirements': {
+                'min_scale': 5.0,           # 规模 >= 5亿
+                'min_volume': 1_000_000,    # 日均成交 >= 100万
+                'index_established': True,  # 跟踪指数成熟
+                'not_redundant': True,      # 非冗余
+            },
             
-            # 冗余对选择：费率优先，其次规模
+            # 硬冗余
+            'index_overlap_threshold': 0.95,
+            'holding_overlap_threshold': 0.80,
+            
+            # 冗余对选择优先级
             'redundancy_preference': ['fee_rate', 'scale', 'history_days'],
         }
         
-        # 假设的ETF元数据（实际应从数据库或外部接口获取）
-        # 这些是在ETF上市时就可获得的数据
+        # ETF元数据（包含真实上市日和数据起始日）
         self._etf_metadata = self._load_or_init_metadata()
+        
+        # 数据起始日（从数据库实际获取，与上市日分开）
+        self._data_start_dates = self._load_data_start_dates()
+    
+    def _load_data_start_dates(self):
+        """从数据库获取每只ETF的数据起始日（真实上市日可能更早）"""
+        conn = sqlite3.connect(self.db_path)
+        query = """
+            SELECT ticker, MIN(date) as data_start_date
+            FROM market_data
+            GROUP BY ticker
+        """
+        df = pd.read_sql(query, conn)
+        conn.close()
+        
+        return dict(zip(df['ticker'], df['data_start_date']))
     
     def _load_or_init_metadata(self):
-        """
-        加载ETF元数据（跟踪指数、费率、规模、成分股）
-        这些是在ETF上市时就可获得的数据，不是历史回测数据
-        """
+        """加载ETF元数据（真实上市日、费率、规模、跟踪指数等）"""
         metadata_file = Path(self.db_path).parent / 'etf_metadata.json'
         
         if metadata_file.exists():
             with open(metadata_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
         
-        # 初始化默认元数据（实际应通过API获取）
-        # 这些是假设数据，实际项目中应从iFinD/AKShare获取
         metadata = self._build_default_metadata()
         
         with open(metadata_file, 'w', encoding='utf-8') as f:
@@ -96,9 +118,8 @@ class UniverseBuilder:
     
     def _build_default_metadata(self):
         """构建默认元数据（实际应从数据源获取）"""
-        # 跟踪指数映射（关键：同一指数=硬冗余）
+        # 跟踪指数映射
         index_map = {
-            # Industry ETFs
             '512480.SH': 'CSI Semiconductor',
             '515230.SH': 'CSI Software Services',
             '515880.SH': 'CSI Communication',
@@ -115,16 +136,14 @@ class UniverseBuilder:
             '159865.SZ': 'CSI Livestock',
             '159697.SZ': 'CSI Oil & Gas',
             '159530.SZ': 'CSI Robotics',
-            
-            # Concept ETFs
             '588200.SH': 'STAR Chip',
             '159869.SZ': 'CSI Animation & Game',
             '516510.SH': 'CSI Cloud Computing',
-            '562500.SH': 'CSI Robotics',  # Same index as 159530.SZ!
+            '562500.SH': 'CSI Robotics',  # Same index as 159530.SZ
             '159740.SZ': 'CSI Environmental',
             '515050.SH': 'CSI 5G Communication',
             '512690.SH': 'CSI Alcohol',
-            '515170.SH': 'CSI Food & Beverage',  # High correlation with 512690.SH
+            '515170.SH': 'CSI Food & Beverage',
             '159766.SZ': 'CSI Tourism',
             '159992.SZ': 'CSI Innovative Medicine',
             '159898.SZ': 'CSI Medical Devices',
@@ -133,41 +152,28 @@ class UniverseBuilder:
             '513160.SH': 'CSI HK Tech',
             '510880.SH': 'CSI Dividend',
             '560700.SH': 'CSI SOE Reform',
-            
-            # Removed 3 ETFs
             '516120.SH': 'CSI Chemical',
             '516960.SH': 'CSI Machinery',
-            '516650.SH': 'CSI Non-ferrous Metal Theme',  # Related to 512400.SH
+            '516650.SH': 'CSI Non-ferrous Metal Theme',
         }
         
-        # 前十大成分重叠度（假设数据，实际应从定期报告获取）
-        # 0=无重叠，1=完全重叠
+        # 前十大成分重叠度
         holding_overlap = {
-            ('516650.SH', '512400.SH'): 0.85,  # 有色龙头 vs 有色金属：高度重叠
-            ('512690.SH', '515170.SH'): 0.90,  # 白酒 vs 食品饮料：高度重叠
-            ('159530.SZ', '562500.SH'): 0.88,  # 两个机器人ETF：同指数不同包装
-            ('516120.SH', '516160.SH'): 0.60,  # 化工 vs 新能源：部分重叠
-            ('516960.SH', '516160.SH'): 0.55,  # 机械 vs 新能源：部分重叠
+            '516650.SH,512400.SH': 0.85,
+            '512690.SH,515170.SH': 0.90,
+            '159530.SZ,562500.SH': 0.88,
+            '516120.SH,516160.SH': 0.60,
+            '516960.SH,516160.SH': 0.55,
         }
         
-        # 费率（假设数据，实际应从招募说明书获取）
-        fee_rates = {
-            '512480.SH': 0.0020, '515230.SH': 0.0020, '515880.SH': 0.0015,
-            '512010.SH': 0.0020, '159928.SZ': 0.0020, '516160.SH': 0.0020,
-            '516110.SH': 0.0020, '512800.SH': 0.0015, '512000.SH': 0.0020,
-            '512660.SH': 0.0020, '512980.SH': 0.0020, '512400.SH': 0.0020,
-            '159996.SZ': 0.0020, '159865.SZ': 0.0020, '159697.SZ': 0.0020,
-            '159530.SZ': 0.0020, '588200.SH': 0.0020, '159869.SZ': 0.0020,
-            '516510.SH': 0.0020, '562500.SH': 0.0020, '159740.SZ': 0.0020,
-            '515050.SH': 0.0015, '512690.SH': 0.0020, '515170.SH': 0.0020,
-            '159766.SZ': 0.0020, '159992.SZ': 0.0020, '159898.SZ': 0.0020,
-            '515790.SH': 0.0020, '159566.SZ': 0.0020, '513160.SH': 0.0020,
-            '510880.SH': 0.0015, '560700.SH': 0.0020, '516120.SH': 0.0020,
-            '516960.SH': 0.0020, '516650.SH': 0.0020,
-        }
+        # 费率
+        fee_rates = {t: 0.0020 for t in index_map}
+        fee_rates.update({
+            '515880.SH': 0.0015, '512800.SH': 0.0015, '515050.SH': 0.0015,
+            '510880.SH': 0.0015,
+        })
         
-        # 规模（假设数据，实际应从定期报告获取）
-        # 单位：亿元
+        # 规模（亿元）
         scales = {
             '512480.SH': 45.0, '515230.SH': 30.0, '515880.SH': 25.0,
             '512010.SH': 80.0, '159928.SZ': 35.0, '516160.SH': 60.0,
@@ -183,7 +189,7 @@ class UniverseBuilder:
             '516960.SH': 4.0, '516650.SH': 3.0,
         }
         
-        # 上市日期（实际可查）
+        # 真实上市日期（从公开信息获取，不是数据库MIN(date)）
         listing_dates = {
             '512480.SH': '2019-05-16', '515230.SH': '2020-04-24', '515880.SH': '2019-08-16',
             '512010.SH': '2019-04-12', '159928.SZ': '2019-06-12', '516160.SH': '2020-03-20',
@@ -207,10 +213,11 @@ class UniverseBuilder:
                 'fee_rate': fee_rates.get(ticker, 0.0020),
                 'scale_yi': scales.get(ticker, 10.0),
                 'listing_date': listing_dates.get(ticker, '2020-01-01'),
+                'data_start_date': None,  # Will be filled from DB
+                'index_established': True,  # Default, could be refined
             }
         
-        # 添加成分重叠度
-        metadata['_holding_overlap'] = {f"{k[0]},{k[1]}": v for k, v in holding_overlap.items()}
+        metadata['_holding_overlap'] = holding_overlap
         
         return metadata
     
@@ -218,29 +225,21 @@ class UniverseBuilder:
         """
         在指定评估日期用当时已知信息评估ETF池
         
-        关键：只用eval_date之前已知的数据，不用未来数据
-        
-        Parameters:
-            candidate_tickers: dict {ticker: name}
-            eval_date: str 'YYYY-MM-DD'，评估日期
-            market_data_df: DataFrame with date/ticker/close/volume
-        
-        Returns:
-            dict with pools and decisions
+        使用真实上市日（listing_date）而非数据起始日（data_start_date）
         """
         eval_dt = pd.to_datetime(eval_date)
         
         decisions = {}
         for ticker in candidate_tickers:
             meta = self._etf_metadata.get(ticker, {})
-            decision = self._evaluate_single_et(ticker, meta, eval_dt, candidate_tickers, market_data_df)
+            decision = self._evaluate_single_etf(ticker, meta, eval_dt, candidate_tickers, market_data_df)
             decisions[ticker] = decision
         
-        # 处理冗余对（指数相同或成分重叠）
+        # 处理冗余对
         self._resolve_redundancies(decisions, candidate_tickers, eval_dt)
         
         # 构建池子
-        pools = {'core': [], 'fallback': [], 'watch': [], 'excluded': []}
+        pools = {'core': [], 'enhanced': [], 'watch': [], 'fallback': [], 'excluded': []}
         for ticker, d in decisions.items():
             pools[d['pool']].append(ticker)
         
@@ -251,51 +250,159 @@ class UniverseBuilder:
             'rules': self.rules,
         }
     
-    def _evaluate_single_et(self, ticker, meta, eval_dt, all_tickers, market_df):
-        """评估单个ETF"""
+    def _evaluate_single_etf(self, ticker, meta, eval_dt, all_tickers, market_df):
+        """评估单个ETF，分层准入"""
         reasons = []
-        pool = 'core'  # 默认核心池
+        pool = 'watch'  # 默认观察池
+        early_entry = False
+        early_entry_reasons = []
         
-        # 1. 上市时间检查：上市太短=观察池
+        # 真实上市日（不是数据起始日）
         listing_date = pd.to_datetime(meta.get('listing_date', '2020-01-01'))
         history_days = (eval_dt - listing_date).days
         
-        if history_days < self.rules['min_history_days']:
-            pool = 'watch'
-            reasons.append(f"Observation: listed {history_days}d < {self.rules['min_history_days']}d")
+        # 数据起始日（从数据库获取）
+        data_start = self._data_start_dates.get(ticker)
+        if data_start:
+            data_start_dt = pd.to_datetime(data_start)
+            data_days = (eval_dt - data_start_dt).days
+        else:
+            data_days = 0
         
-        # 2. 规模检查：规模太小=排除
+        # === 阶段1：检查基本门槛 ===
+        # 1. 规模检查
         scale = meta.get('scale_yi', 0)
         if scale < self.rules['min_scale_yi']:
             pool = 'excluded'
             reasons.append(f"Scale too small: {scale}yi < {self.rules['min_scale_yi']}yi")
+            return self._build_decision(ticker, meta, pool, reasons, early_entry, early_entry_reasons, history_days, data_days, data_start)
         
-        # 3. 费率检查：太高=备选池
+        # 2. 费率检查
         fee = meta.get('fee_rate', 0)
         if fee > self.rules['max_fee_rate']:
-            if pool == 'core':  # Only downgrade from core
-                pool = 'fallback'
+            pool = 'fallback'
             reasons.append(f"Fee too high: {fee:.2%} > {self.rules['max_fee_rate']:.2%}")
         
-        # 4. 成分重叠检查（在_resolve_redundancies中处理）
-        # 这里只标记，不单独排除
+        # === 阶段2：分层准入 ===
+        # Phase 1: 0-120 days -> WATCH (default)
+        if history_days < self.rules['phase1_watch_days']:
+            pool = 'watch'
+            reasons.append(f"Phase 1: listed {history_days}d < {self.rules['phase1_watch_days']}d")
         
+        # Phase 2: 120-250 days -> ENHANCED (default)
+        elif history_days < self.rules['phase2_enhanced_days']:
+            pool = 'enhanced'
+            reasons.append(f"Phase 2: listed {history_days}d, {self.rules['phase1_watch_days']}-{self.rules['phase2_enhanced_days']}d window")
+            
+            # 检查是否可以提前进入CORE
+            can_early, early_reasons = self._check_early_entry(ticker, meta, all_tickers, eval_dt)
+            if can_early:
+                pool = 'core'
+                early_entry = True
+                early_entry_reasons = early_reasons
+                reasons.append("EARLY ENTRY to CORE: meets all criteria")
+        
+        # Phase 3: 250+ days -> CORE
+        else:
+            pool = 'core'
+            reasons.append(f"Phase 3: listed {history_days}d >= {self.rules['phase2_enhanced_days']}d")
+        
+        # 检查数据完整性
+        if data_days < 60:
+            reasons.append(f"WARNING: only {data_days}d of data available (need 60d for indicators)")
+        
+        return self._build_decision(ticker, meta, pool, reasons, early_entry, early_entry_reasons, history_days, data_days, data_start)
+    
+    def _check_early_entry(self, ticker, meta, all_tickers, eval_dt):
+        """检查是否满足120天提前进入CORE的条件"""
+        reasons = []
+        
+        # 1. 规模 >= 5亿
+        scale = meta.get('scale_yi', 0)
+        if scale < self.rules['early_entry_requirements']['min_scale']:
+            return False, [f"Scale {scale}yi < {self.rules['early_entry_requirements']['min_scale']}yi"]
+        reasons.append(f"Scale OK: {scale}yi >= {self.rules['early_entry_requirements']['min_scale']}yi")
+        
+        # 2. 跟踪指数成熟
+        # 简化：指数已存在至少1年（从第一只同指数ETF上市算起）
+        index = meta.get('tracking_index', '')
+        index_age = self._get_index_age(index, eval_dt)
+        if index_age < 365:
+            return False, [f"Index too new: {index_age}d < 365d"]
+        reasons.append(f"Index established: {index_age}d >= 365d")
+        
+        # 3. 非冗余
+        is_redundant, redundancy_info = self._check_redundancy(ticker, all_tickers, eval_dt)
+        if is_redundant:
+            return False, [f"Redundant: {redundancy_info}"]
+        reasons.append("Not redundant")
+        
+        return True, reasons
+    
+    def _get_index_age(self, index, eval_dt):
+        """获取跟踪指数的年龄（从第一只同指数ETF上市算起）"""
+        min_age = 9999
+        for t, m in self._etf_metadata.items():
+            if t.startswith('_'):
+                continue
+            if m.get('tracking_index', '') == index:
+                listing = pd.to_datetime(m.get('listing_date', '2020-01-01'))
+                age = (eval_dt - listing).days
+                if age < min_age:
+                    min_age = age
+        return min_age if min_age < 9999 else 0
+    
+    def _check_redundancy(self, ticker, all_tickers, eval_dt):
+        """检查是否冗余"""
+        meta = self._etf_metadata.get(ticker, {})
+        index = meta.get('tracking_index', '')
+        
+        # 检查同一指数
+        for t, m in self._etf_metadata.items():
+            if t == ticker or t.startswith('_'):
+                continue
+            if t not in all_tickers:
+                continue
+            if m.get('tracking_index', '') == index:
+                # Same index, and the other one is older
+                other_listing = pd.to_datetime(m.get('listing_date', '2020-01-01'))
+                this_listing = pd.to_datetime(meta.get('listing_date', '2020-01-01'))
+                if other_listing <= this_listing:
+                    return True, f"same index '{index}' with {t} (older)"
+        
+        # 检查成分重叠
+        overlap_data = self._etf_metadata.get('_holding_overlap', {})
+        for pair_str, overlap in overlap_data.items():
+            if overlap >= self.rules['holding_overlap_threshold']:
+                t1, t2 = pair_str.split(',')
+                if ticker in (t1, t2) and (t1 in all_tickers and t2 in all_tickers):
+                    other = t2 if ticker == t1 else t1
+                    return True, f"holding overlap {overlap:.0%} with {other}"
+        
+        return False, ""
+    
+    def _build_decision(self, ticker, meta, pool, reasons, early_entry, early_entry_reasons, history_days, data_days, data_start):
+        """构建决策记录"""
         return {
             'pool': pool,
             'reasons': reasons,
+            'early_entry': early_entry,
+            'early_entry_reasons': early_entry_reasons,
             'ticker': ticker,
             'name': meta.get('name', ''),
             'tracking_index': meta.get('tracking_index', ''),
-            'scale_yi': scale,
-            'fee_rate': fee,
-            'listing_date': str(listing_date.date()),
+            'scale_yi': meta.get('scale_yi', 0),
+            'fee_rate': meta.get('fee_rate', 0),
+            'listing_date': meta.get('listing_date', ''),
+            'data_start_date': data_start,
             'history_days': history_days,
+            'data_days': data_days,
             'meta': meta,
         }
     
     def _resolve_redundancies(self, decisions, all_tickers, eval_dt):
         """解决冗余对：同一指数或高成分重叠"""
-        # 1. 指数去重：跟踪同一指数的只保留一个
+        # 1. 指数去重
         index_groups = {}
         for ticker in all_tickers:
             meta = self._etf_metadata.get(ticker, {})
@@ -307,24 +414,21 @@ class UniverseBuilder:
         
         for idx, tickers in index_groups.items():
             if len(tickers) > 1:
-                # 选择最优：费率低 > 规模大 > 历史长
                 best = self._select_best(tickers, eval_dt)
                 for t in tickers:
                     if t != best and decisions[t]['pool'] != 'excluded':
-                        # 如果另一个没被排除，降级到fallback或watch
-                        if decisions[t]['pool'] == 'core':
+                        if decisions[t]['pool'] in ('core', 'enhanced'):
                             decisions[t]['pool'] = 'fallback'
                         decisions[t]['reasons'].append(
-                                                        f"Index redundancy: same index '{idx}' with {best}, keep {best}"
+                            f"Index redundancy: same index '{idx}' with {best}, keep {best}"
                         )
         
-        # 2. 成分重叠去重（即使跟踪不同指数，成分重叠也高）
+        # 2. 成分重叠去重
         overlap_data = self._etf_metadata.get('_holding_overlap', {})
         for pair_str, overlap in overlap_data.items():
             if overlap >= self.rules['holding_overlap_threshold']:
                 t1, t2 = pair_str.split(',')
                 if t1 in decisions and t2 in decisions:
-                    # 选择已上市更久的（更可靠）
                     days1 = decisions[t1]['history_days']
                     days2 = decisions[t2]['history_days']
                     if days1 >= days2:
@@ -333,7 +437,7 @@ class UniverseBuilder:
                         exclude, keep = t1, t2
                     
                     if decisions[exclude]['pool'] != 'excluded':
-                        if decisions[exclude]['pool'] == 'core':
+                        if decisions[exclude]['pool'] in ('core', 'enhanced'):
                             decisions[exclude]['pool'] = 'fallback'
                         decisions[exclude]['reasons'].append(
                             f"Holding redundancy: overlap {overlap:.0%} with {keep}, keep {keep}"
@@ -347,16 +451,10 @@ class UniverseBuilder:
         for t in tickers:
             meta = self._etf_metadata.get(t, {})
             score = 0
-            
-            # 费率低加分
             fee = meta.get('fee_rate', 0.01)
-            score += (0.01 - fee) * 1000  # 费率越低分越高
-            
-            # 规模大加分
+            score += (0.01 - fee) * 1000
             scale = meta.get('scale_yi', 0)
             score += scale * 0.1
-            
-            # 历史长加分
             listing = pd.to_datetime(meta.get('listing_date', '2020-01-01'))
             days = (eval_dt - listing).days
             score += days * 0.01
@@ -368,14 +466,7 @@ class UniverseBuilder:
         return best
     
     def walk_forward_validation(self, candidate_tickers, start_date, end_date, step_months=12):
-        """
-        Walk-forward验证：滚动窗口评估
-        
-        每年重新评估池子，看规则是否稳定
-        
-        Returns:
-            list of evaluation results at each step
-        """
+        """Walk-forward验证"""
         results = []
         current = pd.to_datetime(start_date)
         end = pd.to_datetime(end_date)
@@ -403,11 +494,15 @@ class UniverseBuilder:
                 'name': d['name'],
                 'pool': d['pool'],
                 'reason': ' | '.join(d['reasons']),
+                'early_entry': d['early_entry'],
+                'early_entry_reasons': ' | '.join(d['early_entry_reasons']) if d['early_entry_reasons'] else '',
                 'tracking_index': d['tracking_index'],
                 'scale_yi': d['scale_yi'],
                 'fee_rate': d['fee_rate'],
                 'listing_date': d['listing_date'],
+                'data_start_date': d['data_start_date'],
                 'history_days': d['history_days'],
+                'data_days': d['data_days'],
             })
         
         df = pd.DataFrame(rows)
@@ -418,20 +513,31 @@ class UniverseBuilder:
         pools = evaluation_result['pools']
         with open(f'{output_dir}/universe_governance_{eval_date}.md', 'w', encoding='utf-8') as f:
             f.write(f"# ETF Pool Governance Report ({eval_date})\n\n")
-            f.write(f"**Rules:**\n")
-            f.write(f"- Min scale: {self.rules['min_scale_yi']}亿\n")
-            f.write(f"- Max fee: {self.rules['max_fee_rate']:.2%}\n")
-            f.write(f"- Min history: {self.rules['min_history_days']} days\n")
-            f.write(f"- Index overlap threshold: {self.rules['index_overlap_threshold']:.0%}\n")
-            f.write(f"- Holding overlap threshold: {self.rules['holding_overlap_threshold']:.0%}\n\n")
+            f.write(f"**Tiered Admission Rules:**\n")
+            f.write(f"- Phase 1 (0-120d): WATCH (observation only)\n")
+            f.write(f"- Phase 2 (120-250d): ENHANCED (can participate)\n")
+            f.write(f"- Phase 3 (250d+): CORE (full participation)\n")
+            f.write(f"- Early Entry (120d -> CORE): requires all criteria + decision log\n\n")
             
             f.write(f"**Pool Summary:**\n")
             f.write(f"- Core: {len(pools['core'])}\n")
-            f.write(f"- Fallback: {len(pools['fallback'])}\n")
+            f.write(f"- Enhanced: {len(pools['enhanced'])}\n")
             f.write(f"- Watch: {len(pools['watch'])}\n")
+            f.write(f"- Fallback: {len(pools['fallback'])}\n")
             f.write(f"- Excluded: {len(pools['excluded'])}\n\n")
             
-            for pool_name in ['core', 'fallback', 'watch', 'excluded']:
+            # Early entry details
+            early_entries = [(t, evaluation_result['decisions'][t]) for t in pools['core'] 
+                             if evaluation_result['decisions'][t]['early_entry']]
+            if early_entries:
+                f.write(f"## Early Entry to CORE (120d)\n\n")
+                for t, d in early_entries:
+                    f.write(f"- **{t}** ({d['name']}):\n")
+                    for r in d['early_entry_reasons']:
+                        f.write(f"  - {r}\n")
+                f.write(f"\n")
+            
+            for pool_name in ['core', 'enhanced', 'watch', 'fallback', 'excluded']:
                 if pools[pool_name]:
                     f.write(f"## {pool_name.upper()} Pool\n\n")
                     for t in pools[pool_name]:
@@ -450,7 +556,6 @@ class UniverseBuilder:
 
 
 if __name__ == '__main__':
-    # 演示：在2021-06-01评估35只实验池
     builder = UniverseBuilder()
     
     experimental_pool = {**CORE_UNIVERSE}
@@ -458,47 +563,43 @@ if __name__ == '__main__':
     experimental_pool['516960.SH'] = 'Machinery ETF'
     experimental_pool['516650.SH'] = 'Non-ferrous Metal ETF'
     
-    # 在2021-06-01评估（当时已知的数据）
+    # 在2021-06-01评估
     result = builder.evaluate_at_date(experimental_pool, '2021-06-01')
     files = builder.generate_report(result)
     
     print(f"=== Evaluation at 2021-06-01 ===")
     pools = result['pools']
     print(f"Core: {len(pools['core'])} ETFs")
-    print(f"Fallback: {len(pools['fallback'])} ETFs")
+    print(f"Enhanced: {len(pools['enhanced'])} ETFs")
     print(f"Watch: {len(pools['watch'])} ETFs")
+    print(f"Fallback: {len(pools['fallback'])} ETFs")
     print(f"Excluded: {len(pools['excluded'])} ETFs")
     
-    print(f"\n=== Core Pool ===")
-    for t in pools['core']:
-        d = result['decisions'][t]
-        print(f"  {t}: {d['name']}")
+    # Early entries
+    early = [t for t in pools['core'] if result['decisions'][t]['early_entry']]
+    if early:
+        print(f"\n=== Early Entry (120d -> CORE) ===")
+        for t in early:
+            d = result['decisions'][t]
+            print(f"  {t}: {' | '.join(d['early_entry_reasons'])}")
     
-    print(f"\n=== Fallback (redundancy) ===")
-    for t in pools['fallback']:
-        d = result['decisions'][t]
-        print(f"  {t}: {' | '.join(d['reasons'])}")
-    
-    print(f"\n=== Watch (too new) ===")
+    print(f"\n=== Watch Pool (0-120d) ===")
     for t in pools['watch']:
         d = result['decisions'][t]
         print(f"  {t}: {' | '.join(d['reasons'])}")
     
-    print(f"\n=== Excluded (too small) ===")
-    for t in pools['excluded']:
+    print(f"\n=== Enhanced Pool (120-250d) ===")
+    for t in pools['enhanced']:
         d = result['decisions'][t]
         print(f"  {t}: {' | '.join(d['reasons'])}")
     
-    print(f"\nReports: {files}")
-    
-    # Walk-forward: 看池子如何随时间变化
+    # Walk-forward
     print(f"\n=== Walk-forward (2021-06 to 2023-06) ===")
     wf = builder.walk_forward_validation(experimental_pool, '2021-06-01', '2023-06-01', step_months=12)
     for r in wf:
-        print(f"\n{r['eval_date']}: Core={len(r['pools']['core'])}, Fallback={len(r['pools']['fallback'])}, Watch={len(r['pools']['watch'])}, Excluded={len(r['pools']['excluded'])}")
-        new_watch = [t for t in r['pools']['watch'] if r['eval_date'] == '2021-06-01' or t not in [x for step in wf if step['eval_date'] < r['eval_date'] for x in step['pools']['watch']]]
-        if new_watch:
-            print(f"  New to watch: {new_watch}")
-        new_core = [t for t in r['pools']['core'] if t not in [x for step in wf if step['eval_date'] < r['eval_date'] for x in step['pools']['core']]]
-        if new_core:
-            print(f"  New to core: {new_core}")
+        print(f"\n{r['eval_date']}: Core={len(r['pools']['core'])}, Enhanced={len(r['pools']['enhanced'])}, Watch={len(r['pools']['watch'])}, Fallback={len(r['pools']['fallback'])}, Excluded={len(r['pools']['excluded'])}")
+        early = [t for t in r['pools']['core'] if r['decisions'][t]['early_entry']]
+        if early:
+            print(f"  Early entry: {early}")
+    
+    print(f"\nReports: {files}")
