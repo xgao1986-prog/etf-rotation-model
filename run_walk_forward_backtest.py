@@ -110,11 +110,11 @@ def main():
         print("数据库无数据，请先运行: python main.py update --full")
         return
     
-    # 统一回测区间：从2021-01-01到数据最新日期（确保有足够的动态池评估数据）
-    eval_start = '2021-01-01'
+    # 统一回测区间：从2019-06-03到数据最新日期（与v1.1基线一致）
+    eval_start = '2019-06-03'
     eval_end = market_df['date'].max().strftime('%Y-%m-%d')
     
-    print(f"\n统一回测区间: {eval_start} ~ {eval_end}")
+    print(f"\n统一回测区间: {eval_start} ~ {eval_end}（与v1.1基线一致）")
     print(f"数据覆盖: {market_df['date'].min().strftime('%Y-%m-%d')} ~ {market_df['date'].max().strftime('%Y-%m-%d')}")
     
     # 过滤数据到回测区间
