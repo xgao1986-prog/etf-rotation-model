@@ -930,7 +930,9 @@ class BacktestEngine:
                     
                     # ========== 备选池兜底（核心池选不满时补充）==========
                     # 备选池兜底（核心池选不满时自动启用）
-                    if max_new > 0 and available_cash > 1000:
+                    # v1.2.2修复: 检查fallback_equity_enabled配置，确保与实盘一致
+                    if (max_new > 0 and available_cash > 1000 and 
+                            self.cfg.get('fallback_equity_enabled', False)):
                         fallback_signals = buy_signals[buy_signals['ticker'].isin(_fallback_tickers)]
                         # 过滤掉已在持仓中的宽基
                         fallback_signals = fallback_signals[~fallback_signals['ticker'].isin(portfolio['positions'].keys())]
