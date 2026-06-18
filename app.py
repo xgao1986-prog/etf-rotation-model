@@ -1087,14 +1087,52 @@ def render_backtest(cfg, is_b0_18=True):
             for state_id, info in summary["state_distribution"].items():
                 color = regime_colors.get(state_id, "#66758a")
                 if state_id == 1:
-                    r1.metric(info["name"], f"{info['days']}天", f"{info['percentage']:.1%}")
+                    with r1:
+                        st.markdown(f"""
+                        <div style='background:#ffffff;border:1px solid #e6edf5;border-radius:8px;padding:14px;text-align:center;'>
+                            <div style='font-size:14px;font-weight:600;color:{color};'>{info['name']}</div>
+                            <div style='font-size:28px;font-weight:700;color:#142744;margin-top:8px;'>{info['days']}天</div>
+                            <div style='font-size:13px;color:#66758a;margin-top:4px;'>{info['percentage']:.1%}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
                 elif state_id == 2:
-                    r2.metric(info["name"], f"{info['days']}天", f"{info['percentage']:.1%}")
+                    with r2:
+                        st.markdown(f"""
+                        <div style='background:#ffffff;border:1px solid #e6edf5;border-radius:8px;padding:14px;text-align:center;'>
+                            <div style='font-size:14px;font-weight:600;color:{color};'>{info['name']}</div>
+                            <div style='font-size:28px;font-weight:700;color:#142744;margin-top:8px;'>{info['days']}天</div>
+                            <div style='font-size:13px;color:#66758a;margin-top:4px;'>{info['percentage']:.1%}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
                 elif state_id == 3:
-                    r3.metric(info["name"], f"{info['days']}天", f"{info['percentage']:.1%}")
+                    with r3:
+                        st.markdown(f"""
+                        <div style='background:#ffffff;border:1px solid #e6edf5;border-radius:8px;padding:14px;text-align:center;'>
+                            <div style='font-size:14px;font-weight:600;color:{color};'>{info['name']}</div>
+                            <div style='font-size:28px;font-weight:700;color:#142744;margin-top:8px;'>{info['days']}天</div>
+                            <div style='font-size:13px;color:#66758a;margin-top:4px;'>{info['percentage']:.1%}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
                 elif state_id == 4:
-                    r4.metric(info["name"], f"{info['days']}天", f"{info['percentage']:.1%}")
+                    with r4:
+                        st.markdown(f"""
+                        <div style='background:#ffffff;border:1px solid #e6edf5;border-radius:8px;padding:14px;text-align:center;'>
+                            <div style='font-size:14px;font-weight:600;color:{color};'>{info['name']}</div>
+                            <div style='font-size:28px;font-weight:700;color:#142744;margin-top:8px;'>{info['days']}天</div>
+                            <div style='font-size:13px;color:#66758a;margin-top:4px;'>{info['percentage']:.1%}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
             st.caption(f"状态切换: {summary['switch_count']}次 | 平均置信度: {summary['avg_confidence']:.1%}")
+        
+        # v6: 预热期信息
+        if "warmup_info" in result:
+            warmup = result["warmup_info"]
+            st.subheader("📊 预热期与运行时间")
+            w1, w2, w3 = st.columns(3)
+            w1.metric("数据起始", pd.to_datetime(warmup["earliest_data_start"]).strftime("%Y-%m-%d"))
+            w2.metric("实际运行起始", pd.to_datetime(warmup["warmup_end"]).strftime("%Y-%m-%d"))
+            w3.metric("预热期", f"{warmup['warmup_days']}个交易日")
+            st.caption("预热期：打分标准所需数据积累期，期间策略空仓，不计入年化和基准对比")
 
         trades = result["trades_df"]
 
