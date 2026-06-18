@@ -617,6 +617,212 @@ def make_nav_figure(result):
     return fig
 
 
+def make_combined_figure(result, start_date=None, end_date=None):
+    """
+    合并净值曲线图 + 仓位分配时序图，4行共享x轴，支持日期范围过滤。
+    第1行：净值曲线（策略vs基准）+ 市场状态背景着色
+    第2行：回撤
+    第3行：牛熊状态
+    第4行：仓位分配堆叠面积
+    """
+    nav_df = result["nav_df"].copy()
+    if start_date and end_date:
+        nav_df = nav_df[(nav_df["date"] >= pd.Timestamp(start_date)) & (nav_df["date"] <= pd.Timestamp(end_date))]
+    
+    if nav_df.empty:
+        return go.Figure()
+    
+    fig = make_subplots(
+        rows=4,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.40, 0.15, 0.08, 0.37],
+        subplot_titles=("", "", "", ""),
+    )
+    
+    # ===== 第1行：净值曲线 =====
+    # 市场状态背景着色
+    if "regime_id" in nav_df.columns and nav_df["regime_id"].notna().any():
+        regime_colors = {
+            1: "rgba(214, 79, 79, 0.12)",
+            2: "rgba(240, 162, 2, 0.12)",
+            3: "rgba(91, 141, 184, 0.12)",
+            4: "rgba(46, 157, 117, 0.12)",
+        }
+        nav_df_sorted = nav_df.sort_values("date").reset_index(drop=True)
+        current_regime = None
+        seg_start = None
+        for i, row in nav_df_sorted.iterrows():
+            rid = row["regime_id"]
+            if pd.isna(rid):
+                continue
+            if rid != current_regime:
+                if current_regime is not None and seg_start is not None:
+                    end_date = nav_df_sorted.iloc[i - 1]["date"]
+                    color = regime_colors.get(int(current_regime), "rgba(128,128,128,0.05)")
+                    for r in [1, 2, 3, 4]:
+                        fig.add_vrect(x0=seg_start, x1=end_date, fillcolor=color, opacity=1, line_width=0, row=r, col=1)
+                current_regime = rid
+                seg_start = row["date"]
+        if current_regime is not None and seg_start is not None:
+            end_date = nav_df_sorted.iloc[-1]["date"]
+            color = regime_colors.get(int(current_regime), "rgba(128,128,128,0.05)")
+            for r in [1, 2, 3, 4]:
+                fig.add_vrect(x0=seg_start, x1=end_date, fillcolor=color, opacity=1, line_width=0, row=r, col=1)
+    
+    base_nav = nav_df["nav"].iloc[0]
+    fig.add_trace(go.Scatter(
+        x=nav_df["date"], y=nav_df["nav"] / base_nav,
+        name="策略", line=dict(color="#1769aa", width=2.4),
+    ), row=1, col=1)
+    
+    if "bench_return" in nav_df.columns and nav_df["bench_return"].notna().any():
+        fig.add_trace(go.Scatter(
+            x=nav_df["date"], y=1 + nav_df["bench_return"],
+            name="沪深300", line=dict(color="#7d8793", width=1.6, dash="dash"),
+        ), row=1, col=1)
+    
+    # ===== 第2行：回撤 =====
+    fig.add_trace(go.Scatter(
+        x=nav_df["date"], y=nav_df["drawdown"],
+        name="回撤", fill="tozeroy", line=dict(color="#d64f4f", width=1.1),
+    ), row=2, col=1)
+    fig.update_yaxes(tickformat=".0%", row=2, col=1)
+    
+    # ===== 第3行：牛熊状态 =====
+    if "max_total_position" in nav_df.columns:
+        mkt_signals = nav_df["max_total_position"].values
+        mkt_colors = []
+        mkt_labels = []
+        for sig in mkt_signals:
+            if sig >= 0.9:
+                mkt_colors.append("#2e9d75")
+                mkt_labels.append(f"🟢 牛市(满仓) {sig:.0%}")
+            elif sig >= 0.4:
+                mkt_colors.append("#f0a202")
+                mkt_labels.append(f"🟡 震荡(半仓) {sig:.0%}")
+            else:
+                mkt_colors.append("#d64f4f")
+                mkt_labels.append(f"🔴 熊市(防御) {sig:.0%}")
+        
+        fig.add_trace(go.Bar(
+            x=nav_df["date"], y=[1] * len(nav_df),
+            marker=dict(color=mkt_colors, line=dict(width=0, color="rgba(0,0,0,0)"),),
+            showlegend=False, hovertemplate="%{customdata}<extra></extra>", customdata=mkt_labels,
+        ), row=3, col=1)
+        
+        # 图例：牛熊状态
+        for color, label in [
+            ("#2e9d75", "🟢 牛市(满仓)"),
+            ("#f0a202", "🟡 震荡(半仓)"),
+            ("#d64f4f", "🔴 熊市(防御)"),
+        ]:
+            fig.add_trace(go.Scatter(
+                x=[None], y=[None], mode="markers",
+                marker=dict(size=10, color=color, line=dict(width=0)),
+                name=label, showlegend=True,
+            ), row=3, col=1)
+        
+        fig.update_yaxes(range=[0, 1], visible=False, row=3, col=1)
+        fig.update_layout(bargap=0, bargroupgap=0)
+    
+    # ===== 第4行：仓位分配堆叠面积 =====
+    if "positions_pct" in nav_df.columns:
+        pos_records = []
+        for _, row in nav_df.iterrows():
+            record = {"date": row["date"]}
+            pct_dict = row.get("positions_pct", {})
+            if isinstance(pct_dict, dict):
+                for ticker, pct in pct_dict.items():
+                    record[ticker] = pct
+            if row["nav"] > 0:
+                record["cash"] = row["cash"] / row["nav"]
+            else:
+                record["cash"] = 1.0
+            pos_records.append(record)
+        
+        if pos_records:
+            pos_df = pd.DataFrame(pos_records).fillna(0)
+            
+            colors = [
+                "#1769aa", "#2e9d75", "#f0a202", "#d64f4f", "#9c27b0",
+                "#607d8b", "#795548", "#e91e63", "#3f51b5", "#009688",
+                "#ff5722", "#673ab7", "#8bc34a", "#cddc39", "#ffeb3b",
+                "#00bcd4", "#ff9800"
+            ]
+            
+            # 行业ETF
+            for i, ticker in enumerate(ETF_UNIVERSE.keys()):
+                if ticker in pos_df.columns:
+                    name = ETF_UNIVERSE.get(ticker, ticker)
+                    color = colors[i % len(colors)]
+                    hover_texts = [f"<b>{name}</b><br>仓位: {v:.1%}" if v > 0 else "" for v in pos_df[ticker]]
+                    fig.add_trace(go.Scatter(
+                        x=pos_df["date"], y=pos_df[ticker],
+                        name=name, mode="lines", stackgroup="one",
+                        line=dict(width=0.5, color=color), fillcolor=color,
+                        text=hover_texts, hoverinfo="text",
+                    ), row=4, col=1)
+            
+            # 宽基ETF
+            import config as _config_module
+            fallback_tickers = list(getattr(_config_module, "FALLBACK_EQUITY_UNIVERSE", {}).keys())
+            fallback_colors = ["#a0aec0", "#718096"]
+            for i, ticker in enumerate(fallback_tickers):
+                if ticker in pos_df.columns:
+                    name = _config_module.FALLBACK_EQUITY_UNIVERSE.get(ticker, ticker)
+                    color = fallback_colors[i % len(fallback_colors)]
+                    hover_texts = [f"<b>【宽基】{name}</b><br>仓位: {v:.1%}" if v > 0 else "" for v in pos_df[ticker]]
+                    fig.add_trace(go.Scatter(
+                        x=pos_df["date"], y=pos_df[ticker],
+                        name=f"【宽基】{name}", mode="lines", stackgroup="one",
+                        line=dict(width=0.5, color=color), fillcolor=color,
+                        text=hover_texts, hoverinfo="text",
+                    ), row=4, col=1)
+            
+            # 防御资产
+            defense_tickers = list(getattr(_config_module, "DEFENSE_UNIVERSE", {}).keys())
+            defense_colors = ["#ffd700", "#2b6cb0"]
+            for i, ticker in enumerate(defense_tickers):
+                if ticker in pos_df.columns:
+                    name = _config_module.DEFENSE_UNIVERSE.get(ticker, ticker)
+                    color = defense_colors[i % len(defense_colors)]
+                    hover_texts = [f"<b>【防御】{name}</b><br>仓位: {v:.1%}" if v > 0 else "" for v in pos_df[ticker]]
+                    fig.add_trace(go.Scatter(
+                        x=pos_df["date"], y=pos_df[ticker],
+                        name=f"【防御】{name}", mode="lines", stackgroup="one",
+                        line=dict(width=0.5, color=color), fillcolor=color,
+                        text=hover_texts, hoverinfo="text",
+                    ), row=4, col=1)
+            
+            # Cash
+            if "cash" in pos_df.columns:
+                hover_texts_cash = [f"<b>现金</b><br>占比: {v:.1%}" if v > 0 else "" for v in pos_df["cash"]]
+                fig.add_trace(go.Scatter(
+                    x=pos_df["date"], y=pos_df["cash"],
+                    name="现金", mode="lines", stackgroup="one",
+                    line=dict(width=0.5, color="#cccccc"), fillcolor="rgba(200,200,200,0.5)",
+                    text=hover_texts_cash, hoverinfo="text",
+                ), row=4, col=1)
+            
+            fig.update_yaxes(tickformat=".0%", row=4, col=1)
+    
+    fig.update_layout(
+        height=720,
+        hovermode="x unified",
+        margin=dict(l=10, r=16, t=20, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=9)),
+        xaxis_rangeslider_visible=False,
+    )
+    fig.update_xaxes(title_text="", row=1, col=1)
+    fig.update_xaxes(title_text="", row=2, col=1)
+    fig.update_xaxes(title_text="", row=3, col=1)
+    fig.update_xaxes(title_text="日期", row=4, col=1)
+    
+    return fig
+
+
 def _resample_weekly(df, end_weekday=4):
     """按周聚合日K线为周K线，以当周最后一个交易日为结束"""
     df = df.copy().sort_values("date").reset_index(drop=True)
@@ -1062,14 +1268,72 @@ def render_backtest(cfg, is_b0_18=True):
                 st.session_state["backtest_result"] = result
                 st.session_state["backtest_cfg_signature"] = active_signature
 
+        # 日期范围选择器
+        nav_df_all = result["nav_df"].copy()
+        min_date = nav_df_all["date"].min().date()
+        max_date = nav_df_all["date"].max().date()
+        
+        date_range = st.date_input(
+            "📅 选择分析时段",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            key="backtest_date_range",
+        )
+        
+        start_date, end_date = None, None
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+        
+        # 根据时段过滤数据并重算指标
+        filtered_nav = nav_df_all[
+            (nav_df_all["date"] >= pd.Timestamp(start_date)) & (nav_df_all["date"] <= pd.Timestamp(end_date))
+        ] if start_date and end_date else nav_df_all
+        
+        if len(filtered_nav) >= 2:
+            nav_start = filtered_nav["nav"].iloc[0]
+            nav_end = filtered_nav["nav"].iloc[-1]
+            total_return = (nav_end / nav_start) - 1 if nav_start > 0 else 0
+            
+            days = len(filtered_nav)
+            years = days / 252
+            annual_return = (1 + total_return) ** (1 / max(years, 0.01)) - 1
+            
+            daily_rets = filtered_nav["nav"].pct_change().dropna()
+            vol = daily_rets.std() * np.sqrt(252) if len(daily_rets) > 1 else 0
+            sharpe = annual_return / vol if vol > 0 else 0
+            
+            peak = filtered_nav["nav"].cummax()
+            drawdown = (filtered_nav["nav"] - peak) / peak
+            max_drawdown = drawdown.min()
+            
+            # 交易次数（在时段内）
+            trades = result["trades_df"]
+            trades_in_range = 0
+            if not trades.empty and "date" in trades.columns:
+                trades_in_range = len(trades[
+                    (pd.to_datetime(trades["date"]) >= pd.Timestamp(start_date)) &
+                    (pd.to_datetime(trades["date"]) <= pd.Timestamp(end_date))
+                ])
+        else:
+            total_return = result["total_return"]
+            annual_return = result["annual_return"]
+            sharpe = result["sharpe_ratio"]
+            max_drawdown = result["max_drawdown"]
+            trades_in_range = result["num_trades"]
+        
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("总收益率", format_pct(result["total_return"]))
-        c2.metric("年化收益", format_pct(result["annual_return"]))
-        c3.metric("夏普比率", f"{result['sharpe_ratio']:.2f}")
-        c4.metric("最大回撤", format_pct(result["max_drawdown"]))
-        c5.metric("交易次数", result["num_trades"])
+        c1.metric("总收益率", format_pct(total_return))
+        c2.metric("年化收益", format_pct(annual_return))
+        c3.metric("夏普比率", f"{sharpe:.2f}")
+        c4.metric("最大回撤", format_pct(max_drawdown))
+        c5.metric("交易次数", trades_in_range)
+        
+        if start_date != min_date or end_date != max_date:
+            st.caption(f"⏱️ 当前显示：{start_date} ~ {end_date}（共 {len(filtered_nav)} 个交易日）")
 
-        st.plotly_chart(make_nav_figure(result), use_container_width=True)
+        # 合并图表：净值曲线 + 回撤 + 牛熊状态 + 仓位分配（4行联动）
+        st.plotly_chart(make_combined_figure(result, start_date, end_date), use_container_width=True)
 
         s1, s2, s3, s4, s5 = st.columns(5)
         s1.metric("胜率", format_pct(result["win_rate"], 1))
@@ -1135,194 +1399,6 @@ def render_backtest(cfg, is_b0_18=True):
             st.caption("预热期：打分标准所需数据积累期，期间策略空仓，不计入年化和基准对比")
 
         trades = result["trades_df"]
-
-        # ========== 仓位分配时序图 ==========
-        st.subheader("📊 仓位分配时序")
-        nav_df_pos = result["nav_df"].copy()
-        if not nav_df_pos.empty and "positions_pct" in nav_df_pos.columns:
-            if "max_total_position" not in nav_df_pos.columns:
-                st.info("⚠️ 当前回测结果缺少牛熊状态数据，请重新运行回测以查看完整图表。")
-            pos_records = []
-            for _, row in nav_df_pos.iterrows():
-                record = {"date": row["date"]}
-                pct_dict = row.get("positions_pct", {})
-                if isinstance(pct_dict, dict):
-                    for ticker, pct in pct_dict.items():
-                        record[ticker] = pct
-                # Cash weight
-                if row["nav"] > 0:
-                    record["cash"] = row["cash"] / row["nav"]
-                else:
-                    record["cash"] = 1.0
-                pos_records.append(record)
-            
-            if pos_records:
-                pos_df = pd.DataFrame(pos_records)
-                pos_df = pos_df.fillna(0)
-                
-                fig_pos = make_subplots(
-                    rows=2,
-                    cols=1,
-                    shared_xaxes=True,
-                    vertical_spacing=0.05,
-                    row_heights=[0.18, 0.82],
-                    subplot_titles=("", ""),  # 标题用注释替代
-                )
-                
-                # 上子图：牛熊状态背景（用 Bar 图更可靠）
-                mkt_signals = nav_df_pos["max_total_position"].values
-                mkt_colors = []
-                mkt_labels = []
-                for sig in mkt_signals:
-                    if sig >= 0.9:
-                        mkt_colors.append("#2e9d75")
-                        mkt_labels.append(f"🟢 牛市(满仓) {sig:.0%}")
-                    elif sig >= 0.4:
-                        mkt_colors.append("#f0a202")
-                        mkt_labels.append(f"🟡 震荡(半仓) {sig:.0%}")
-                    else:
-                        mkt_colors.append("#d64f4f")
-                        mkt_labels.append(f"🔴 熊市(防御) {sig:.0%}")
-                
-                fig_pos.add_trace(go.Bar(
-                    x=nav_df_pos["date"],
-                    y=[1] * len(nav_df_pos),
-                    marker=dict(
-                        color=mkt_colors,
-                        line=dict(width=0, color="rgba(0,0,0,0)"),
-                    ),
-                    showlegend=False,
-                    hovertemplate="%{customdata}<extra></extra>",
-                    customdata=mkt_labels,
-                ), row=1, col=1)
-                
-                # 图例：牛熊状态
-                for color, label in [
-                    ("#2e9d75", "🟢 牛市(满仓)"),
-                    ("#f0a202", "🟡 震荡(半仓)"),
-                    ("#d64f4f", "🔴 熊市(防御)"),
-                ]:
-                    fig_pos.add_trace(go.Scatter(
-                        x=[None], y=[None], mode="markers",
-                        marker=dict(size=14, color=color, line=dict(width=0)),
-                        name=label, showlegend=True,
-                    ), row=1, col=1)
-                
-                fig_pos.update_yaxes(range=[0, 1], visible=False, row=1, col=1)
-                fig_pos.update_layout(bargap=0, bargroupgap=0)
-                
-                # 下子图：仓位分配堆叠面积
-                import config as _config_module
-                
-                colors = [
-                    "#1769aa", "#2e9d75", "#f0a202", "#d64f4f", "#9c27b0",
-                    "#607d8b", "#795548", "#e91e63", "#3f51b5", "#009688",
-                    "#ff5722", "#673ab7", "#8bc34a", "#cddc39", "#ffeb3b",
-                    "#00bcd4", "#ff9800"
-                ]
-                
-                for i, ticker in enumerate(ETF_UNIVERSE.keys()):
-                    if ticker in pos_df.columns:
-                        name = ETF_UNIVERSE.get(ticker, ticker)
-                        color = colors[i % len(colors)]
-                        # 只显示非零仓位的hover
-                        hover_texts = [f"<b>{name}</b><br>仓位: {v:.1%}" if v > 0 else "" for v in pos_df[ticker]]
-                        fig_pos.add_trace(go.Scatter(
-                            x=pos_df["date"],
-                            y=pos_df[ticker],
-                            name=name,
-                            mode="lines",
-                            stackgroup="one",
-                            line=dict(width=0.5, color=color),
-                            fillcolor=color,
-                            text=hover_texts,
-                            hoverinfo="text",
-                        ), row=2, col=1)
-                
-                # 宽基ETF（fallback equity）
-                fallback_tickers = list(getattr(_config_module, "FALLBACK_EQUITY_UNIVERSE", {}).keys())
-                fallback_colors = ["#a0aec0", "#718096"]  # 灰色系
-                for i, ticker in enumerate(fallback_tickers):
-                    if ticker in pos_df.columns:
-                        name = _config_module.FALLBACK_EQUITY_UNIVERSE.get(ticker, ticker)
-                        color = fallback_colors[i % len(fallback_colors)]
-                        hover_texts = [f"<b>【宽基】{name}</b><br>仓位: {v:.1%}" if v > 0 else "" for v in pos_df[ticker]]
-                        fig_pos.add_trace(go.Scatter(
-                            x=pos_df["date"],
-                            y=pos_df[ticker],
-                            name=f"【宽基】{name}",
-                            mode="lines",
-                            stackgroup="one",
-                            line=dict(width=0.5, color=color),
-                            fillcolor=color,
-                            text=hover_texts,
-                            hoverinfo="text",
-                        ), row=2, col=1)
-                
-                # 防御资产（黄金/国债）
-                defense_tickers = list(getattr(_config_module, "DEFENSE_UNIVERSE", {}).keys())
-                defense_colors = ["#ffd700", "#2b6cb0"]  # 金色、蓝色
-                for i, ticker in enumerate(defense_tickers):
-                    if ticker in pos_df.columns:
-                        name = _config_module.DEFENSE_UNIVERSE.get(ticker, ticker)
-                        color = defense_colors[i % len(defense_colors)]
-                        hover_texts = [f"<b>【防御】{name}</b><br>仓位: {v:.1%}" if v > 0 else "" for v in pos_df[ticker]]
-                        fig_pos.add_trace(go.Scatter(
-                            x=pos_df["date"],
-                            y=pos_df[ticker],
-                            name=f"【防御】{name}",
-                            mode="lines",
-                            stackgroup="one",
-                            line=dict(width=0.5, color=color),
-                            fillcolor=color,
-                            text=hover_texts,
-                            hoverinfo="text",
-                        ), row=2, col=1)
-                
-                # Cash
-                if "cash" in pos_df.columns:
-                    hover_texts_cash = [f"<b>现金</b><br>占比: {v:.1%}" if v > 0 else "" for v in pos_df["cash"]]
-                    fig_pos.add_trace(go.Scatter(
-                        x=pos_df["date"],
-                        y=pos_df["cash"],
-                        name="现金",
-                        mode="lines",
-                        stackgroup="one",
-                        line=dict(width=0.5, color="#cccccc"),
-                        fillcolor="rgba(200,200,200,0.5)",
-                        text=hover_texts_cash,
-                        hoverinfo="text",
-                    ), row=2, col=1)
-                
-                fig_pos.update_layout(
-                    height=480,
-                    hovermode="x unified",
-                    margin=dict(l=10, r=16, t=30, b=10),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=10)),
-                )
-                fig_pos.update_yaxes(tickformat=".0%", row=2, col=1)
-                fig_pos.update_xaxes(title_text="", row=1, col=1)
-                fig_pos.update_xaxes(title_text="日期", row=2, col=1)
-                fig_pos.update_yaxes(visible=False, row=1, col=1)  # 隐藏上子图 y 轴
-                
-                # 跳过周末（共享x轴，只需设置一次）
-                fig_pos.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
-                
-                st.plotly_chart(fig_pos, use_container_width=True)
-        
-        # 防御资产交易统计
-        if cfg.get("defense_enabled", False):
-            defense_tickers = list(_config_module.DEFENSE_UNIVERSE.keys())
-            defense_trades = trades[trades["ticker"].isin(defense_tickers)] if not trades.empty else pd.DataFrame()
-            if not defense_trades.empty:
-                st.caption(f"🛡️ 防御资产交易: {len(defense_trades)} 次 ({', '.join([_get_ticker_name(t) for t in defense_tickers])})")
-
-        trades = result["trades_df"]
-        if not trades.empty:
-            st.subheader("交易记录")
-            trades_view = trades.copy()
-            trades_view["name"] = trades_view["ticker"].map(_get_ticker_name)
-            st.dataframe(trades_view, use_container_width=True, hide_index=True)
 
         # ========== 年度收益对比 ==========
         st.subheader("📅 年度收益对比")
