@@ -25,14 +25,14 @@ from strategy import StrategyEngine
 
 
 st.set_page_config(
-    page_title="ETF轮动策略 v2.0",
+    page_title="B0-18 ETF轮动策略",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 
-APP_VERSION = "v2.0"
+APP_VERSION = "B0-18"
 SCORE_MAX = {
     "trend": 30,
     "confirm": 20,
@@ -174,6 +174,17 @@ def build_sidebar_config():
         max_holdings = st.slider("最大持仓数", 1, 10, STRATEGY_CONFIG["max_holdings"])
         max_per_etf = st.slider("单只上限(%)", 5, 50, int(STRATEGY_CONFIG["max_position_per_etf"] * 100)) / 100
         stop_loss = st.slider("止损线(%)", -20, -1, int(STRATEGY_CONFIG["stop_loss"] * 100)) / 100
+        
+        # 止损模式选择
+        stop_loss_mode_options = {"固定止损": "fixed", "ATR动态止损": "atr", "不止损": "none"}
+        stop_loss_mode_display = list(stop_loss_mode_options.keys())
+        stop_loss_mode_selected = st.selectbox("止损模式", stop_loss_mode_display, index=0)
+        stop_loss_mode = stop_loss_mode_options[stop_loss_mode_selected]
+        
+        atr_multiplier = 2.0
+        if stop_loss_mode == "atr":
+            atr_multiplier = st.slider("ATR倍数", 1.0, 5.0, 2.0, 0.5)
+        
         use_timing = st.checkbox("启用大盘择时", False)  # 默认关闭，回测数据显示关闭后收益更高
 
     # ========== 实验性因子参数 (v1.1) ==========
@@ -195,7 +206,7 @@ def build_sidebar_config():
         rebalance_weekday = weekday_options.index(rebalance_weekday)
         
         # 冷静期
-        cooling_period = st.slider("冷静期(交易日)", 0, 20, 5)
+        cooling_period = st.slider("冷静期(交易日)", 0, 20, 0)
         cooling_score_boost = st.slider("冷静期评分提升", 0, 30, 10)
         
         # 动态止盈
@@ -249,6 +260,8 @@ def build_sidebar_config():
     cfg["max_holdings"] = max_holdings
     cfg["max_position_per_etf"] = max_per_etf
     cfg["stop_loss"] = stop_loss
+    cfg["stop_loss_mode"] = stop_loss_mode
+    cfg["atr_stop_multiplier"] = atr_multiplier
     cfg["market_timing"] = use_timing
     
     # 构建交易规则配置
@@ -301,12 +314,54 @@ def build_sidebar_config():
     # 合并为完整配置
     cfg = build_config(strategy_cfg=cfg, trading_rules_cfg=trading_rules_cfg, defense_cfg=defense_cfg, backtest_cfg=backtest_cfg)
 
+    # B0-18 标准配置签名（一键复现基准）
+    B0_18_SIGNATURE = cfg_signature(STRATEGY_CONFIG) + (
+        0,  # cooling_period=0
+        "weekly",  # rebalance_freq
+        3,  # rebalance_weekday
+        "none",  # trailing_stop_mode
+        True,  # defense_enabled
+        False,  # sector_boost_enabled
+    )
+    
+    current_sig = cfg_signature(cfg)
+    is_b0_18 = (current_sig == B0_18_SIGNATURE)
+    
+    st.sidebar.divider()
+    
+    # 状态标记
+    if is_b0_18:
+        st.sidebar.markdown(
+            """
+            <div style="background:#e8f5e9;border:1px solid #4caf50;border-radius:8px;padding:10px 12px;text-align:center;">
+                <div style="font-size:0.85rem;color:#2e7d32;font-weight:700;">✅ 标准 B0-18</div>
+                <div style="font-size:0.75rem;color:#558b2f;">当前参数与基准一致</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.sidebar.markdown(
+            """
+            <div style="background:#fff3e0;border:1px solid #ff9800;border-radius:8px;padding:10px 12px;text-align:center;">
+                <div style="font-size:0.85rem;color:#e65100;font-weight:700;">⚠️ 自定义实验</div>
+                <div style="font-size:0.75rem;color:#f57c00;">参数已偏离B0-18基准</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    
+    # 一键加载B0-18
+    if st.sidebar.button("🔄 重置为B0-18", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
+    
     st.sidebar.divider()
     latest = get_database().get_latest_date()
     st.sidebar.metric("最新数据日", latest or "N/A")
-    st.sidebar.metric("当前ETF池", f"{len(ALL_TRADABLE_ETFS)} 只")
-    st.sidebar.caption("行业ETF + 宽基补仓 + 防御资产")
-    return cfg
+    st.sidebar.metric("当前ETF池", "18 只 (B0-18)")
+    st.sidebar.caption("16只行业ETF + 2只防御资产 | 概念池已封存")
+    return cfg, is_b0_18
 
 
 def apply_weighted_scores(df, cfg):
@@ -370,6 +425,7 @@ def _get_ticker_name(ticker):
     return ticker
 
 def cfg_signature(cfg):
+    """B0-18标准配置签名：包含所有影响回测结果的关键参数。"""
     weights = tuple((key, round(value, 6)) for key, value in sorted(cfg["weights"].items()))
     params = (
         cfg["min_trend_score"],
@@ -378,7 +434,14 @@ def cfg_signature(cfg):
         cfg["max_holdings"],
         round(cfg["max_position_per_etf"], 6),
         round(cfg["stop_loss"], 6),
+        cfg.get("stop_loss_mode", "fixed"),
         cfg["market_timing"],
+        cfg.get("cooling_period", 0),
+        cfg.get("rebalance_freq", "weekly"),
+        cfg.get("rebalance_weekday", 3),
+        cfg.get("trailing_stop_mode", "none"),
+        cfg.get("defense_enabled", True),
+        cfg.get("sector_boost_enabled", False),
     )
     return weights + params
 
@@ -409,7 +472,7 @@ def get_latest_score_table(cfg):
 
 def run_weighted_backtest(cfg, sample_type):
     db = get_database()
-    etf_tickers = list(ALL_TRADABLE_ETFS.keys())
+    etf_tickers = list(ETF_UNIVERSE.keys()) + list(DEFENSE_UNIVERSE.keys())
     market_df = db.get_market_data(ticker=etf_tickers)
     bench_df = db.get_market_data(ticker=BENCHMARK)
     if market_df.empty:
@@ -631,30 +694,40 @@ def make_candlestick(ticker, days=180, weekly=False, rebalance_weekday=4, trades
 
         buy_trades = trade_weeks[trade_weeks["action"] == "BUY"]
         sell_trades = trade_weeks[trade_weeks["action"].isin(["SELL", "STOP_LOSS"])]
+        
+        # 关键：过滤交易日期，只保留在当前数据时间范围内，防止Plotly x轴被强制扩展
+        min_date = market["date"].min()
+        max_date = market["date"].max()
 
         if not buy_trades.empty:
-            buy_dates = buy_trades["plot_date"].dropna().unique()
-            buy_y = market["high"].max() * 1.03
-            fig.add_trace(go.Scatter(
-                x=buy_dates,
-                y=[buy_y] * len(buy_dates),
-                mode="markers",
-                marker=dict(symbol="triangle-up", size=14, color="#2e9d75", line=dict(width=1, color="white")),
-                name="买入",
-                hovertemplate="买入: %{x}<extra></extra>",
-            ), row=1, col=1)
+            buy_dates = pd.to_datetime(buy_trades["plot_date"]).dropna().unique()
+            buy_dates = buy_dates[(buy_dates >= min_date) & (buy_dates <= max_date)]
+            if len(buy_dates) > 0:
+                buy_y = market["high"].max() * 1.03
+                fig.add_trace(go.Scatter(
+                    x=buy_dates,
+                    y=[buy_y] * len(buy_dates),
+                    mode="markers",
+                    marker=dict(symbol="triangle-up", size=14, color="#2e9d75", line=dict(width=1, color="white")),
+                    name="买入",
+                    text=[f"买入: {pd.Timestamp(d).strftime('%Y-%m-%d')}" for d in buy_dates],
+                    hovertemplate="%{text}<extra></extra>",
+                ), row=1, col=1)
 
         if not sell_trades.empty:
-            sell_dates = sell_trades["plot_date"].dropna().unique()
-            sell_y = market["low"].min() * 0.97
-            fig.add_trace(go.Scatter(
-                x=sell_dates,
-                y=[sell_y] * len(sell_dates),
-                mode="markers",
-                marker=dict(symbol="triangle-down", size=14, color="#d64f4f", line=dict(width=1, color="white")),
-                name="卖出",
-                hovertemplate="卖出: %{x}<extra></extra>",
-            ), row=1, col=1)
+            sell_dates = pd.to_datetime(sell_trades["plot_date"]).dropna().unique()
+            sell_dates = sell_dates[(sell_dates >= min_date) & (sell_dates <= max_date)]
+            if len(sell_dates) > 0:
+                sell_y = market["low"].min() * 0.97
+                fig.add_trace(go.Scatter(
+                    x=sell_dates,
+                    y=[sell_y] * len(sell_dates),
+                    mode="markers",
+                    marker=dict(symbol="triangle-down", size=14, color="#d64f4f", line=dict(width=1, color="white")),
+                    name="卖出",
+                    text=[f"卖出: {pd.Timestamp(d).strftime('%Y-%m-%d')}" for d in sell_dates],
+                    hovertemplate="%{text}<extra></extra>",
+                ), row=1, col=1)
 
     fig.add_trace(
         go.Bar(x=market["date"], y=market["volume"], name="成交量", marker_color="#9fb3c8", opacity=0.65),
@@ -662,19 +735,10 @@ def make_candlestick(ticker, days=180, weekly=False, rebalance_weekday=4, trades
         col=1,
     )
 
-    # 自动检测长假期（非周末的连续缺失交易日 > 3天）——仅日K线
-    rangebreaks = []
-    if not weekly:
-        market = market.sort_values("date").reset_index(drop=True)
-        market["prev_date"] = market["date"].shift(1)
-        market["gap_days"] = (market["date"] - market["prev_date"]).dt.days
-        long_gaps = market[market["gap_days"] > 3][["prev_date", "date", "gap_days"]].copy()
-        rangebreaks = [dict(bounds=["sat", "mon"])]
-        for _, gap in long_gaps.iterrows():
-            start_dt = gap["prev_date"] + pd.Timedelta(days=1)
-            end_dt = gap["date"] - pd.Timedelta(days=1)
-            if start_dt < end_dt:
-                rangebreaks.append(dict(values=[d.strftime("%Y-%m-%d") for d in pd.date_range(start_dt, end_dt) if d.weekday() < 5]))
+    # 日K线/周K线：均不设置 rangebreaks
+    # 注：rangebreaks 的 bounds/values 与 Plotly Candlestick 兼容性差，会导致K线堆叠或坐标异常。
+    # 周末/假期空白由数据自然缺失体现，无需额外设置。
+    # rangebreaks = [dict(bounds=["sat", "mon"])]  # 已禁用
 
     fig.update_layout(
         height=560,
@@ -683,10 +747,6 @@ def make_candlestick(ticker, days=180, weekly=False, rebalance_weekday=4, trades
         margin=dict(l=8, r=16, t=20, b=8),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
     )
-    
-    # 应用 rangebreaks 到两个子图的 x 轴
-    fig.update_xaxes(rangebreaks=rangebreaks, row=1, col=1)
-    fig.update_xaxes(rangebreaks=rangebreaks, row=2, col=1)
     
     return fig
 
@@ -756,15 +816,16 @@ def make_score_trend(ticker, cfg, days=180):
 
 
 def render_header():
-    st.title("📈 A股ETF轮动量化策略")
+    st.title("📈 B0-18 ETF轮动量化策略")
     st.markdown(
-        f'<span class="status-chip">Streamlit UI {APP_VERSION}</span> '
+        '<span class="status-chip">B0-18 主线</span> '
+        '<span class="status-chip" style="background:#fff3e0;border-color:#ff9800;color:#e65100;">概念池已封存</span> '
         '<span class="section-note">五页工作台：仪表盘 / 回测结果 / ETF分析 / 数据管理 / 策略配置</span>',
         unsafe_allow_html=True,
     )
 
 
-def render_dashboard(cfg):
+def render_dashboard(cfg, is_b0_18=True):
     latest, scores = get_latest_score_table(cfg)
     st.header("仪表盘")
     st.markdown('<div class="section-note">最新信号、评分排行和数据健康度会跟随侧边栏参数即时刷新。</div>', unsafe_allow_html=True)
@@ -962,7 +1023,7 @@ def render_dashboard(cfg):
         st.info("当前无持仓，等待买入信号")
 
 
-def render_backtest(cfg):
+def render_backtest(cfg, is_b0_18=True):
     st.header("回测结果")
     st.markdown('<div class="section-note">回测会使用当前侧边栏阈值、仓位、风控与实时加权评分。</div>', unsafe_allow_html=True)
 
@@ -1126,6 +1187,8 @@ def render_backtest(cfg):
                     if ticker in pos_df.columns:
                         name = ETF_UNIVERSE.get(ticker, ticker)
                         color = colors[i % len(colors)]
+                        # 只显示非零仓位的hover
+                        hover_texts = [f"<b>{name}</b><br>仓位: {v:.1%}" if v > 0 else "" for v in pos_df[ticker]]
                         fig_pos.add_trace(go.Scatter(
                             x=pos_df["date"],
                             y=pos_df[ticker],
@@ -1134,7 +1197,8 @@ def render_backtest(cfg):
                             stackgroup="one",
                             line=dict(width=0.5, color=color),
                             fillcolor=color,
-                            hovertemplate=f"<b>{name}</b><br>仓位: %{{y:.1%}}<extra></extra>",
+                            text=hover_texts,
+                            hoverinfo="text",
                         ), row=2, col=1)
                 
                 # 宽基ETF（fallback equity）
@@ -1144,6 +1208,7 @@ def render_backtest(cfg):
                     if ticker in pos_df.columns:
                         name = _config_module.FALLBACK_EQUITY_UNIVERSE.get(ticker, ticker)
                         color = fallback_colors[i % len(fallback_colors)]
+                        hover_texts = [f"<b>【宽基】{name}</b><br>仓位: {v:.1%}" if v > 0 else "" for v in pos_df[ticker]]
                         fig_pos.add_trace(go.Scatter(
                             x=pos_df["date"],
                             y=pos_df[ticker],
@@ -1152,7 +1217,8 @@ def render_backtest(cfg):
                             stackgroup="one",
                             line=dict(width=0.5, color=color),
                             fillcolor=color,
-                            hovertemplate=f"<b>{name}</b><br>仓位: %{{y:.1%}}<extra></extra>",
+                            text=hover_texts,
+                            hoverinfo="text",
                         ), row=2, col=1)
                 
                 # 防御资产（黄金/国债）
@@ -1162,6 +1228,7 @@ def render_backtest(cfg):
                     if ticker in pos_df.columns:
                         name = _config_module.DEFENSE_UNIVERSE.get(ticker, ticker)
                         color = defense_colors[i % len(defense_colors)]
+                        hover_texts = [f"<b>【防御】{name}</b><br>仓位: {v:.1%}" if v > 0 else "" for v in pos_df[ticker]]
                         fig_pos.add_trace(go.Scatter(
                             x=pos_df["date"],
                             y=pos_df[ticker],
@@ -1170,11 +1237,13 @@ def render_backtest(cfg):
                             stackgroup="one",
                             line=dict(width=0.5, color=color),
                             fillcolor=color,
-                            hovertemplate=f"<b>{name}</b><br>仓位: %{{y:.1%}}<extra></extra>",
+                            text=hover_texts,
+                            hoverinfo="text",
                         ), row=2, col=1)
                 
                 # Cash
                 if "cash" in pos_df.columns:
+                    hover_texts_cash = [f"<b>现金</b><br>占比: {v:.1%}" if v > 0 else "" for v in pos_df["cash"]]
                     fig_pos.add_trace(go.Scatter(
                         x=pos_df["date"],
                         y=pos_df["cash"],
@@ -1183,7 +1252,8 @@ def render_backtest(cfg):
                         stackgroup="one",
                         line=dict(width=0.5, color="#cccccc"),
                         fillcolor="rgba(200,200,200,0.5)",
-                        hovertemplate="<b>现金</b><br>占比: %{y:.1%}<extra></extra>",
+                        text=hover_texts_cash,
+                        hoverinfo="text",
                     ), row=2, col=1)
                 
                 fig_pos.update_layout(
@@ -1304,7 +1374,7 @@ def render_backtest(cfg):
                 )
 
 
-def render_etf_analysis(cfg):
+def render_etf_analysis(cfg, is_b0_18=True):
     st.header("ETF分析")
     st.markdown('<div class="section-note">新增单标的分析页：K线图、雷达图、评分趋势图。</div>', unsafe_allow_html=True)
 
@@ -1324,14 +1394,19 @@ def render_etf_analysis(cfg):
     rebalance_weekday = cfg.get("rebalance_weekday", 4)
     # 获取回测交易记录
     trades_df = None
+    backtest_hint = ""
     if "backtest_result" in st.session_state:
         trades = st.session_state["backtest_result"].get("trades_df", pd.DataFrame())
         if not trades.empty and ticker in trades["ticker"].values:
             trades_df = trades[trades["ticker"] == ticker].copy()
-    if trades_df is not None and not trades_df.empty:
-        top_controls[3].caption(f"📝 回测交易: {len(trades_df)} 次")
+            backtest_hint = f"📝 回测交易: {len(trades_df)} 次（买入 {len(trades_df[trades_df['action']=='BUY'])} / 卖出 {len(trades_df[trades_df['action'].isin(['SELL','STOP_LOSS'])])}）"
+        elif not trades.empty:
+            backtest_hint = f"📝 回测无该标的交易（回测共 {len(trades)} 次交易）"
+        else:
+            backtest_hint = "📝 回测结果无交易记录"
     else:
-        top_controls[3].caption("📝 先运行回测以显示交易标记")
+        backtest_hint = "📝 请先运行回测以显示交易标记"
+    top_controls[3].caption(backtest_hint)
 
     ticker_scores = scores[scores["ticker"] == ticker] if not scores.empty else pd.DataFrame()
     if ticker_scores.empty:
@@ -1577,7 +1652,7 @@ def render_data_management():
     st.dataframe(pd.DataFrame(coverage_data), use_container_width=True, hide_index=True)
 
 
-def render_strategy_config(cfg):
+def render_strategy_config(cfg, is_b0_18=True):
     st.header("策略配置")
     st.markdown('<div class="section-note">当前 sidebar 参数快照、评分规则和ETF标的池。</div>', unsafe_allow_html=True)
 
@@ -1691,7 +1766,9 @@ def render_strategy_config(cfg):
                 {"参数": "总评分最低分", "当前值": cfg["min_total_score"]},
                 {"参数": "最大持仓数", "当前值": cfg["max_holdings"]},
                 {"参数": "单只上限", "当前值": f"{cfg['max_position_per_etf']:.0%}"},
+                {"参数": "止损模式", "当前值": f"{cfg.get('stop_loss_mode', 'fixed')}"},
                 {"参数": "止损线", "当前值": f"{cfg['stop_loss']:.0%}"},
+                {"参数": "ATR倍数", "当前值": f"{cfg.get('atr_stop_multiplier', 2.0)}"},
                 {"参数": "大盘择时", "当前值": "启用" if cfg["market_timing"] else "关闭"},
                 {"参数": "防御模块", "当前值": "启用" if cfg.get("defense_enabled", False) else "关闭"},
                 {"参数": "防御资产", "当前值": ", ".join([DEFENSE_UNIVERSE.get(t, t) for t in _config_module.DEFENSE_UNIVERSE.keys()]) if cfg.get("defense_enabled", False) else "无"},
@@ -1717,25 +1794,34 @@ def render_strategy_config(cfg):
 
     st.subheader("ETF标的池")
     
-    # 行业/主题ETF
-    st.markdown("**行业/主题ETF（第一层 - 核心alpha）**")
+    st.info("B0-18 主线：只使用16只行业ETF + 2只防御资产。概念ETF（16只）和宽基补仓（4只）已封存，不参与日常轮动。")
+    
+    # 行业ETF（B0-18 核心池）
+    st.markdown("**行业ETF（B0-18 核心池 - 16只）**")
     stock_df = pd.DataFrame([{"代码": code, "名称": name} for code, name in ETF_UNIVERSE.items()])
     st.dataframe(stock_df, use_container_width=True, hide_index=True)
     
-    # 宽基补仓ETF
-    st.markdown("**宽基补仓ETF（第二层 - 补足beta）**")
-    fallback_df = pd.DataFrame([{"代码": code, "名称": name} for code, name in FALLBACK_EQUITY_UNIVERSE.items()])
-    st.dataframe(fallback_df, use_container_width=True, hide_index=True)
-    
-    # 防御资产
-    st.markdown("**防御资产（第三层 - 低相关补仓）**")
+    # 防御资产（B0-18 防御池）
+    st.markdown("**防御资产（B0-18 防御池 - 2只）**")
     defense_df = pd.DataFrame([{"代码": code, "名称": name} for code, name in DEFENSE_UNIVERSE.items()])
     st.dataframe(defense_df, use_container_width=True, hide_index=True)
+    
+    # 已封存池
+    st.markdown("**已封存（不参与轮动）**")
+    with st.expander("概念ETF + 宽基补仓（16只概念 + 4只宽基）"):
+        fallback_df = pd.DataFrame([{"代码": code, "名称": name} for code, name in FALLBACK_EQUITY_UNIVERSE.items()])
+        st.caption("宽基补仓：暂停使用，等待进一步验证")
+        st.dataframe(fallback_df, use_container_width=True, hide_index=True)
+        
+        from config import CONCEPT_UNIVERSE
+        concept_df = pd.DataFrame([{"代码": code, "名称": name} for code, name in CONCEPT_UNIVERSE.items()])
+        st.caption("概念ETF：已封存。测试显示加入后全区间收益从132%降至79%，为负贡献")
+        st.dataframe(concept_df, use_container_width=True, hide_index=True)
 
 
 def main():
     inject_style()
-    cfg = build_sidebar_config()
+    cfg, is_b0_18 = build_sidebar_config()
     render_header()
 
     tab_dashboard, tab_backtest, tab_etf, tab_data, tab_config = st.tabs(
@@ -1743,18 +1829,18 @@ def main():
     )
 
     with tab_dashboard:
-        render_dashboard(cfg)
+        render_dashboard(cfg, is_b0_18)
     with tab_backtest:
-        render_backtest(cfg)
+        render_backtest(cfg, is_b0_18)
     with tab_etf:
-        render_etf_analysis(cfg)
+        render_etf_analysis(cfg, is_b0_18)
     with tab_data:
         render_data_management()
     with tab_config:
-        render_strategy_config(cfg)
+        render_strategy_config(cfg, is_b0_18)
 
     st.divider()
-    st.caption("A股ETF轮动量化策略 v2.0 | 本地运行版 | 参数来自侧边栏实时状态")
+    st.caption("B0-18 主线 | 18只行业ETF轮动 | 概念池已封存 | 参数来自侧边栏实时状态")
 
 
 if __name__ == "__main__":
