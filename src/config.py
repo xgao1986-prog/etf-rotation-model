@@ -58,9 +58,64 @@ ETF_UNIVERSE = {
 
 BENCHMARK = '000300.SH'  # 沪深300
 
+# 申万一级行业指数映射（v1.3 研究用，30个行业）
+# 格式: 指数代码: (指数名称, 映射ETF列表)
+# 历史：2003版28个 → 2014版新增11个 → 2021版新增4个（从采掘/公用事业拆分）
+# 当前可用30个：15个旧版保留 + 11个2014新版 + 4个2021新版
+
+SECTOR_INDEX_UNIVERSE = {
+    # === 旧版保留（16个）===
+    '801010.SI': ('农林牧渔', ['159865.SZ']),
+    '801030.SI': ('基础化工', []),  # 原名化工
+    '801040.SI': ('钢铁', []),
+    '801050.SI': ('有色金属', ['512400.SH']),
+    '801080.SI': ('电子', ['512480.SH', '588200.SH']),
+    '801110.SI': ('家用电器', ['159996.SZ']),
+    '801120.SI': ('食品饮料', ['512690.SH', '515170.SH']),
+    '801130.SI': ('纺织服饰', []),  # 原名纺织服装
+    '801140.SI': ('轻工制造', []),
+    '801150.SI': ('医药生物', ['512010.SH', '159992.SZ', '159898.SZ']),
+    '801160.SI': ('公用事业', []),
+    '801170.SI': ('交通运输', []),
+    '801180.SI': ('房地产', []),
+    '801200.SI': ('商贸零售', []),  # 原名商业贸易
+    '801210.SI': ('社会服务', ['159766.SZ']),  # 原名休闲服务
+    '801230.SI': ('综合', []),
+    
+    # === 2014年后新增/调整（11个）===
+    '801710.SI': ('建筑材料', []),
+    '801720.SI': ('建筑装饰', []),
+    '801730.SI': ('电力设备', ['516160.SH', '515790.SH', '159566.SZ']),  # 原名电气设备
+    '801740.SI': ('国防军工', ['512660.SH']),
+    '801750.SI': ('计算机', ['515230.SH', '516510.SH']),
+    '801760.SI': ('传媒', ['512980.SH', '159869.SZ']),
+    '801770.SI': ('通信', ['515880.SH', '515050.SH']),
+    '801780.SI': ('银行', ['512800.SH']),
+    '801790.SI': ('非银金融', ['512000.SH']),
+    '801880.SI': ('汽车', ['516110.SH']),
+    '801890.SI': ('机械设备', ['159530.SZ', '562500.SH']),
+    
+    # === 2021版新增/拆分（4个）===
+    '801950.SI': ('煤炭', []),  # 从采掘拆分
+    '801960.SI': ('石油石化', ['159697.SZ']),  # 从采掘拆分
+    '801970.SI': ('环保', []),  # 从公用事业拆分，独立为一级行业
+    '801980.SI': ('美容护理', []),  # 2021版新增一级行业
+}
+
 # 提取纯代码（不带后缀）用于AKShare等数据源
 ETF_CODES = [code.split('.')[0] for code in ETF_UNIVERSE.keys()]
 BENCHMARK_CODE = '000300'
+
+# 行业指数代码（纯代码，用于AKShare）
+SECTOR_CODES = [code.split('.')[0] for code in SECTOR_INDEX_UNIVERSE.keys()]
+
+# ETF到行业指数的映射（反向查找）
+ETF_TO_SECTOR_MAPPING = {}
+for sector_code, (name, etfs) in SECTOR_INDEX_UNIVERSE.items():
+    for etf in etfs:
+        if etf not in ETF_TO_SECTOR_MAPPING:
+            ETF_TO_SECTOR_MAPPING[etf] = []
+        ETF_TO_SECTOR_MAPPING[etf].append(sector_code)
 
 # ==================== 概念ETF池（新增）====================
 CONCEPT_UNIVERSE = {
@@ -114,6 +169,48 @@ FALLBACK_UNIVERSE = {**FALLBACK_EQUITY_UNIVERSE, **DEFENSE_UNIVERSE}
 # 999 = 不去重，收益最高但回撤大（155%，-24%）
 CORRELATION_THRESHOLD = 0.90
 
+# ETF同类分组映射（用于同类ETF限制）
+ETF_GROUP_MAP = {
+    # 芯片/半导体组
+    '512480.SH': 'chip', '588200.SH': 'chip', '588000.SH': 'chip',
+    # 新能源/光伏/电池组
+    '516160.SH': 'new_energy', '515790.SH': 'new_energy', '159566.SZ': 'new_energy',
+    # 证券/金融/银行组
+    '512000.SH': 'finance', '512800.SH': 'finance',
+    # 白酒/食品饮料组
+    '512690.SH': 'food_drink', '515170.SH': 'food_drink',
+    # 医药/创新药/医疗器械组
+    '512010.SH': 'medicine', '159992.SZ': 'medicine', '159898.SZ': 'medicine',
+    # 游戏/传媒/云计算组
+    '159869.SZ': 'tech_media', '512980.SH': 'tech_media', '516510.SH': 'tech_media',
+    # 机器人组
+    '159530.SZ': 'robot', '562500.SH': 'robot',
+    # 红利/央企组
+    '510880.SH': 'state_owned', '560700.SH': 'state_owned',
+    # 通信/5G组
+    '515880.SH': 'telecom', '515050.SH': 'telecom',
+    # 黄金/国债（防御资产）
+    '518880.SH': 'defense', '511010.SH': 'defense',
+    # 宽基
+    '510300.SH': 'index', '510500.SH': 'index', '159915.SZ': 'index',
+    # 其他
+    '512660.SH': 'military', '159766.SZ': 'tourism', '159928.SZ': 'consumption',
+    '159996.SZ': 'appliance', '159865.SZ': 'livestock', '159697.SZ': 'energy',
+    '513160.SH': 'hk_tech', '515230.SH': 'software', '516110.SH': 'auto',
+    '512400.SH': 'metal', '159740.SZ': 'carbon',
+}
+
+# 持仓稳定机制参数（可开关）
+STABILITY_CONFIG = {
+    'enabled': False,          # 是否启用持仓稳定机制
+    'buy_rank_n': 5,           # 买入门槛：必须进入Top N
+    'hold_rank_n': 12,         # 卖出门槛：跌出Top N才考虑卖出
+    'exit_confirm_weeks': 2,   # 卖出确认：连续N周跌出hold_rank_n才卖
+    'min_hold_days': 20,     # 最低持有期：持有<20天除非止损否则不卖
+    'replacement_score_gap': 8, # 替换优势：新标的必须比当前持仓高至少8分
+    'same_group_max_holdings': 1, # 同类分组限制：每组最多持有1只
+}
+
 
 # ==================== 策略参数 ====================
 STRATEGY_CONFIG = {
@@ -146,13 +243,18 @@ STRATEGY_CONFIG = {
     'total_max_holdings': 5,       # 总持仓上限（与 max_holdings 一致，保持向后兼容）
     # 向后兼容：max_holdings 保留为 stock_max_holdings 的别名
     'max_holdings': 5,             # 最多持有几只（= stock_max_holdings）
-    'max_position_per_etf': 0.15,  # 单只上限15%
+    'max_position_per_etf': 0.20,  # 单只上限20%（可用满）
     
     # 风控
     'stop_loss': -0.08,         # 固定止损线-8%（相对于成本价）
     
+    # 止损模式
+    'stop_loss_mode': 'fixed',   # 'fixed'=固定止损, 'atr'=ATR动态止损, 'none'=不止损
+    'atr_period': 14,             # ATR计算周期
+    'atr_stop_multiplier': 2.0,  # ATR止损倍数（止损价 = 成本 - multiplier * ATR）
+    
     # 调仓日
-    'rebalance_weekday': 4,     # 调仓日（0=周一, 1=周二, 2=周三, 3=周四, 4=周五）
+    'rebalance_weekday': 3,     # 调仓日（0=周一, 1=周二, 2=周三, 3=周四, 4=周五）
     
     # 大盘择时
     'market_timing': False,      # 是否启用大盘择时（默认关闭，回测数据显示关闭后收益更高）
@@ -272,14 +374,14 @@ TRADING_RULES_CONFIG = {
     # 调仓频率
     'rebalance_freq': 'weekly',      # weekly=每周, biweekly=双周, monthly=每月
     'rebalance_ordinal': 1,          # 第几个交易日（1=第一个）
-    'rebalance_weekday': 4,          # 调仓日（0=周一, 4=周五）
+    'rebalance_weekday': 3,          # 调仓日（0=周一, 4=周五）
     
     # 冷静期（止损后冷却）
-    'cooling_period': 5,             # 止损后冷却天数
+    'cooling_period': 0,             # 止损后冷却天数（0=不启用冷静期）
     'cooling_score_boost': 10,       # 冷却期后重新买入的评分加分
     
     # 动态止盈
-    'trailing_stop_mode': 'tiered',  # 'none'=关闭, 'simple'=简单, 'tiered'=分档
+    'trailing_stop_mode': 'none',    # 'none'=关闭, 'simple'=简单, 'tiered'=分档（本次关闭）
     'trailing_stop': None,           # 简单模式：回撤阈值
     'tier_1_pnl': 0.05,              # 1档：盈利5%
     'tier_1_drawdown': -0.05,        # 1档：允许回撤5%

@@ -165,16 +165,29 @@ class DataFetcher:
             if df.empty:
                 return pd.DataFrame()
             
-            # 申万指数数据列名: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额
-            df = df.rename(columns={
-                '日期': 'date',
-                '开盘': 'open',
-                '收盘': 'close',
-                '最高': 'high',
-                '最低': 'low',
-                '成交量': 'volume',
-                '成交额': 'amount',
-            })
+            # 申万指数数据列名处理：不同板块返回的列名格式可能不同
+            # 检查是否是8列（含代码列）或7列（标准格式）
+            if len(df.columns) == 8:
+                # 8列格式：第一列可能是代码列，检查并跳过
+                first_col_vals = df.iloc[:, 0].astype(str).unique()[:5]
+                if code in first_col_vals or any(code in str(v) for v in first_col_vals):
+                    df = df.iloc[:, 1:]  # 跳过代码列
+            
+            # 统一用位置索引重命名（7列标准格式）
+            if len(df.columns) >= 7:
+                df.columns = ['date', 'open', 'close', 'high', 'low', 'volume', 'amount'] + list(df.columns[7:])
+            
+            # 如果位置索引失败，尝试用中文字符重命名
+            if 'date' not in df.columns:
+                df = df.rename(columns={
+                    '日期': 'date',
+                    '开盘': 'open',
+                    '收盘': 'close',
+                    '最高': 'high',
+                    '最低': 'low',
+                    '成交量': 'volume',
+                    '成交额': 'amount',
+                })
             
             df['date'] = pd.to_datetime(df['date'])
             

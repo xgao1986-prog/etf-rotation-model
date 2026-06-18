@@ -35,28 +35,17 @@ class BacktestEngine:
         """
         运行回测
         
-        正确评分路径：
-        1. 分离股票ETF和防御资产行情
-        2. 逐ETF计算指标和评分（不含动量排名）
-        3. 合并所有股票ETF的scores，按日期做momentum_20横截面排名
-        4. 计算股票ETF的total_score
-        5. 对防御资产单独计算简化评分（不依赖动量排名）
-        6. 合并信号（含大盘择时）
-        7. 执行回测（含防御模块、动态止盈）
-        
-        Parameters:
-            market_df: 所有ETF的行情数据（含股票ETF+防御资产）
-            bench_df: 基准（沪深300）行情数据
-            universe_builder: UniverseBuilder 实例（可选，用于动态池评估）
-            eval_date: 评估日期（可选，用于动态池评估）
-        
-        Returns:
-            dict with backtest results
+        v5 修正：统一截断到全标的共同截止日 2026-06-05
         """
         import config as _cfg_module
         _core_tickers = list(getattr(_cfg_module, 'CORE_UNIVERSE', {}).keys())
         _fallback_tickers = list(getattr(_cfg_module, 'FALLBACK_EQUITY_UNIVERSE', {}).keys())
         _defense_tickers = list(_cfg_module.DEFENSE_UNIVERSE.keys())
+        
+        # ========== v5: 统一截断到全标的共同截止日 ==========
+        COMMON_CUTOFF = pd.Timestamp('2026-06-05')
+        market_df = market_df[market_df['date'] <= COMMON_CUTOFF].copy()
+        bench_df = bench_df[bench_df['date'] <= COMMON_CUTOFF].copy()
         
         # ========== v1.2.1: 动态池评估（Walk-forward）==========
         # 如果提供了 universe_builder 和 eval_date，则使用动态池评估
@@ -414,6 +403,11 @@ class BacktestEngine:
         trade_records = []
         last_rebalance_date = None
         
+        # v5: 缺失价格修复——维护最近有效收盘价，禁止持仓市值归零
+        last_valid_close = {}  # ticker -> last valid close price
+        missing_price_log = []  # list of missing price events
+        missing_price_counter = {}  # ticker -> consecutive missing days
+        
         # 佣金函数
         def calc_commission(amount):
             commission = max(amount * self.cfg['commission_rate'], self.cfg['min_commission'])
@@ -426,6 +420,26 @@ class BacktestEngine:
             day_signals = signals_df[signals_df['date'] == date].copy()
             day_prices = market_df[market_df['date'] == date].set_index('ticker')['open'].to_dict()
             day_close_prices = market_df[market_df['date'] == date].set_index('ticker')['close'].to_dict()
+            
+            # v5: 更新最近有效收盘价
+            for ticker, price in day_close_prices.items():
+                if pd.notna(price) and price > 0:
+                    last_valid_close[ticker] = price
+                    missing_price_counter[ticker] = 0
+            
+            # v5: 构建有效收盘价（缺失的用 last_valid_close，从未有过的为0）
+            effective_close_prices = {}
+            for ticker in day_close_prices:
+                if pd.notna(day_close_prices[ticker]) and day_close_prices[ticker] > 0:
+                    effective_close_prices[ticker] = day_close_prices[ticker]
+                elif ticker in last_valid_close:
+                    effective_close_prices[ticker] = last_valid_close[ticker]
+                else:
+                    effective_close_prices[ticker] = 0
+            # 补充：对于不在 day_close_prices 中但持仓中的ETF，也使用 last_valid_close
+            for ticker in portfolio['positions']:
+                if ticker not in effective_close_prices and ticker in last_valid_close:
+                    effective_close_prices[ticker] = last_valid_close[ticker]
             
             # 获取大盘择时信号
             max_total_position = 1.0
@@ -449,8 +463,38 @@ class BacktestEngine:
                     pnl = (current_price - cost) / cost
                     drawdown = (current_price - high_water) / high_water
                     
-                    # 层1：固定止损
-                    if pnl < self.cfg['stop_loss']:
+                    # 止损检查（支持固定止损、ATR止损、不止损）
+                    stop_loss_mode = self.cfg.get('stop_loss_mode', 'fixed')
+                    triggered_stop = False
+                    stop_reason = ''
+                    
+                    if stop_loss_mode == 'fixed':
+                        # 固定止损
+                        if pnl < self.cfg['stop_loss']:
+                            triggered_stop = True
+                            stop_reason = '固定止损'
+                    
+                    elif stop_loss_mode == 'atr':
+                        # ATR动态止损
+                        atr = pos.get('atr_at_entry', 0)
+                        atr_multiplier = self.cfg.get('atr_stop_multiplier', 2.0)
+                        if atr > 0 and cost > 0:
+                            atr_stop_price = cost - atr_multiplier * atr
+                            fixed_stop_price = cost * (1 + self.cfg['stop_loss'])
+                            # 取更宽松的（止损价更低的）
+                            stop_price = min(atr_stop_price, fixed_stop_price)
+                            if current_price < stop_price:
+                                triggered_stop = True
+                                stop_reason = f'ATR止损({atr_multiplier}xATR={atr:.3f}, 止损价={stop_price:.3f})'
+                        else:
+                            # 没有ATR数据，回退到固定止损
+                            if pnl < self.cfg['stop_loss']:
+                                triggered_stop = True
+                                stop_reason = '固定止损(无ATR)'
+                    
+                    # stop_loss_mode == 'none' 不触发止损
+                    
+                    if triggered_stop:
                         stops.append({
                             'ticker': ticker,
                             'current_price': current_price,
@@ -459,10 +503,10 @@ class BacktestEngine:
                             'pnl': pnl,
                             'drawdown': drawdown,
                             'entry_date': pos.get('entry_date', date_str),
-                            'reason': '固定止损'
+                            'reason': stop_reason
                         })
                     else:
-                        # 层2：动态止盈（实验性v1.2）
+                        # 动态止盈（实验性v1.2）
                         triggered, stop_reason = self._check_trailing_stop(pnl, drawdown)
                         if triggered:
                             stops.append({
@@ -513,39 +557,102 @@ class BacktestEngine:
                 # 记录本次调仓日期
                 last_rebalance_date = date
                 
-                # 1. 卖出不在候选列表的持仓
-                buy_signals = day_signals[day_signals['signal_type'] == 'BUY'].sort_values(
-                    'total_score', ascending=False
-                )
+                # 1. 获取BUY信号候选
+                buy_signals = day_signals[day_signals['signal_type'] == 'BUY'].sort_values('total_score', ascending=False)
                 candidates = set(buy_signals['ticker'].tolist())
                 
+                # B1: 排名缓冲机制（单变量测试）
+                rank_buffer_enabled = self.cfg.get('rank_buffer_enabled', False)
+                buy_rank_n = self.cfg.get('buy_rank_n', None)
+                sell_rank_n = self.cfg.get('sell_rank_n', None)
+                
+                # 预计算所有候选的排名（用于卖出判断）
+                candidate_rank = {}
+                if rank_buffer_enabled and sell_rank_n is not None:
+                    for i, ticker in enumerate(buy_signals['ticker'].tolist()):
+                        candidate_rank[ticker] = i + 1
+                
+                # 独立控制参数（拆分实验）
+                exit_debounce = self.cfg.get('exit_debounce', 0)  # 卖出防抖：连续N次调仓跌出候选列表才卖
+                min_hold_for_candidate_exit = self.cfg.get('min_hold_for_candidate_exit', 0)  # 最短持有：仅限制候选列表退出
+                same_group_max = self.cfg.get('same_group_max_holdings', 0)  # 同类分组：0=不限制
+                
+                # 获取同类分组映射
+                import config as _cfg_module
+                etf_group_map = getattr(_cfg_module, 'ETF_GROUP_MAP', {})
+                
+                # 1. 卖出逻辑（拆分实验：各参数独立控制）
                 for ticker in list(portfolio['positions'].keys()):
-                    if ticker not in candidates:
-                        if ticker in day_prices:
-                            price = day_prices[ticker]
-                            pos = portfolio['positions'][ticker]
-                            shares = pos['shares']
-                            
-                            proceeds = shares * price
-                            commission = calc_commission(proceeds)
-                            net_proceeds = proceeds - commission
-                            
-                            portfolio['cash'] += net_proceeds
-                            
-                            pnl = (price - pos['cost']) / pos['cost']
-                            trade_records.append({
-                                'date': date_str,
-                                'ticker': ticker,
-                                'action': 'SELL',
-                                'price': price,
-                                'shares': shares,
-                                'amount': proceeds,
-                                'commission': commission,
-                                'pnl_pct': pnl,
-                                'reason': '调出候选列表'
-                            })
-                            
-                            del portfolio['positions'][ticker]
+                    if ticker not in day_prices:
+                        continue
+                    
+                    pos = portfolio['positions'][ticker]
+                    price = day_prices[ticker]
+                    shares = pos['shares']
+                    
+                    # B1: 排名缓冲卖出逻辑
+                    if rank_buffer_enabled and sell_rank_n is not None and ticker in _core_tickers:
+                        # 核心池ETF：跌出前sell_rank_n才卖出
+                        rank = candidate_rank.get(ticker, len(buy_signals) + 1)
+                        in_top_n = rank <= sell_rank_n
+                    else:
+                        # B0 传统逻辑：检查是否在候选列表
+                        in_top_n = ticker in candidates
+                    
+                    if in_top_n:
+                        # 在前N名/候选列表中，重置防抖计数
+                        pos['out_candidate_weeks'] = 0
+                        continue
+                    
+                    # 不在前N名中，检查是否满足卖出条件
+                    should_sell = True
+                    hold_days = (date - pd.to_datetime(pos['entry_date'])).days
+                    
+                    # B. 卖出防抖：连续N次调仓确认
+                    if exit_debounce > 0:
+                        pos['out_candidate_weeks'] = pos.get('out_candidate_weeks', 0) + 1
+                        if pos['out_candidate_weeks'] < exit_debounce:
+                            should_sell = False
+                    
+                    # C. 最短持有：仅限制"调出候选列表"退出，止损例外
+                    if should_sell and min_hold_for_candidate_exit > 0:
+                        if hold_days < min_hold_for_candidate_exit:
+                            should_sell = False
+                    
+                    if not should_sell:
+                        continue
+                    
+                    # 执行卖出
+                    proceeds = shares * price
+                    commission = calc_commission(proceeds)
+                    net_proceeds = proceeds - commission
+                    
+                    portfolio['cash'] += net_proceeds
+                    
+                    pnl = (price - pos['cost']) / pos['cost']
+                    
+                    # 确定卖出原因
+                    out_weeks = pos.get('out_candidate_weeks', 0)
+                    if rank_buffer_enabled and sell_rank_n is not None and ticker in _core_tickers:
+                        reason = f'跌出前{sell_rank_n}名（排名{rank}）'
+                    elif exit_debounce > 0 and out_weeks >= exit_debounce:
+                        reason = f'连续{out_weeks}次跌出候选列表'
+                    else:
+                        reason = '调出候选列表'
+                    
+                    trade_records.append({
+                        'date': date_str,
+                        'ticker': ticker,
+                        'action': 'SELL',
+                        'price': price,
+                        'shares': shares,
+                        'amount': proceeds,
+                        'commission': commission,
+                        'pnl_pct': pnl,
+                        'reason': reason
+                    })
+                    
+                    del portfolio['positions'][ticker]
                 
                 # ===== 强制减仓：当 market_signal < 1.0 时，如果总仓位超过目标，卖出非防御持仓 =====
                 import config as _cfg_module
@@ -803,7 +910,8 @@ class BacktestEngine:
                                                 'shares': shares,
                                                 'cost': price,
                                                 'entry_date': date_str,
-                                                'high_water': price
+                                                'high_water': price,
+                                                'atr_at_entry': day_signals[day_signals['ticker'] == ticker]['atr_14'].iloc[0] if not day_signals[day_signals['ticker'] == ticker].empty and 'atr_14' in day_signals.columns else 0
                                             }
                                             
                                             trade_records.append({
@@ -822,6 +930,11 @@ class BacktestEngine:
                     if max_new > 0:
                         # 核心池买入信号（含行业和概念ETF）
                         core_signals = buy_signals[buy_signals['ticker'].isin(_core_tickers)]
+                        
+                        # B1: 排名缓冲买入逻辑（只买前buy_rank_n个）
+                        if rank_buffer_enabled and buy_rank_n is not None:
+                            core_signals = core_signals.head(buy_rank_n)
+                        
                         current_core_holdings = sum(1 for t in portfolio['positions'] if t in _core_tickers)
                         core_slots = min(max_new, self.cfg['max_holdings'] - current_core_holdings)
                         
@@ -845,6 +958,15 @@ class BacktestEngine:
                             
                             if ticker not in day_prices or ticker in portfolio['positions']:
                                 continue
+                            
+                            # D. 同类分组检查：只限制买入数量，不强制替换
+                            if same_group_max > 0 and ticker in etf_group_map:
+                                ticker_group = etf_group_map[ticker]
+                                # 检查当前持仓中同类组的数量
+                                group_holdings = [t for t in portfolio['positions'] if t in etf_group_map and etf_group_map[t] == ticker_group]
+                                if len(group_holdings) >= same_group_max:
+                                    # 同类已满，直接跳过（不替换）
+                                    continue
                             
                             # 相关性去重：检查与已选中ETF的相关性
                             if corr_matrix and date in corr_matrix and ticker in corr_matrix[date]:
@@ -905,7 +1027,8 @@ class BacktestEngine:
                                 'shares': shares,
                                 'cost': price,
                                 'entry_date': date_str,
-                                'high_water': price  # 初始化最高价（动态止盈用）
+                                'high_water': price,  # 初始化最高价（动态止盈用）
+                                'atr_at_entry': day_signals[day_signals['ticker'] == ticker]['atr_14'].iloc[0] if not day_signals[day_signals['ticker'] == ticker].empty and 'atr_14' in day_signals.columns else 0
                             }
                             
                             # 从冷却期列表中移除（已重新买入）
@@ -992,7 +1115,8 @@ class BacktestEngine:
                                         'shares': shares,
                                         'cost': price,
                                         'entry_date': date_str,
-                                        'high_water': price
+                                        'high_water': price,
+                                        'atr_at_entry': day_signals[day_signals['ticker'] == ticker]['atr_14'].iloc[0] if not day_signals[day_signals['ticker'] == ticker].empty and 'atr_14' in day_signals.columns else 0
                                     }
                                     
                                     # 从冷却期列表中移除（已重新买入）
@@ -1093,7 +1217,8 @@ class BacktestEngine:
                                     'shares': shares,
                                     'cost': price,
                                     'entry_date': date_str,
-                                    'high_water': price
+                                    'high_water': price,
+                                    'atr_at_entry': day_signals[day_signals['ticker'] == ticker]['atr_14'].iloc[0] if not day_signals[day_signals['ticker'] == ticker].empty and 'atr_14' in day_signals.columns else 0
                                 }
                                 
                                 trade_records.append({
@@ -1109,24 +1234,72 @@ class BacktestEngine:
                                 })
             
             # ========== 计算当日净值（用收盘价计算持仓市值）==========
+            # v5: 使用有效收盘价（缺失的用最近有效收盘价，禁止归零）
             positions_value = 0
             for ticker, pos in portfolio['positions'].items():
-                if ticker in day_close_prices:
-                    positions_value += pos['shares'] * day_close_prices[ticker]
+                close_price = effective_close_prices.get(ticker, 0)
+                if close_price > 0:
+                    positions_value += pos['shares'] * close_price
             
             total_value = portfolio['cash'] + positions_value
+            
+            # v5: 记录缺失价格事件（旧逻辑会导致持仓市值归零的虚假冲击）
+            for ticker, pos in portfolio['positions'].items():
+                if ticker not in day_close_prices or pd.isna(day_close_prices.get(ticker)) or day_close_prices.get(ticker, 0) <= 0:
+                    if ticker in last_valid_close:
+                        missing_price_counter[ticker] = missing_price_counter.get(ticker, 0) + 1
+                        last_valid = last_valid_close[ticker]
+                        # v5b: impact = 当日新增的 NAV 错误减少额
+                        # 第一天：持仓市值被漏算，NAV 减少 = shares * last_valid
+                        # 后续天：NAV 已系统性低估，当日新增 = 0
+                        if missing_price_counter[ticker] == 1:
+                            daily_impact = pos['shares'] * last_valid
+                        else:
+                            daily_impact = 0.0
+                        missing_price_log.append({
+                            'ticker': ticker,
+                            'date': date_str,
+                            'consecutive_missing_days': missing_price_counter[ticker],
+                            'last_valid_price': last_valid,
+                            'shares': pos['shares'],
+                            'impact': daily_impact,
+                            'reason': '价格缺失（停牌或数据缺数）',
+                        })
             
             # 获取当日基准价格
             bench_price = None
             if not bench_df[bench_df['date'] == date].empty:
                 bench_price = bench_df[bench_df['date'] == date]['close'].iloc[0]
             
-            # Calculate position allocations（用收盘价）
+            # Calculate position allocations（用有效收盘价）
             positions_pct = {}
             if total_value > 0:
                 for t, p in portfolio['positions'].items():
-                    if t in day_close_prices:
-                        positions_pct[t] = (p['shares'] * day_close_prices[t]) / total_value
+                    close_price = effective_close_prices.get(t, 0)
+                    if close_price > 0:
+                        positions_pct[t] = (p['shares'] * close_price) / total_value
+            
+            # 构建持仓明细（用于v4逐日归因）——记录所有持仓，含停牌/数据缺失的ETF
+            positions_detail = {}
+            for ticker, pos in portfolio['positions'].items():
+                close_price = effective_close_prices.get(ticker, 0)
+                if close_price > 0:
+                    positions_detail[ticker] = {
+                        'shares': pos['shares'],
+                        'cost': pos['cost'],
+                        'entry_date': pos['entry_date'],
+                        'high_water': pos.get('high_water', pos['cost']),
+                        'market_value': pos['shares'] * close_price,
+                    }
+                else:
+                    # 数据缺失（停牌）：记录持仓但市值为0，确保归因时能看到该持仓
+                    positions_detail[ticker] = {
+                        'shares': pos['shares'],
+                        'cost': pos['cost'],
+                        'entry_date': pos['entry_date'],
+                        'high_water': pos.get('high_water', pos['cost']),
+                        'market_value': 0.0,
+                    }
             
             nav_records.append({
                 'date': date_str,
@@ -1137,6 +1310,7 @@ class BacktestEngine:
                 'bench_price': bench_price,
                 'max_total_position': max_total_position,
                 'positions_pct': positions_pct,
+                'positions_detail': positions_detail,
             })
         
         # ========== 计算绩效指标 ==========
@@ -1213,6 +1387,7 @@ class BacktestEngine:
             'avg_holdings': nav_df['num_positions'].mean(),
             'max_holdings': nav_df['num_positions'].max(),
             'params': self.cfg,
+            'missing_price_log': pd.DataFrame(missing_price_log) if missing_price_log else pd.DataFrame(),
         }
         
         return result

@@ -75,6 +75,14 @@ class StrategyEngine:
             (df['above_ma20'] == 0).cumsum()
         ).cumsum().shift(1).fillna(0).astype(int)
         
+        # ATR (14日) - 用于ATR动态止损
+        atr_period = self.cfg.get('atr_period', 14)
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift(1)).abs()
+        low_close = (df['low'] - df['close'].shift(1)).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['atr_14'] = tr.rolling(atr_period).mean().shift(1)
+        
         return df
     
     def calculate_scores(self, df: pd.DataFrame) -> pd.DataFrame:
