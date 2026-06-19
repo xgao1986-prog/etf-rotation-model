@@ -820,10 +820,13 @@ def make_combined_figure(result, start_date=None, end_date=None):
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=9)),
         xaxis_rangeslider_visible=False,
     )
-    fig.update_xaxes(title_text="", row=1, col=1)
-    fig.update_xaxes(title_text="", row=2, col=1)
-    fig.update_xaxes(title_text="", row=3, col=1)
-    fig.update_xaxes(title_text="日期", row=4, col=1)
+    
+    # 4行x轴都跳过周末（只显示交易日，不显示空白）
+    rangebreaks = [dict(bounds=["sat", "mon"])]
+    fig.update_xaxes(title_text="", rangebreaks=rangebreaks, row=1, col=1)
+    fig.update_xaxes(title_text="", rangebreaks=rangebreaks, row=2, col=1)
+    fig.update_xaxes(title_text="", rangebreaks=rangebreaks, row=3, col=1)
+    fig.update_xaxes(title_text="日期", rangebreaks=rangebreaks, row=4, col=1)
     
     return fig
 
