@@ -1283,9 +1283,12 @@ def render_backtest(cfg, is_b0_18=True):
         trading_dates = np.sort(trading_dates)
         num_trading_days = len(trading_dates)
         
+        min_date = trading_dates[0] if num_trading_days > 0 else None
+        max_date = trading_dates[-1] if num_trading_days > 0 else None
+        
         if num_trading_days < 2:
-            start_date = trading_dates[0] if num_trading_days > 0 else None
-            end_date = trading_dates[-1] if num_trading_days > 0 else None
+            start_date = min_date
+            end_date = max_date
         else:
             # 使用交易日序号作为滑块刻度
             slider_idx = st.slider(
