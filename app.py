@@ -629,6 +629,8 @@ def make_combined_figure(result, start_date=None, end_date=None):
     if start_date and end_date:
         nav_df = nav_df[(nav_df["date"] >= pd.Timestamp(start_date)) & (nav_df["date"] <= pd.Timestamp(end_date))]
     
+    nav_df = nav_df.sort_values("date").reset_index(drop=True)
+    
     if nav_df.empty:
         return go.Figure()
     
@@ -677,9 +679,12 @@ def make_combined_figure(result, start_date=None, end_date=None):
         name="策略", line=dict(color="#1769aa", width=2.4),
     ), row=1, col=1)
     
+    # 基准也按选中区间重新归一化到1.0起始
     if "bench_return" in nav_df.columns and nav_df["bench_return"].notna().any():
+        bench_start = nav_df["bench_return"].iloc[0]
+        normalized_bench = 1 + (nav_df["bench_return"] - bench_start)
         fig.add_trace(go.Scatter(
-            x=nav_df["date"], y=1 + nav_df["bench_return"],
+            x=nav_df["date"], y=normalized_bench,
             name="沪深300", line=dict(color="#7d8793", width=1.6, dash="dash"),
         ), row=1, col=1)
     
@@ -1288,7 +1293,7 @@ def render_backtest(cfg, is_b0_18=True):
         # 根据时段过滤数据并重算指标
         filtered_nav = nav_df_all[
             (nav_df_all["date"] >= pd.Timestamp(start_date)) & (nav_df_all["date"] <= pd.Timestamp(end_date))
-        ] if start_date and end_date else nav_df_all
+        ].sort_values("date").reset_index(drop=True) if start_date and end_date else nav_df_all.sort_values("date").reset_index(drop=True)
         
         if len(filtered_nav) >= 2:
             nav_start = filtered_nav["nav"].iloc[0]
