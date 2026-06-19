@@ -1273,27 +1273,32 @@ def render_backtest(cfg, is_b0_18=True):
                 st.session_state["backtest_result"] = result
                 st.session_state["backtest_cfg_signature"] = active_signature
 
-        # 日期范围选择器（拖动滑块）
+        # 日期范围选择器（拖动滑块，只含交易日）
         nav_df_all = result["nav_df"].copy()
-        min_date = nav_df_all["date"].min().date()
-        max_date = nav_df_all["date"].max().date()
-        total_days = (max_date - min_date).days
+        # 获取所有唯一交易日（排序）
+        trading_dates = nav_df_all["date"].dt.date.unique()
+        trading_dates = np.sort(trading_dates)
+        num_trading_days = len(trading_dates)
         
-        # 使用天数作为滑块刻度，更流畅
-        slider_days = st.slider(
-            "📅 拖动选择分析时段",
-            min_value=0,
-            max_value=total_days,
-            value=(0, total_days),
-            step=1,
-            key="backtest_date_range_slider",
-        )
-        
-        start_day, end_day = slider_days
-        start_date = min_date + pd.Timedelta(days=start_day)
-        end_date = min_date + pd.Timedelta(days=end_day)
-        
-        st.caption(f"当前时段：{start_date} ~ {end_date}（共 {end_day - start_day + 1} 天）")
+        if num_trading_days < 2:
+            start_date = trading_dates[0] if num_trading_days > 0 else None
+            end_date = trading_dates[-1] if num_trading_days > 0 else None
+        else:
+            # 使用交易日序号作为滑块刻度
+            slider_idx = st.slider(
+                "📅 拖动选择分析时段（交易日）",
+                min_value=0,
+                max_value=num_trading_days - 1,
+                value=(0, num_trading_days - 1),
+                step=1,
+                key="backtest_date_range_slider",
+            )
+            
+            start_idx, end_idx = slider_idx
+            start_date = trading_dates[start_idx]
+            end_date = trading_dates[end_idx]
+            
+            st.caption(f"当前时段：{start_date} ~ {end_date}（共 {end_idx - start_idx + 1} 个交易日）")
         
         # 根据时段过滤数据并重算指标
         filtered_nav = nav_df_all[
