@@ -1273,27 +1273,34 @@ def render_backtest(cfg, is_b0_18=True):
                 st.session_state["backtest_result"] = result
                 st.session_state["backtest_cfg_signature"] = active_signature
 
-        # 日期范围选择器
+        # 日期范围选择器（拖动滑块）
         nav_df_all = result["nav_df"].copy()
         min_date = nav_df_all["date"].min().date()
         max_date = nav_df_all["date"].max().date()
+        total_days = (max_date - min_date).days
         
-        date_range = st.date_input(
-            "📅 选择分析时段",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date,
-            key="backtest_date_range",
+        # 使用天数作为滑块刻度，更流畅
+        slider_days = st.slider(
+            "📅 拖动选择分析时段",
+            min_value=0,
+            max_value=total_days,
+            value=(0, total_days),
+            step=1,
+            key="backtest_date_range_slider",
         )
         
-        start_date, end_date = None, None
-        if len(date_range) == 2:
-            start_date, end_date = date_range
+        start_day, end_day = slider_days
+        start_date = min_date + pd.Timedelta(days=start_day)
+        end_date = min_date + pd.Timedelta(days=end_day)
+        
+        st.caption(f"当前时段：{start_date} ~ {end_date}（共 {end_day - start_day + 1} 天）")
         
         # 根据时段过滤数据并重算指标
         filtered_nav = nav_df_all[
             (nav_df_all["date"] >= pd.Timestamp(start_date)) & (nav_df_all["date"] <= pd.Timestamp(end_date))
         ].sort_values("date").reset_index(drop=True) if start_date and end_date else nav_df_all.sort_values("date").reset_index(drop=True)
+        
+        is_full_range = (start_date == min_date and end_date == max_date)
         
         if len(filtered_nav) >= 2:
             nav_start = filtered_nav["nav"].iloc[0]
@@ -1334,7 +1341,7 @@ def render_backtest(cfg, is_b0_18=True):
         c4.metric("最大回撤", format_pct(max_drawdown))
         c5.metric("交易次数", trades_in_range)
         
-        if start_date != min_date or end_date != max_date:
+        if not is_full_range:
             st.caption(f"⏱️ 当前显示：{start_date} ~ {end_date}（共 {len(filtered_nav)} 个交易日）")
 
         # 合并图表：净值曲线 + 回撤 + 牛熊状态 + 仓位分配（4行联动）
