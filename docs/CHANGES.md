@@ -5,7 +5,33 @@
 
 ---
 
-## 2026-06-20（本次 - Phase 5.5 正式采纳 no_momentum 并冻结 B0.2）
+## 2026-06-20（本次 - Phase 5.6 波动率评分修复实验）
+
+**修改了什么：**
+- 新增波动率修复实验脚本：以B0.2为基准，仅改变vol_score，比较4个方案
+- 训练期确定阈值：p20=0.1548, p80=0.3426（由训练数据确定，未拍脑袋）
+- 4个方案对比：
+  - 当前失效(B0.2)：训练9.55%，验证13.45%
+  - 完全删除vol_score：和B0.2相同（vol_score已恒为0）
+  - 固定阈值：训练9.35%，验证11.43%（变差）
+  - 横截面分位数：训练9.79%，验证8.55%（验证期最差）
+- Rank IC：所有方案vol_score均为负IC（负向预测因子）
+- **结论：不修复vol_score，保持B0.2不变**
+- 未修改生产配置
+
+**改了哪些文件：**
+- 新增 `scripts/phase5_volatility_repair.py` — 波动率修复实验脚本
+- 新增 `reports/phase5_volatility_repair.md` — 实验报告
+- 更新 `docs/CURRENT_STATE.md` — 添加 Phase 5.6 摘要
+- 更新 `docs/CHANGES.md` — 添加变更记录
+
+**测试：** 35 passed + 10 xfailed + 1 xpassed（无生产代码修改，无新增测试）
+
+**Commit：** 待提交
+
+---
+
+## 2026-06-20（之前 - Phase 5.5 正式采纳 no_momentum 并冻结 B0.2）
 
 **修改了什么：**
 - `src/config.py` 增加 `momentum_factor_enabled = False`（默认关闭 momentum 因子）
