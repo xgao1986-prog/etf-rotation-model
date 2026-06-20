@@ -214,6 +214,9 @@ STABILITY_CONFIG = {
 
 # ==================== 策略参数 ====================
 STRATEGY_CONFIG = {
+    # 因子开关（v1.2.1 新增：可关闭单个因子，保留重新启用能力）
+    'momentum_factor_enabled': False,  # 是否计入momentum_rank到total_score（关闭=no_momentum/B0.2）
+    
     # 评分权重（v1.0原始参数）
     'weights': {
         'trend': 0.30,      # 趋势强度

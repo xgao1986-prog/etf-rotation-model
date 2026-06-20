@@ -5,7 +5,38 @@
 
 ---
 
-## 2026-06-20（本次 - Phase 5.4 最终样本外验证）
+## 2026-06-20（本次 - Phase 5.5 正式采纳 no_momentum 并冻结 B0.2）
+
+**修改了什么：**
+- `src/config.py` 增加 `momentum_factor_enabled = False`（默认关闭 momentum 因子）
+- `src/strategy.py` `compute_total_score` 根据开关决定是否计入 `momentum_rank`
+  - v5.5: 开关关闭时 momentum_rank 设为 0 再求和
+  - 保留 `exclude_factor` 消融测试能力
+- 保留 `momentum_20` 和 `momentum_rank` 计算代码，可随时重新启用
+- 不使用 monkey patch 或 `exclude_factor` 作为正式实现
+
+**B0.2 基准（冻结）：**
+- 总收益 170.64% -> 180.91%（+10.27%）
+- 年化收益 16.33% -> 16.99%（+0.66%）
+- 夏普 0.8442 -> 0.8985（+0.0543）
+- 最大回撤 -21.37% -> -17.75%（+3.62%）
+
+**改了哪些文件：**
+- `src/config.py` — 增加 `momentum_factor_enabled = False`
+- `src/strategy.py` — `compute_total_score` 支持开关
+- `tests/test_momentum_factor_switch.py` — 6个回归测试（新增）
+- `scripts/b0_2_baseline.py` — B0.2 基准回测脚本（新增）
+- `reports/baseline_B0.2_20260620_174049.md` — B0.2 基准报告（新增）
+- `docs/CURRENT_STATE.md` — 更新
+- `docs/CHANGES.md` — 更新
+
+**测试：** 35 passed + 10 xfailed + 1 xpassed（新增6个回归测试）
+
+**Commit：** 待提交
+
+---
+
+## 2026-06-20（之前 - Phase 5.4 最终样本外验证）
 
 **修改了什么：**
 - 新增最终样本外验证脚本：只比较 B0.1 与 no_momentum
