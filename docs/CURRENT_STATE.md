@@ -7,6 +7,28 @@
 
 ## 全部完成 ✅
 
+### Phase 5.2: 目标参数组合探索（修正版）
+
+- **三阶段独立回测**（不同 as_of_date，避免未来信息泄露）：
+  - 训练集：2022-12-30，无 performance_start
+  - 验证集：2024-12-31，performance_start=2023-01-01（预热历史保留）
+  - 样本外：2026-06-18，performance_start=2025-01-01（仅对最终唯一组合运行一次）
+- **相关性去重**：仅使用 performance_start 之前的数据，验证集/样本外不会使用未来的相关性信息
+- **Pareto 前沿**：在全部18个组合中计算，不预先筛选。Pareto 前沿 5 个组合：
+  - #1: min_total_score=35, stop_loss=-8%, max_pos=20% → 年化11.20%, 夏普0.61, 回撤-15.57%
+  - #2: min_total_score=45, stop_loss=-8%, max_pos=20% → 年化11.19%, 夏普0.61, 回撤-15.57%
+  - #3: min_total_score=45, stop_loss=-10%, max_pos=20% → 年化11.19%, 夏普0.61, 回撤-15.56%
+  - #4: min_total_score=35, stop_loss=-8%, max_pos=15% → 年化8.57%, 夏普0.60, 回撤-12.28%
+  - #5: min_total_score=45, stop_loss=-8%, max_pos=15% → 年化8.51%, 夏普0.60, 回撤-12.08%
+- **验证集排序**：Pareto 候选 5 个组合，验证集#1（min_total_score=35, stop_loss=-8%, max_pos=20%）与 B0.1 年化均为10.19%
+- **最终候选**：验证集#1，样本外年化42.03%，夏普2.048，回撤-11.93%
+- **与B0.1对比**：训练集差异+0.25%，验证集和样本外与B0.1几乎相同（差异±0.00%）
+- **核心结论**：18个组合中无一个满足目标（年化≥15%、夏普≥0.8、回撤≤20%）。训练集最佳年化11.20%，夏普0.61，距离目标差3.80%和0.189
+- **无放宽建议**：诚实报告目标无法达到，不提出12%放宽或扩大参数网格的建议
+- **未修改 src/config.py**：纯研究脚本
+
+**文件**：`scripts/phase5_parameter_search.py`、`reports/phase5_parameter_search.md`
+
 ### Phase 5.1: 调仓星期稳健性诊断（修正版）
 
 - 全区间回测：周一63.04% → 周二68.75% → 周三86.03% → 周四170.64% → 周五107.53%
@@ -102,6 +124,8 @@
 
 | 文件 | 修改内容 | 状态 |
 |------|----------|------|
+| `scripts/phase5_parameter_search.py` | 修正版参数搜索（三独立回测、Pareto全组合、样本外只跑一次） | ✅ |
+| `reports/phase5_parameter_search.md` | 修正版报告 | ✅ |
 | `scripts/phase5_weekday_robustness.py` | 修正版诊断脚本（排名统计、审慎结论、删除滑点） | ✅ |
 | `reports/phase5_weekday_robustness.md` | 修正版报告 | ✅ |
 | `src/config.py` | `use_v2_rebalance=True` 默认启用 | ✅ |
@@ -119,6 +143,7 @@
 
 ## 相关文件
 
+- Phase 5.2修正版报告：`reports/phase5_parameter_search.md`
 - Phase 5.1修正版报告：`reports/phase5_weekday_robustness.md`
 - B0.1新基准：`reports/baseline_B0.1_20260620_143209.md`
 - 对比报告：`reports/contrast_report_20260620_143209.md`
