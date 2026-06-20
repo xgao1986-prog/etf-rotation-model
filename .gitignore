@@ -18,6 +18,16 @@ reports/*.html
 reports/*.json
 signals/*.csv
 
+# 本地缓存、原始数据与数据库备份元数据
+cache/
+data/
+database/backups/
+
+# 临时备份文件
+*.backup
+*.bak
+*.tmp
+
 # 日志
 *.log
 

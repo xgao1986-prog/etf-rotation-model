@@ -7,6 +7,21 @@
 
 ## 全部完成 ✅
 
+### Phase 5.1: 调仓星期稳健性诊断（修正版）
+
+- 全区间回测：周一63.04% → 周二68.75% → 周三86.03% → 周四170.64% → 周五107.53%
+- 增加各星期排名统计：
+  - **年度**：周四平均排名1.88（1=最优），中位2.0，前二占比87.5%，年度胜率75.0%
+  - **区间**：周四平均排名1.67，中位2.0，前二占比100%，区间胜率100%
+- 区分「绝对收益优势」与「排名稳定性」：
+  - 绝对收益：周四170.64%领先第二名周五107.53%（差距63.10%）
+  - 排名稳定性：年度平均排名1.88，8年中有7年排名前二（87.5%）
+- 删除滑点分析（回测引擎未实现，诚实报告）
+- 调仓日期差异：不同调仓日完全错开（0共同调仓日），说明日期差异是纯星期效应
+- 审慎结论：Thursday兼具「绝对收益优势」和「排名稳定性」，但样本仅8年，仍需持续观察
+
+**文件**：`scripts/phase5_weekday_robustness.py`、`reports/phase5_weekday_robustness.md`
+
 ### Phase 1: v2.5 纯函数修复
 
 - 修复淘汰循环前置导致的策略语义变化（先缩放后淘汰）
@@ -87,6 +102,8 @@
 
 | 文件 | 修改内容 | 状态 |
 |------|----------|------|
+| `scripts/phase5_weekday_robustness.py` | 修正版诊断脚本（排名统计、审慎结论、删除滑点） | ✅ |
+| `reports/phase5_weekday_robustness.md` | 修正版报告 | ✅ |
 | `src/config.py` | `use_v2_rebalance=True` 默认启用 | ✅ |
 | `src/backtest.py` | `_rebalance_v2` + 开关 + `as_of_date` + 日期验证 + NAV计算修复 | ✅ |
 | `src/rebalance_planner.py` | v2.5纯函数 | ✅ |
@@ -102,6 +119,7 @@
 
 ## 相关文件
 
+- Phase 5.1修正版报告：`reports/phase5_weekday_robustness.md`
 - B0.1新基准：`reports/baseline_B0.1_20260620_143209.md`
 - 对比报告：`reports/contrast_report_20260620_143209.md`
 - 对比明细：`reports/contrast_detail_20260620_143209.csv`
