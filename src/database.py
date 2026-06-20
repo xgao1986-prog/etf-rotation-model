@@ -246,7 +246,7 @@ class ETFDatabase:
             df = pd.read_sql_query(query, conn, params=params)
         
         if not df.empty:
-            df['date'] = pd.to_datetime(df['date'])
+            df['date'] = pd.to_datetime(df['date'], format='mixed', dayfirst=False)
         
         return df
     
@@ -336,7 +336,7 @@ class ETFDatabase:
             df = pd.read_sql_query(query, conn, params=params)
         
         if not df.empty:
-            df['date'] = pd.to_datetime(df['date'])
+            df['date'] = pd.to_datetime(df['date'], format='mixed', dayfirst=False)
         
         return df
     
@@ -399,7 +399,7 @@ class ETFDatabase:
             df = pd.read_sql_query(query, conn, params=params)
         
         if not df.empty:
-            df['date'] = pd.to_datetime(df['date'])
+            df['date'] = pd.to_datetime(df['date'], format='mixed', dayfirst=False)
         
         return df
     
@@ -448,7 +448,7 @@ class ETFDatabase:
             df = pd.read_sql_query(query, conn, params=params)
         
         if not df.empty:
-            df['date'] = pd.to_datetime(df['date'])
+            df['date'] = pd.to_datetime(df['date'], format='mixed', dayfirst=False)
         
         return df
     
@@ -500,8 +500,8 @@ class ETFDatabase:
             df = pd.read_sql_query(query, conn, params=params)
         
         if not df.empty:
-            df['date'] = pd.to_datetime(df['date'])
-            df['created_at'] = pd.to_datetime(df['created_at'])
+            df['date'] = pd.to_datetime(df['date'], format='mixed', dayfirst=False)
+            df['created_at'] = pd.to_datetime(df['created_at'], format='mixed', dayfirst=False)
         
         return df
     

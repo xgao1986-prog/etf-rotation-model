@@ -31,8 +31,9 @@ from config import STRATEGY_CONFIG, ETF_UNIVERSE, CONCEPT_UNIVERSE, DEFENSE_UNIV
 class StrategyEngine:
     """ETF轮动策略引擎"""
     
-    def __init__(self, cfg=None):
+    def __init__(self, cfg=None, s1_mode=False):
         self.cfg = cfg or STRATEGY_CONFIG
+        self.s1_mode = s1_mode  # S1实验开关：筛选后排序
         self.tickers = list(CORE_UNIVERSE.keys())  # 核心池：行业+概念
         self.benchmark = BENCHMARK
         # 三类资产分类
@@ -83,6 +84,10 @@ class StrategyEngine:
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df['atr_14'] = tr.rolling(atr_period).mean().shift(1)
         
+        # v6: 累计有效观测数（从该ETF数据起始日开始，第1行=1）
+        # 所有指标在 shift(1) 后，第51行（索引50）才是第一个完整指标集
+        df['history_count'] = np.arange(1, len(df) + 1)
+        
         return df
     
     def calculate_scores(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -109,7 +114,9 @@ class StrategyEngine:
         
         # 3. 动量 (25分) - 横截面排名，需要全universe合并后计算
         # 先标记有效动量值，排名在rank_all_momentum中完成
-        df['momentum_valid'] = df['momentum_20'].notna()
+        # v6: momentum_valid 要求 momentum_20 非NaN AND history_count >= 51
+        # 确保不成熟的ETF（第21-50日）不参与横截面排名
+        df['momentum_valid'] = df['momentum_20'].notna() & (df['history_count'] >= 51)
         df['momentum_rank'] = np.nan  # 占位，后续填充
         
         # 4. 成交量 (15分)
@@ -136,7 +143,7 @@ class StrategyEngine:
         """
         return self.calculate_scores(df)
     
-    def rank_all_momentum(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+    def rank_all_momentum(self, scores_df: pd.DataFrame, subset_tickers: list = None) -> pd.DataFrame:
         """
         全universe横截面动量排名（必须在合并所有ETF后调用）
         
@@ -147,6 +154,7 @@ class StrategyEngine:
         
         Parameters:
             scores_df: 合并后的所有ETF评分DataFrame（含ticker, date, momentum_20）
+            subset_tickers: 可选，只对这些ticker计算排名（S1实验用）
         
         Returns:
             DataFrame with momentum_rank filled
@@ -160,6 +168,10 @@ class StrategyEngine:
         for date in dates:
             day_df = df[df['date'] == date].copy()
             valid = day_df[day_df['momentum_valid'] == True]
+            
+            # 如果指定了子集，只对这些ticker计算排名
+            if subset_tickers is not None:
+                valid = valid[valid['ticker'].isin(subset_tickers)]
             
             if len(valid) > 1:
                 # v1.2.2: 全场质量检测 - 当市场整体在跌时，不分配动量排名分
@@ -185,21 +197,28 @@ class StrategyEngine:
         
         return df
     
-    def compute_total_score(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+    def compute_total_score(self, scores_df: pd.DataFrame, exclude_factor: str = None) -> pd.DataFrame:
         """
         计算总评分（在横截面动量排名之后调用）
         
         total_score = trend_score + confirm_score + momentum_rank + volume_score + vol_score
+        
+        v6.1: 支持exclude_factor消融测试，排除指定因子。
         """
         df = scores_df.copy()
         
-        df['total_score'] = (
-            df['trend_score'].fillna(0) +
-            df['confirm_score'].fillna(0) +
-            df['momentum_rank'].fillna(0) +
-            df['volume_score'].fillna(0) +
-            df['vol_score'].fillna(0)
-        )
+        factors = {
+            'trend_score': df['trend_score'].fillna(0),
+            'confirm_score': df['confirm_score'].fillna(0),
+            'momentum_rank': df['momentum_rank'].fillna(0),
+            'volume_score': df['volume_score'].fillna(0),
+            'vol_score': df['vol_score'].fillna(0),
+        }
+        
+        if exclude_factor is not None and exclude_factor in factors:
+            factors[exclude_factor] = 0
+        
+        df['total_score'] = sum(factors.values())
         
         return df
     
@@ -239,7 +258,7 @@ class StrategyEngine:
         
         # 3. 动量：固定12.5分（不参与横截面排名）
         df['momentum_rank'] = 12.5
-        df['momentum_valid'] = True
+        df['momentum_valid'] = False  # 防御资产不参与横截面排名，避免被rank_all_momentum覆盖
         
         # 4. 成交量：防御资产不依赖成交量，给默认5分
         df['volume_score'] = 5
@@ -280,7 +299,7 @@ class StrategyEngine:
         
         # 3. 动量：固定12.5分（不参与横截面排名）
         df['momentum_rank'] = 12.5
-        df['momentum_valid'] = True
+        df['momentum_valid'] = False  # 防御资产不参与横截面排名，momentum_valid=False
         
         # 4. 成交量：给默认5分
         df['volume_score'] = 5
@@ -384,17 +403,69 @@ class StrategyEngine:
             self.cfg['min_total_score']  # 好市场：正常门槛
         )
         
-        core_mask = scores_df['ticker'].isin(_core_tickers) & (
-            (scores_df['trend_score'] >= self.cfg['min_trend_score']) &
-            (scores_df['confirm_score'] >= self.cfg['min_confirm_score']) &
-            (scores_df['total_score'] >= effective_min_total) &
-            (scores_df['prev_close'] > scores_df['ma20']) &
-            (scores_df['ma20_slope'] > 0)
-        )
+        # v6: 只有 history_count >= 51 的ETF才允许生成信号
+        # 第51个交易日（索引50）才是第一个完整指标集（MA50经shift(1)后有效）
+        mature_mask = scores_df['history_count'] >= 51
+        
+        # S1实验：筛选后排序
+        # 先在硬条件通过的ETF中计算横截面动量排名，再应用total_score门槛
+        if self.s1_mode:
+            # 步骤1: 硬条件筛选（不含total_score）
+            hard_pass_mask = scores_df['ticker'].isin(_core_tickers) & mature_mask & (
+                (scores_df['trend_score'] >= self.cfg['min_trend_score']) &
+                (scores_df['confirm_score'] >= self.cfg['min_confirm_score']) &
+                (scores_df['prev_close'] > scores_df['ma20']) &
+                (scores_df['ma20_slope'] > 0)
+            )
+            hard_pass_tickers = scores_df.loc[hard_pass_mask, ['date', 'ticker']].groupby('date')['ticker'].apply(list).to_dict()
+            
+            # 步骤2: 对硬条件通过的ETF重新计算横截面动量排名
+            # 只清零core ETF的momentum_rank（fallback和defense保持固定分）
+            core_indices = scores_df[scores_df['ticker'].isin(_core_tickers)].index
+            scores_df.loc[core_indices, 'momentum_rank'] = 0
+            dates = scores_df['date'].unique()
+            for date in dates:
+                day_df = scores_df[scores_df['date'] == date]
+                if date in hard_pass_tickers:
+                    subset = hard_pass_tickers[date]
+                    valid = day_df[day_df['ticker'].isin(subset) & (day_df['momentum_valid'] == True)]
+                    if len(valid) > 1:
+                        median_momentum = valid['momentum_20'].median()
+                        if median_momentum > 0:
+                            scores_df.loc[valid.index, 'momentum_rank'] = valid['momentum_20'].rank(pct=True) * 25
+                        else:
+                            scores_df.loc[valid.index, 'momentum_rank'] = 0
+                    elif len(valid) == 1:
+                        median_momentum = valid['momentum_20'].iloc[0]
+                        if median_momentum > 0:
+                            scores_df.loc[valid.index, 'momentum_rank'] = 12.5
+                        else:
+                            scores_df.loc[valid.index, 'momentum_rank'] = 0
+            
+            # 步骤3: 重新计算所有ETF的total_score（包含新的momentum_rank）
+            scores_df = self.compute_total_score(scores_df)
+            
+            # 步骤4: 应用total_score门槛
+            core_mask = scores_df['ticker'].isin(_core_tickers) & mature_mask & (
+                (scores_df['trend_score'] >= self.cfg['min_trend_score']) &
+                (scores_df['confirm_score'] >= self.cfg['min_confirm_score']) &
+                (scores_df['total_score'] >= effective_min_total) &
+                (scores_df['prev_close'] > scores_df['ma20']) &
+                (scores_df['ma20_slope'] > 0)
+            )
+        else:
+            # B0原版：先排名后筛选
+            core_mask = scores_df['ticker'].isin(_core_tickers) & mature_mask & (
+                (scores_df['trend_score'] >= self.cfg['min_trend_score']) &
+                (scores_df['confirm_score'] >= self.cfg['min_confirm_score']) &
+                (scores_df['total_score'] >= effective_min_total) &
+                (scores_df['prev_close'] > scores_df['ma20']) &
+                (scores_df['ma20_slope'] > 0)
+            )
         
         # 备选池：宽松入场条件（宽基ETF）
         _fallback_tickers = list(getattr(_cfg_module, 'FALLBACK_EQUITY_UNIVERSE', {}).keys())
-        fallback_mask = scores_df['ticker'].isin(_fallback_tickers) & scores_df['bull_market'] & (
+        fallback_mask = scores_df['ticker'].isin(_fallback_tickers) & mature_mask & scores_df['bull_market'] & (
             (scores_df['trend_score'] >= 10) &  # 比核心池低5分
             (scores_df['confirm_score'] >= 2) &  # 比核心池低2分
             (scores_df['total_score'] >= 25) &   # 比核心池低15分
@@ -404,7 +475,7 @@ class StrategyEngine:
         
         # 防御资产更宽松的入场条件（低相关补仓，不依赖大盘强势）
         _defense_tickers = list(_cfg_module.DEFENSE_UNIVERSE.keys())
-        defense_mask = scores_df['ticker'].isin(_defense_tickers) & (
+        defense_mask = scores_df['ticker'].isin(_defense_tickers) & mature_mask & (
             (scores_df['trend_score'] >= 10) &  # 比核心池低5分
             (scores_df['confirm_score'] >= 2) &  # 比核心池低2分
             (scores_df['total_score'] >= 30) &   # 比核心池低10分
@@ -414,7 +485,7 @@ class StrategyEngine:
         
         scores_df.loc[core_mask | fallback_mask | defense_mask, 'signal_type'] = 'BUY'
         
-        # 出场信号：前一日收盘价跌破均线
+        # 出场信号：前一日收盘价跌破均线（已持仓的ETF不受history_count限制）
         sell_mask = scores_df['prev_close'] < scores_df['ma20']
         scores_df.loc[sell_mask, 'signal_type'] = 'SELL'
         

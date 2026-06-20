@@ -490,9 +490,9 @@ def update_latest_data(db=None):
         try:
             import backup_database
             backup_database.backup_database()
-            print("✅ 数据库已备份")
+            print("[OK] 数据库已备份")
         except Exception as e:
-            print(f"⚠️ 备份失败（继续更新）: {e}")
+            print(f"[WARN] 备份失败（继续更新）: {e}")
     
     fetcher = DataFetcher()
     

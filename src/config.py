@@ -243,6 +243,9 @@ STRATEGY_CONFIG = {
     'total_max_holdings': 5,       # 总持仓上限（与 max_holdings 一致，保持向后兼容）
     # 向后兼容：max_holdings 保留为 stock_max_holdings 的别名
     'max_holdings': 5,             # 最多持有几只（= stock_max_holdings）
+    
+    # v2.5 调仓引擎开关（默认启用新引擎：顺序独立、总仓位受控）
+    'use_v2_rebalance': True,
     'max_position_per_etf': 0.20,  # 单只上限20%（可用满）
     
     # 风控
