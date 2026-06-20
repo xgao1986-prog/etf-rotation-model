@@ -186,13 +186,9 @@ def build_sidebar_config():
             atr_multiplier = st.slider("ATR倍数", 1.0, 5.0, 2.0, 0.5)
         
         use_timing = st.checkbox("启用大盘择时", False)  # 默认关闭，回测数据显示关闭后收益更高
-
-    # ========== 实验性因子参数 (v1.1) ==========
-    with st.sidebar.expander("⚡ v1.1实验因子", expanded=False):
-        st.caption("板块增强、调仓频率、冷静期、动态止盈、防御模块（默认关闭）")
         
-        # 板块动量增强
-        sector_boost = st.checkbox("启用板块动量增强", False)
+        st.divider()
+        st.caption("调仓规则")
         
         # 调仓频率
         freq_options = {"每周": "weekly", "双周": "biweekly", "月度": "monthly"}
@@ -204,8 +200,17 @@ def build_sidebar_config():
         weekday_options = ["周一", "周二", "周三", "周四", "周五"]
         rebalance_weekday = st.selectbox("调仓日", weekday_options, index=3)
         rebalance_weekday = weekday_options.index(rebalance_weekday)
+
+    # ========== 实验性因子参数 (v1.1) ==========
+    with st.sidebar.expander("⚡ v1.1实验因子", expanded=False):
+        st.caption("冷静期、动态止盈、防御模块（默认关闭）")
+        
+        # 板块动量增强
+        sector_boost = st.checkbox("启用板块动量增强", False)
         
         # 冷静期
+        st.divider()
+        st.caption("冷静期")
         cooling_period = st.slider("冷静期(交易日)", 0, 20, 0)
         cooling_score_boost = st.slider("冷静期评分提升", 0, 30, 10)
         
@@ -448,9 +453,19 @@ def cfg_signature(cfg):
 
 def get_latest_score_table(cfg):
     db = get_database()
-    latest = db.get_latest_date()
+    # 先从 daily_scores 表获取最新日期（而不是 market_data，因为评分可能还没更新）
+    with db._connect() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(date) FROM daily_scores")
+        result = cursor.fetchone()
+        latest = result[0] if result and result[0] else None
+    
     if not latest:
-        return latest, pd.DataFrame()
+        # daily_scores 没有数据，回退到 market_data 的最新日期
+        latest = db.get_latest_date()
+        if not latest:
+            return None, pd.DataFrame()
+        return latest, pd.DataFrame()  # 返回日期但提示无评分
 
     scores = load_scores(date=latest)
     if scores.empty:
