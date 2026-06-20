@@ -1,11 +1,46 @@
 # 当前工程现场
 
-**最后更新**：2026-06-20（Phase 4.1 完成，截止日修正为2026-06-18，新基准冻结）
+**最后更新**：2026-06-20（Phase 5.3 修正版完成，vol_score设计失效确认，no_momentum进入最终验证）
 **工作目录**：`D:\etf_rotation_model`
 
 ---
 
 ## 全部完成 ✅
+
+### Phase 5.3: 评分标准增量价值验证（修正版）
+
+**核心发现**：
+
+1. **vol_score 设计失效**：`volatility_20` 是年化波动率（均值 24.38%），但阈值设置为 [1%, 4%] 和 (4%, 6%]，量纲不匹配导致 vol_score 始终为 0。这是 **设计失效**，不是代码缺陷。
+
+2. **Rank IC（按日横截面）**：
+   | 因子 | H10 IC_mean | H10 IR | 结论 |
+   |------|-------------|--------|------|
+   | momentum | 0.0321 | 0.0822 | 最强预测力 |
+   | trend | 0.0085 | 0.0193 | 微弱正向 |
+   | confirm | -0.0207 | -0.0409 | 负向（反直觉） |
+   | volume | -0.0058 | -0.0185 | 微弱负向 |
+   | volatility | N/A | N/A | 全部为零，无数据 |
+
+3. **B0.1 vs no_momentum 分年度对比**：
+   | 年份 | B0.1 | no_momentum | 备注 |
+   |------|------|-------------|------|
+   | 2019 | 10.65% | 12.22% | no_momentum 好 |
+   | 2020 | 16.28% | 10.16% | B0.1 好 (+6.12%) |
+   | 2021 | -1.32% | -1.58% | 相近 |
+   | 2022 | 2.74% | 3.05% | no_momentum 略好 |
+   | 2023 | -1.01% | 3.32% | no_momentum 好 |
+   | 2024 | 21.97% | 23.50% | no_momentum 好 |
+   | 训练期平均 | 7.09% | 5.96% | B0.1 高 1.12pp |
+   | 验证期平均 | 10.48% | 13.41% | no_momentum 高 2.93pp |
+
+4. **训练期退化检查**：差距 1.12% < 2% 阈值，**未触发退化规则**。
+
+5. **唯一建议**：`no_momentum enters final validation`（删除 momentum_rank 因子进入最终验证）。
+
+**未修改 src/config.py**，**未运行最终样本外**。
+
+**文件**：`scripts/phase5_scoring_diagnosis.py`（修正版）、`reports/phase5_scoring_diagnosis.md`
 
 ### Phase 5.2: 目标参数组合探索（修正版）
 
@@ -124,6 +159,8 @@
 
 | 文件 | 修改内容 | 状态 |
 |------|----------|------|
+| `scripts/phase5_scoring_diagnosis.py` | 修正版评分诊断（vol_score根因分析、Rank IC、分年度对比、退化检查） | ✅ |
+| `reports/phase5_scoring_diagnosis.md` | 修正版报告 | ✅ |
 | `scripts/phase5_parameter_search.py` | 修正版参数搜索（三独立回测、Pareto全组合、样本外只跑一次） | ✅ |
 | `reports/phase5_parameter_search.md` | 修正版报告 | ✅ |
 | `scripts/phase5_weekday_robustness.py` | 修正版诊断脚本（排名统计、审慎结论、删除滑点） | ✅ |
@@ -143,6 +180,7 @@
 
 ## 相关文件
 
+- Phase 5.3修正版报告：`reports/phase5_scoring_diagnosis.md`
 - Phase 5.2修正版报告：`reports/phase5_parameter_search.md`
 - Phase 5.1修正版报告：`reports/phase5_weekday_robustness.md`
 - B0.1新基准：`reports/baseline_B0.1_20260620_143209.md`

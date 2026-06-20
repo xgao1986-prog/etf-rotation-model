@@ -5,7 +5,35 @@
 
 ---
 
-## 2026-06-20（本次 - Phase 5.2 目标参数组合探索修正版）
+## 2026-06-20（本次 - Phase 5.3 评分标准增量价值验证修正版）
+
+**修改了什么：**
+- 修正 Phase 5.3 方法论：
+  - **vol_score 根因分析**：确认 `volatility_20` 是年化波动率（均值24.38%），阈值 [1%,4%]/(4%,6%] 是设计失效（量纲不匹配），非代码缺陷
+  - **因子预测力改用 Rank IC**：按日横截面 Spearman 秩相关，报告 IC_mean、IC_std、IR、年度稳定性
+  - **B0.1 vs no_momentum 分年度对比**：2019-2024每年年化、Sharpe、回撤、换手
+  - **训练期退化规则**：差距>2pp则淘汰，no_momentum训练期5.96% vs B0.1的7.09%（差距1.12pp，未触发）
+  - **唯一建议**：`no_momentum enters final validation`
+  - 不运行最终样本外，不修改生产配置
+- 核心发现：
+  - momentum 因子 Rank IC 最强（H10 IR=0.0822），但删除后验证期反而更好（13.41% vs 10.48%）
+  - confirm 因子 Rank IC 为负（H10 IR=-0.041），说明设计可能有缺陷
+  - volatility 因子完全失效（100%为零）
+  - no_momentum 训练期平均 5.96%（低1.12pp，未退化），验证期平均 13.41%（高2.93pp）
+
+**改了哪些文件：**
+- 重写 `scripts/phase5_scoring_diagnosis.py` — 修正版诊断脚本（Rank IC、分年度对比、退化检查、唯一建议）
+- 更新 `reports/phase5_scoring_diagnosis.md` — 修正版报告
+- 更新 `docs/CURRENT_STATE.md` — 添加 Phase 5.3 摘要
+- 删除 `scripts/check_vol_score.py` — 临时验证脚本
+
+**测试：** 29 passed + 10 xfailed + 1 xpassed（无生产代码修改，无需新测试）
+
+**Commit：** 待提交
+
+---
+
+## 2026-06-20（之前 - Phase 5.2 目标参数组合探索修正版）
 
 **修改了什么：**
 - 修正 Phase 5.2 方法论：
