@@ -5,7 +5,35 @@
 
 ---
 
-## 2026-06-20（本次 - Phase 5.7 显式关闭vol_score并冻结B0.3）
+## 2026-06-20（本次 - Phase 5.8 高波动增量价值实验）
+
+**修改了什么：**
+- 新增高波动增量价值实验脚本：以B0.3为基准，比较4个volatility使用方案
+- 4个方案：
+  - B0.3基准（无波动率）
+  - 高波动前20%加分（高波动=高分）
+  - 高波动前20%但仅限趋势条件已通过（trend_score>0）
+  - 波动率加速上升（当前vol > 过去20日vol均值）
+- 核心结果：
+  - 所有4个方案训练期表现完全一致（9.55%）
+  - 方案C（高波动+趋势条件）vol_score-momentum相关性+0.4644，重新引入动量效应
+  - 方案D（波动率加速上升）验证期略好（13.68% vs 13.45%），但训练期无改善
+  - **结论：保持B0.3不变**
+- 不修改生产配置
+
+**改了哪些文件：**
+- 新增 `scripts/phase5_high_volatility_experiment.py` — 高波动实验脚本
+- 新增 `reports/phase5_high_volatility_experiment.md` — 实验报告
+- 更新 `docs/CURRENT_STATE.md` — 添加 Phase 5.8 摘要
+- 更新 `docs/CHANGES.md` — 添加变更记录
+
+**测试：** 42 passed + 10 xfailed + 1 xpassed（无生产代码修改，无新增测试）
+
+**Commit：** 待提交
+
+---
+
+## 2026-06-20（之前 - Phase 5.7 显式关闭vol_score并冻结B0.3）
 
 **修改了什么：**
 - `src/config.py` 增加 `volatility_factor_enabled = False`（显式关闭vol_score）
