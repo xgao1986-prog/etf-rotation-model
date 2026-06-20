@@ -5,31 +5,63 @@
 
 ---
 
-## 2026-06-20（本次 - Phase 5.8 高波动增量价值实验）
+## 2026-06-20（本次 - Phase 5.8c 修正高波动实验候选选择逻辑）
 
 **修改了什么：**
-- 新增高波动增量价值实验脚本：以B0.3为基准，比较4个volatility使用方案
-- 4个方案：
-  - B0.3基准（无波动率）
-  - 高波动前20%加分（高波动=高分）
-  - 高波动前20%但仅限趋势条件已通过（trend_score>0）
-  - 波动率加速上升（当前vol > 过去20日vol均值）
-- 核心结果：
-  - 所有4个方案训练期表现完全一致（9.55%）
-  - 方案C（高波动+趋势条件）vol_score-momentum相关性+0.4644，重新引入动量效应
-  - 方案D（波动率加速上升）验证期略好（13.68% vs 13.45%），但训练期无改善
-  - **结论：保持B0.3不变**
+- 修正 Phase 5.8 候选选择逻辑：
+  - 原逻辑：只在训练期前2名中选验证期最优，未与B0.3基准比较
+  - 新逻辑：所有实验组必须与B0.3基准进行支配检查
+  - 支配规则：验证期年化 < B0.3、Sharpe < B0.3、回撤深于B0.3、换手增加无收益补偿 → 淘汰
+  - 只有至少改善收益或Sharpe，且其他指标未明显退化，才允许进入后续验证
+- 修正最终结论：
+  - 方案B（高波动前20%）：验证期被B0.3全面支配（年化9.35% < 13.45%，Sharpe0.4592 < 0.6926，回撤-22.72% < -17.75%）→ 淘汰
+  - 方案C（高波动+趋势）：与B完全相同，且vol_score-momentum相关性+0.4644重新引入动量 → 淘汰
+  - 方案D（波动率加速）：训练期最优（11.11%）但验证期过拟合（8.60%）→ 淘汰
+  - **最终结论：保持B0.3不变**
+- B/C结果相同原因分析：
+  - vol_score差异确实存在（27.0%记录不同），但全部发生在trend_score<=0的ETF上
+  - 这些ETF本来就不会进入候选（trend_score是硬筛选条件）
+  - 验证期交易序列完全相同（B=255，C=255）
 - 不修改生产配置
 
 **改了哪些文件：**
-- 新增 `scripts/phase5_high_volatility_experiment.py` — 高波动实验脚本
-- 新增 `reports/phase5_high_volatility_experiment.md` — 实验报告
-- 更新 `docs/CURRENT_STATE.md` — 添加 Phase 5.8 摘要
+- 重写 `scripts/phase5_high_volatility_experiment.py` — 修正候选选择逻辑（v3/5.8c）
+- 更新 `reports/phase5_high_volatility_experiment.md` — 修正报告（B/C分析、支配规则、正确结论）
+- 新增 `scripts/phase5_8c_bc_analysis.py` — B/C差异分析脚本（独立运行）
+- 更新 `docs/CURRENT_STATE.md` — 添加 Phase 5.8c 摘要
 - 更新 `docs/CHANGES.md` — 添加变更记录
 
 **测试：** 42 passed + 10 xfailed + 1 xpassed（无生产代码修改，无新增测试）
 
 **Commit：** 待提交
+
+---
+
+## 2026-06-20（之前 - Phase 5.8 高波动增量价值实验 v2）
+
+**修改了什么：**
+- 修正 Phase 5.8 原始脚本缺陷：
+  - 实验组B/C/D未显式设置volatility_factor_enabled=True（被B0.3默认False覆盖）
+  - 实验组compute_total_score直接求和，不再受父类vol开关覆盖
+  - 波动率加速均值使用rolling(20).mean().shift(1)，避免未来数据
+  - 新增断言：验证非零vol_score和total_score差异
+- v2结果：vol_score确实影响交易（验证期B/C/D交易次数255/255/270 vs B0.3的232）
+- 但验证期全面劣化：所有实验组年化（8.60%~9.35%）均低于B0.3基准（13.45%）
+- 方案D训练期过拟合（11.11%→8.60%）
+- **结论：保持B0.3不变**
+- 不修改生产配置
+
+**改了哪些文件：**
+- 重写 `scripts/phase5_high_volatility_experiment.py` — v2修正版
+- 更新 `reports/phase5_high_volatility_experiment.md` — v2报告
+- 更新 `docs/CURRENT_STATE.md` — 添加 Phase 5.8 摘要
+- 更新 `docs/CHANGES.md` — 添加变更记录
+
+**测试：** 42 passed + 10 xfailed + 1 xpassed（无生产代码修改，无新增测试）
+
+**Commit：** `ac49e9c` fix(phase5.8): high-volatility experiment v2 with explicit vol enable
+
+---
 
 ---
 
