@@ -5,7 +5,41 @@
 
 ---
 
-## 2026-06-20（本次 - Phase 5.6 波动率评分修复实验）
+## 2026-06-20（本次 - Phase 5.7 显式关闭vol_score并冻结B0.3）
+
+**修改了什么：**
+- `src/config.py` 增加 `volatility_factor_enabled = False`（显式关闭vol_score）
+- `src/strategy.py` `compute_total_score` 根据开关决定是否计入 `vol_score`
+- 保留 `volatility_20` 和 `vol_score` 计算代码，可随时重新启用
+- **不修正vol_score阈值**（Phase 5.6已证明修复方案无效）
+- B0.3精确对比B0.2：
+  - 最终NAV: 2,809,091 == 2,809,091 (Delta=0)
+  - 总收益: 180.91% == 180.91% (Delta=0)
+  - 年化收益: 16.99% == 16.99% (Delta=0)
+  - 夏普: 0.8985 == 0.8985 (Delta=0)
+  - 最大回撤: -17.75% == -17.75% (Delta=0)
+  - 交易次数: 801 == 801 (Delta=0)
+  - 买入/卖出/调仓次数全部一致
+- **验收通过**：B0.3 == B0.2（完全一致）
+
+**改了哪些文件：**
+- `src/config.py` — 增加 `volatility_factor_enabled = False`
+- `src/strategy.py` — `compute_total_score` 支持vol开关
+- `tests/test_volatility_factor_switch.py` — 7个回归测试（新增）
+- `tests/test_momentum_factor_switch.py` — 修正3个测试（明确设置vol开关以隔离测试）
+- `scripts/b0_3_baseline.py` — B0.3基准回测+精确对比脚本（新增）
+- `reports/baseline_B0.3_20260620_180745.md` — B0.3基准报告（新增）
+- `reports/b0_2_vs_b0_3_20260620_180745.md` — B0.2 vs B0.3精确对比报告（新增）
+- `docs/CURRENT_STATE.md` — 更新
+- `docs/CHANGES.md` — 更新
+
+**测试：** 42 passed + 10 xfailed + 1 xpassed（新增7个回归测试）
+
+**Commit：** 待提交
+
+---
+
+## 2026-06-20（之前 - Phase 5.6 波动率评分修复实验）
 
 **修改了什么：**
 - 新增波动率修复实验脚本：以B0.2为基准，仅改变vol_score，比较4个方案

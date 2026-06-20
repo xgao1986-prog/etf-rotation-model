@@ -40,6 +40,7 @@ class TestMomentumFactorSwitch:
         """1. 开关关闭时，momentum_rank 不计入 total_score"""
         cfg = build_config()
         cfg['momentum_factor_enabled'] = False
+        cfg['volatility_factor_enabled'] = True  # 隔离测试，vol保持开启
         engine = StrategyEngine(cfg)
         
         result = engine.compute_total_score(sample_scores)
@@ -57,6 +58,7 @@ class TestMomentumFactorSwitch:
         """2. 开关开启时，结果保持 B0.1 兼容（含 momentum_rank）"""
         cfg = build_config()
         cfg['momentum_factor_enabled'] = True
+        cfg['volatility_factor_enabled'] = True  # 隔离测试，vol保持开启
         engine = StrategyEngine(cfg)
         
         result = engine.compute_total_score(sample_scores)
@@ -115,6 +117,7 @@ class TestMomentumFactorSwitch:
         """6. exclude_factor 消融测试在开关关闭时仍然有效"""
         cfg = build_config()
         cfg['momentum_factor_enabled'] = False
+        cfg['volatility_factor_enabled'] = True  # 隔离测试，vol保持开启
         engine = StrategyEngine(cfg)
         
         # 再排除 trend_score

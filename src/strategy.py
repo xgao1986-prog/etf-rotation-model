@@ -219,6 +219,10 @@ class StrategyEngine:
         if not self.cfg.get('momentum_factor_enabled', True):
             factors['momentum_rank'] = 0
         
+        # v5.7: 根据配置开关决定是否计入 vol_score
+        if not self.cfg.get('volatility_factor_enabled', True):
+            factors['vol_score'] = 0
+        
         # v6.1: 支持exclude_factor消融测试，排除指定因子。
         if exclude_factor is not None and exclude_factor in factors:
             factors[exclude_factor] = 0
