@@ -5,64 +5,63 @@
 
 ---
 
-## 2026-06-21（本次 - B0.4 单变量滑点敏感性测试）
+## 2026-06-21（本次 - B0.4 单变量滑点敏感性测试 v2）
 
-**目标：** 以 B0.4 为唯一对照，仅改变滑点一个变量，测试单边滑点 0/3/5/10 bp 对回测结果的影响。
+**目标：** 修正v1的问题：规划阶段未使用滑点价，导致执行阶段静默跳过BUY订单。v2在 `plan_rebalance_v2_5` 规划阶段使用滑点价，确保所有规划订单可执行。
 
-**滑点模型：**
-- 买入成交价 = open × (1 + 滑点)
-- 卖出成交价 = open × (1 - 滑点)
-- 佣金基于滑点后的实际成交金额计算
+**v1 问题：**
+- 规划阶段使用原始 open 价计算目标金额和股数
+- 执行阶段重新计算价格（买入×1+滑点，卖出×1-滑点），导致 `total_cost > cash`
+- 某些 BUY 订单被静默跳过，改变持仓路径
+- 交易次数大幅减少（804→739），归因于现金不足而非策略意图
+- 3bp 夏普比率意外提高（0.8816→0.9112），属于"伪改善"（风险下降快于收益）
 
-**回测引擎修改：**
-- `BacktestEngine.__init__` 新增 `slippage_bps=0`（默认0，不影响现有行为）
-- 止损执行：`price = stop['current_price'] × (1 - 滑点)`
-- `_rebalance_v2` 订单执行：SELL 下调价格，BUY 上调价格，重新计算金额和佣金
+**v2 修正：**
+1. `plan_rebalance_v2_5` 新增 `sell_prices` 和 `buy_prices` 参数
+2. 规划阶段使用滑点价计算卖出金额、买入股数、佣金和总成本
+3. NAV 估值和可交易性判断仍使用原始 `prices`（真实市场价）
+4. `_rebalance_v2` 执行阶段直接使用 `order['price']`（已是滑点价），不再重新计算
+5. 执行阶段记录 `_skipped_buys`，用于测试验证
 
-**测试结果：**
+**v2 测试结果：**
 
-| 滑点(bp) | 最终NAV | 总收益% | 夏普 | 最大回撤% | 交易次数 | 总佣金 | 滑点成本 |
-|----------|---------|---------|------|-----------|----------|--------|----------|
-| 0 | 2,761,288.07 | 176.13 | 0.8816 | -17.75 | 804 | 68,826.54 | 0.00 |
-| 3 | 2,584,886.77 | 158.49 | 0.9112 | -16.13 | 739 | 62,070.98 | 62,066.01 |
-| 5 | 2,450,246.60 | 145.02 | 0.8620 | -16.27 | 733 | 60,263.38 | 100,432.83 |
-| 10 | 2,267,246.32 | 126.72 | 0.7852 | -16.03 | 732 | 57,128.83 | 190,410.70 |
+| 滑点(bp) | 最终NAV | 总收益% | 年化% | 夏普 | 最大回撤% | 交易次数 | 止损 | 总佣金 | 滑点成本 |
+|----------|---------|---------|-------|------|-----------|----------|------|--------|----------|
+| 0 | 2,761,288.07 | 176.13 | 16.68 | 0.8816 | -17.75 | 804 | 17 | 68,826.54 | 0.00 |
+| 3 | 2,567,821.25 | 156.78 | 15.40 | 0.8162 | -18.55 | 805 | 19 | 65,695.82 | 65,693.29 |
+| 5 | 2,488,278.46 | 148.83 | 14.85 | 0.7870 | -19.08 | 805 | 19 | 64,548.13 | 107,573.45 |
+| 10 | 2,301,964.09 | 130.20 | 13.50 | 0.7154 | -20.40 | 805 | 19 | 61,829.76 | 206,081.57 |
 
-**0bp 复现验证：**
-- NAV: 2,761,288.07（差异 0.00）✅
-- 交易次数: 804（差异 0）✅
-- 完美复现 B0.4
+**v2 关键验证：**
+- 0bp 完美复现 B0.4（NAV=2,761,288.07，交易804笔）✅
+- 所有规划 BUY 订单在 3bp 下可执行（`_skipped_buys=0`）✅
+- 买入价格上调、卖出价格下调 ✅
+- 夏普单调递减（0.8816→0.8162→0.7870→0.7154），无伪改善 ✅
+- 交易次数几乎不变（804→805），差异归因于整手取整而非现金不足
+- 最大回撤随滑点恶化（防御资产买入更贵，保护效果减弱）
+- 每日现金+持仓市值=NAV 恒等式通过
 
-**交易差异归因：**
-- 滑点越高，交易次数越少（804 → 739 → 733 → 732）
-- 归因：买入价格上调导致可用现金减少，某些买入因 `total_cost > cash` 被跳过；被跳过的买入改变持仓路径，后续产生不同的卖出决策
-- 止损次数不变（基于原始价格检查），但止损标的有轻微差异（路径变化）
-
-**自动测试（6项全部通过）：**
+**v2 自动测试（8项全部通过）：**
 
 | 测试 | 描述 | 状态 |
 |------|------|------|
 | test_0bp_matches_baseline | 0bp NAV=2,761,288.07，交易804笔 | ✅ PASS |
+| test_planned_buys_are_executable | 3bp 下无 BUY 被静默跳过 | ✅ PASS |
 | test_buy_price_increases_with_slippage | 3bp 买入价格全部高于 0bp | ✅ PASS |
 | test_sell_price_decreases_with_slippage | 3bp 卖出价格全部低于 0bp | ✅ PASS |
 | test_nav_decreases_with_slippage | 0bp>3bp>5bp>10bp NAV 单调递减 | ✅ PASS |
-| test_slippage_cost_identity | 滑点成本占 NAV 差异 25%~60% | ✅ PASS |
-| test_0bp_commission_unchanged | 0bp 总佣金 ≈ 68,826（与 B0.4 一致） | ✅ PASS |
+| test_stop_loss_separate | STOP_LOSS 独立统计，不与 SELL 混用 | ✅ PASS |
+| test_annual_return_from_engine | 年化使用引擎 CAGR，非总收益/年数 | ✅ PASS |
+| test_cash_nav_identity | 每日 cash + positions_value = nav | ✅ PASS |
 
 **改了哪些文件：**
-- `src/backtest.py` — `BacktestEngine.__init__` 新增 `slippage_bps`，止损执行和 `_rebalance_v2` 订单执行应用滑点
-- `scripts/b0_4_slippage_sensitivity.py` — 独立实验脚本（4组滑点测试）
-- `tests/test_b0_4_slippage.py` — 6项自动测试
-- `reports/b0_4_slippage_sensitivity.md` — 测试报告
-- `reports/b0_4_slippage_sensitivity.csv` — 汇总 CSV
-- `reports/b0_4_slippage_*bp_trades.csv` — 各组交易记录
-- `docs/CHANGES.md` — 添加本条目
-- `docs/CURRENT_STATE.md` — 更新当前状态和下一步
-
-**结论：**
-- 3bp 滑点使 NAV 下降约 6.4%，5bp 下降约 11.3%，10bp 下降约 17.9%
-- 滑点成本是 NAV 下降的主要组成部分（约 30-40%），其余来自持仓路径变化
-- B0.4 基线（不计滑点）在 3-5bp 实际滑点下，年化收益约 14-16%，仍具竞争力
+- `src/rebalance_planner.py` — `plan_rebalance_v2_5` 新增 `sell_prices`/`buy_prices`，规划阶段使用滑点价
+- `src/backtest.py` — `_rebalance_v2` 构造 `sell_prices`/`buy_prices` 传入纯函数，执行阶段不再重新计算价格；记录 `_skipped_buys`
+- `scripts/b0_4_slippage_sensitivity.py` — 使用 `annual_return_pct`，STOP_LOSS 单独统计，更新报告结论
+- `tests/test_b0_4_slippage.py` — 8项测试（新增 `test_planned_buys_are_executable`、`test_cash_nav_identity` 等）
+- `reports/b0_4_slippage_sensitivity.md` — v2 报告
+- `reports/b0_4_slippage_sensitivity.csv` — v2 汇总数据
+- `docs/CHANGES.md` / `docs/CURRENT_STATE.md` — 文档更新
 
 ---
 
