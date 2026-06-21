@@ -1,11 +1,53 @@
 # 当前工程现场
 
-**最后更新**：2026-06-21（Phase 7.1 v4 修订完成：A类退市幸存者偏差降为待验证，B类固定池回看偏差保留已确认，不宣称行业敞口缺失，不扩展验证74只ETF，不进入Phase 7.2）
+**最后更新**：2026-06-21（Phase 8.1 完成：排名位置预测力诊断，结论分支情况B，继续Top 5等权，不进入Phase 8.2）
 **工作目录**：`D:\etf_rotation_model`
 
 ---
 
 ## 全部完成 ✅
+
+### Phase 8.1: 排名位置预测力诊断
+
+**目标：** 验证 B0.3 每期横截面排名是否能够预测后续收益，尤其回答 Rank 1-5 内部是否具有稳定区分度。
+
+**冻结基准：**
+- 18 只 ETF 的 B0.3（momentum_factor_enabled=False, volatility_factor_enabled=False）
+- 排名范围仅 16 只行业 ETF，排除黄金和国债
+- 不修改策略、评分、交易规则或仓位
+- 研究区间：2019-08-13 ~ 2024-12-31（训练期 2019-2022，验证期 2023-2024）
+
+**核心结果：**
+
+| 指标 | 5D | 10D | 20D |
+|------|----|-----|-----|
+| Rank 1 vs Rank 5 差 | +0.18% | +0.21% | -0.44% |
+| 训练期 Top5-Bottom5 | +0.39% | +1.16% | +1.10% |
+| 验证期 Top5-Bottom5 | +0.07% | +0.01% | -0.11% |
+| 方向一致性 | 一致 | 一致 | **不一致** |
+
+**Block Bootstrap 95% CI：**
+- 大多数排名的平均收益在统计上不显著（CI 包含 0）
+- 5D 仅 Rank 3 CI 不包含 0；10D 仅 Rank 3/8；20D 仅 Rank 8
+
+**Spearman 相关（Rank vs 未来收益）：**
+- 5D: r=-0.0067, p=0.5736（无显著相关）
+- 10D: r=-0.0016, p=0.8910（无显著相关）
+- 20D: r=-0.0104, p=0.3847（无显著相关）
+
+**结论分支：情况B**
+> Top 5 优于其他排名，但 Rank 1-5 内部无稳定区分度。评分适合筛选 Top 5，但不适合决定内部权重。
+
+**建议**：继续 Top 5 等权，不测试 Rank 1 重仓。不进入 Phase 8.2。
+
+**文件**：
+- `scripts/phase8_1_rank_position_diagnostics.py`
+- `reports/phase8_1_rank_position_diagnostics.md`
+- `reports/phase8_1_rank_samples.csv`
+- `reports/phase8_1_rank_summary.csv`
+- `reports/phase8_1_rank_diagnostics.png`
+
+---
 
 ### Phase 7.1: ETF 幸存者偏差审计（v4 修订版 — A类待验证/B类已确认）
 
@@ -672,6 +714,11 @@
 | `scripts/contrast_backtest.py` | 对比回测脚本，支持as_of_date | ✅ |
 | `reports/baseline_B0.1_20260620_143209.md` | B0.1新基线 | ✅ |
 | `reports/contrast_report_20260620_143209.md` | 新对比报告 | ✅ |
+| `scripts/phase8_1_rank_position_diagnostics.py` | 排名位置预测力诊断脚本（B0.3冻结、16只行业ETF、5/10/20D未来收益、Block Bootstrap） | ✅ |
+| `reports/phase8_1_rank_position_diagnostics.md` | 排名位置预测力诊断报告（结论分支：情况B） | ✅ |
+| `reports/phase8_1_rank_samples.csv` | 每期排名样本数据 | ✅ |
+| `reports/phase8_1_rank_summary.csv` | 排名汇总统计 | ✅ |
+| `reports/phase8_1_rank_diagnostics.png` | 排名诊断可视化图表 | ✅ |
 | `scripts/phase7_1_survivorship_bias_audit.py` | v4 修订版审计脚本（A类待验证/B类已确认、4类偏差拆分、替代日期重叠验证） | ✅ |
 | `reports/phase7_1_survivorship_bias_audit.md` | v4 修订版审计报告（B类已确认2个行业、A类待验证、不宣称行业敞口缺失） | ✅ |
 
@@ -679,6 +726,7 @@
 
 ## 相关文件
 
+- Phase 8.1 报告：`reports/phase8_1_rank_position_diagnostics.md`（排名位置预测力诊断，结论：情况B）
 - Phase 7.1 v4 修订版报告：`reports/phase7_1_survivorship_bias_audit.md`（A类待验证/B类已确认）
 - Phase 5.2修正版报告：`reports/phase5_parameter_search.md`
 - Phase 5.1修正版报告：`reports/phase5_weekday_robustness.md`
