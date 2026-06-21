@@ -5,6 +5,36 @@
 
 ---
 
+## 2026-06-21（本次 - 回测日期验证输出修正 + CURRENT_STATE 同步）
+
+**目标：** 修正 `src/backtest.py` 日期验证输出，使其依据实际传入行情池统计，而非硬编码全池；同步更新 `CURRENT_STATE.md`。
+
+**修正内容：**
+- `src/backtest.py` 第57行：`all_tickers` 原取硬编码全池（`set(_core_tickers) | set(_fallback_tickers) | set(_defense_tickers)` = 38只），现改为取实际传入 `market_df` 中的 ticker（`set(market_df['ticker'].unique())`）
+- **修正前**：B0.3 只传入18只时，错误显示"参与回测38只，截止日缺失20只"
+- **修正后**：B0.3 正确显示"参与回测18只（实际传入行情池），截止日缺失0只"
+- 仅修改 `print()` 日志输出，**不改动任何交易逻辑、信号生成或回测结果**
+
+**CURRENT_STATE.md 同步：**
+- 记录卖出规则四层补全（固定止损 / 跌破趋势 / 调出候选 / 防御让路）
+- 记录18只ETF断言（`b0_3_baseline.py`）
+- 记录日期验证输出修正（`src/backtest.py`）
+
+**验证：**
+- 不生成新的时间戳回测报告
+- 使用现有 `reports/baseline_B0.3_20260621_180650.md` 确认指标一致
+- 新鲜回测结果与 B0.3 冻结指标完全一致
+
+**未修改：** 策略参数、交易逻辑、生产代码
+
+**文件：**
+- 修改 `src/backtest.py` - 日期验证输出依据实际传入行情池
+- 修改 `docs/CURRENT_STATE.md` - 同步卖出规则和18只断言记录
+
+**Commit：** 8634c30 → 本次提交（a74de16）
+
+---
+
 ## 2026-06-21（本次 - B0.3 基线文档补全 + b0_3_baseline.py 修正）
 
 **目标：** 补全B0.3卖出规则文档；修正b0_3_baseline.py只声明18只ETF并增加断言。
