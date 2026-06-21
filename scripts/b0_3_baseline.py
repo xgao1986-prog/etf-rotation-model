@@ -27,6 +27,14 @@ from config import build_config, ETF_UNIVERSE, DEFENSE_UNIVERSE, BENCHMARK
 from database import ETFDatabase
 from backtest import BacktestEngine
 
+# 导入准入检查（可编程API）
+try:
+    sys.path.insert(0, os.path.join(BASE_DIR, 'scripts'))
+    from b0_data_admission_check_v1 import run_admission_check
+    _ADMISSION_AVAILABLE = True
+except ImportError:
+    _ADMISSION_AVAILABLE = False
+
 AS_OF_DATE = '2026-06-18'
 
 
@@ -43,6 +51,29 @@ def run_baseline(cfg, label):
     actual_market_tickers = set(market_df['ticker'].unique())
     assert actual_market_tickers.issubset(set(tickers)), \
         f"行情池中有不在18只ETF列表中的ticker: {actual_market_tickers - set(tickers)}"
+    
+    # === B0 数据准入检查（v1.1）===
+    # 检查失败必须阻止回测
+    if _ADMISSION_AVAILABLE:
+        print("\n[ADMISSION CHECK] Running B0 data admission check before backtest...")
+        admission_result = run_admission_check(
+            conn_or_path=None,  # 自动连接数据库
+            market_df=market_df,  # 传入行情数据以计算数据集SHA-256
+            skip_snapshot=True   # 回测入口不生成快照，由独立脚本生成
+        )
+        if admission_result['exit_code'] >= 2:
+            print("\n" + "=" * 70)
+            print("ADMISSION CHECK FAILED: 数据准入未通过，回测被阻止")
+            print("=" * 70)
+            print(f"Errors: {admission_result['errors']}")
+            raise RuntimeError(f"B0数据准入检查失败，回测终止: {admission_result['errors']}")
+        elif admission_result['exit_code'] == 1:
+            print("[ADMISSION CHECK] WARN: 数据准入通过但含警告，继续回测...")
+            print(f"Warnings: {admission_result['warnings']}")
+        else:
+            print("[ADMISSION CHECK] PASS: 数据准入通过，启动回测...")
+    else:
+        print("[ADMISSION CHECK] WARNING: 准入检查模块未加载，跳过（生产环境不应跳过）")
     
     engine = BacktestEngine(cfg)
     result = engine.run(market_df, bench_df, as_of_date=AS_OF_DATE)

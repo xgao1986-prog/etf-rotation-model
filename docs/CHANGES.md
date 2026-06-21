@@ -5,6 +5,58 @@
 
 ---
 
+## 2026-06-21（本次 - B0数据准入检查v1.1修正）
+
+**目标：** 修正准入检查v1.1，接入回测入口、缺失反例、权威上市日、缺失分类、SHA-256快照。
+
+**v1.1修正内容：**
+1. **接入回测入口**：`b0_3_baseline.py` 的 `run_baseline` 在回测前调用 `run_admission_check()`，
+   检查失败（exit_code>=2）时抛出 `RuntimeError` 阻止回测，含警告（exit_code=1）时继续但打印警告。
+2. **缺失反例测试**：`test_missing_data_antipattern` 在内存中从 DataFrame 删除成熟ETF（512000.SH）
+   的一个正常交易日，构建 `:memory:` SQLite 数据库运行准入检查，断言 `exit_code>=2`（准入失败）。
+3. **权威上市日**：全期覆盖从 `database/etf_metadata.json` 中的权威上市日计算，
+   不再使用数据库 `MIN(date)` 自动缩短区间。`KNOWN_COVERAGE_GAPS` 明确定义每只上市较晚ETF的覆盖不足范围。
+4. **历史缺失分类**：
+   - `known_coverage`：数据库最早记录日晚于权威上市日 → 数据源未覆盖早期数据（7只ETF共2,617天）
+   - `anomalous_internal`：数据库最早记录日之后仍缺失 → 异常内部缺口（当前0天）
+   - 满足"不得全部PASS"要求：有 `known_coverage` 缺失，exit_code=1（WARN），但无错误。
+5. **SHA-256快照**：元数据增加 `database_file`（数据库文件SHA-256）和 `dataset_19_tickers`（19只标的数据集SHA-256）。
+6. **可编程API**：`run_admission_check(conn_or_path, market_df, skip_snapshot)` 返回结构化字典，
+   支持传入内存DataFrame进行反例测试。
+7. **不重新生成B0.4指标**：不覆盖已有B0.4候选基线指标。
+
+**准入检查v1.1结果：**
+
+| 检查项 | 状态 | 说明 |
+|--------|------|------|
+| 完整性检查 | ✅ PASS | 19/19标的完整 |
+| 拼接连续性 | ✅ PASS | 无断档、无重复 |
+| 异常跳变检测 | ✅ PASS | 无OHLC错误、无极端涨跌幅 |
+| 全期抽样 | ⚠️ WARN | 7只ETF known_coverage 缺失（数据源未覆盖早期），anomalous_internal=0 |
+
+**exit code：1**（WARN：有 known_coverage 缺失，但无 anomalous_internal，数据可准入但需知晓早期覆盖不足）
+
+**自动化测试（7项）：**
+
+| 测试 | 描述 | 状态 |
+|------|------|------|
+| test_missing_data_antipattern | 内存中删除成熟ETF交易日，断言准入失败 | ✅ PASS |
+| test_backtest_blocked_on_admission_failure | 回测入口准入失败时阻止回测 | ✅ PASS |
+| test_pre_listing_handling | 策略自动跳过历史不足50天的ETF | ✅ PASS |
+| test_complete_data_backtest | 验证已有B0.4指标文件（不重新运行） | ✅ PASS |
+| test_admission_check_pass | 准入检查通过（anomalous=0, known>0, 不全PASS） | ✅ PASS |
+| test_authoritative_listing_date | 权威上市日≠数据库MIN(date) | ✅ PASS |
+| test_historical_gap_classification | 区分 known_coverage / anomalous_internal | ✅ PASS |
+
+**改了哪些文件：**
+- `scripts/b0_data_admission_check_v1.py` — 重写为v1.1（可编程API、权威上市日、缺失分类、SHA-256）
+- `scripts/b0_3_baseline.py` — 接入准入检查，失败阻止回测
+- `tests/test_b0_data_admission.py` — 7项测试（新增反例测试、回测阻止测试、权威上市日测试、缺失分类测试）
+- `docs/B0_DATA_ADMISSION_CHECK_v1.md` — 重新生成（报告内容更新）
+- `docs/B0_data_admission_check_v1.csv` — 重新生成（含db_min_date列）
+
+---
+
 ## 2026-06-21（本次 - B0数据准入检查 + B0.4候选基线）
 
 **目标：** 回测前自动验证数据完整性、拼接连续性、异常跳变，生成B0.4候选基线。
