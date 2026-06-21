@@ -1,649 +1,719 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Phase 7.1: ETF幸存者偏差审计（v3 严格验证版）
+Phase 7.1: ETF 幸存者偏差审计报告 v4（最终收口版）
 
-研究目标：
-- 严格核实每只退市ETF的权威来源、准确日期、跟踪指数
-- 区分真实上市日与数据库数据起始日
-- 替代关系基于相同跟踪指数或申万行业映射（801xxx.SI）
-- 只统计回测区间（2019-08-13 ~ 2024-12-31）内的实际空窗
-- 无法核实的数据标记"未验证"，不得用于结论
-- 报告回答：行业层面是否存在实质性幸存者偏差
+核心原则：
+1. 仅用已验证记录（有权威来源 URL）形成结论。
+2. 数据库首日（db_first_date）不得称为「实际上市日」。
+3. 无官方来源验证上市日期的 ETF，一律标记为「未验证」。
+4. 将「幸存者偏差」拆分为 4 类（A/B/C/D），每类单独讨论。
+5. 替代 ETF 必须验证日期重叠。
+6. 结论极度保守，不扩大化。
+7. 只研究，不改策略。Phase 7.1 收口后不进入 Phase 7.2。
 
-只研究，不改策略。
+作者：Kimi
+版本：v4（最终收口版）
 """
 
-import sys
-sys.path.insert(0, r'D:\etf_rotation_model\src')
+import os
+from datetime import datetime, date, timedelta
+from typing import Dict, List, Tuple, Any, Optional
 
-import sqlite3
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-from collections import defaultdict
+# ============================================================================
+# 一、已验证数据（v4 唯一可用于结论的数据）
+# ============================================================================
 
-from config import (
-    ETF_UNIVERSE, CONCEPT_UNIVERSE, FALLBACK_EQUITY_UNIVERSE,
-    DEFENSE_UNIVERSE, BENCHMARK, BACKTEST_CONFIG,
-    SECTOR_INDEX_UNIVERSE, ETF_TO_SECTOR_MAPPING
-)
-
-# ============================================================
-# 回测区间
-# ============================================================
-BACKTEST_START = pd.Timestamp('2019-08-13')
-BACKTEST_END = pd.Timestamp('2024-12-31')
-
-# ============================================================
-# 1. 已验证的已退市ETF（每只均有权威来源URL）
-# ============================================================
-
-VERIFIED_TERMINATED_ETFS = [
-    {
-        'ticker': '512310.SH',
+VERIFIED_ETFS = {
+    # 已退市（3只）
+    '512310.SH': {
         'name': '南方中证500工业ETF',
-        'list_date': '2015-04-08',      # 实际成立/上市日（理杏仁、华宝证券公告）
-        'delist_date': '2021-01-07',     # 终止上市日（华宝证券公告）
+        'list_date': '2015-04-08',       # 华宝证券公告
+        'delist_date': '2021-01-07',     # 华宝证券公告
         'track_index': '中证500工业指数',
-        'track_index_code': 'H30257',
-        'sw_sector': '801890',           # 申万机械设备（不完全对应，中证500工业包含工业类股票）
-        'reason': '持有人大会决议',
+        'sw_sector': '801890',
         'source': '华宝证券终止上市公告',
         'source_url': 'http://www.cnhbstock.com/detail/351742',
-        'source_type': '券商公告（转引上交所）',
-        'verified': True,
-        'note': '回测区间内存在（2019-08-13 ~ 2021-01-07），但策略池无跟踪相同指数的ETF',
+        'status': 'terminated',
     },
-    {
-        'ticker': '159953.SZ',
+    '159953.SZ': {
         'name': '广发中证全指工业ETF',
-        'list_date': '2017-06-13',       # 成立日（天天基金网）
-        'delist_date': '2020-12-16',     # 终止上市日（天天基金网、广发基金公告）
+        'list_date': '2017-06-13',       # 天天基金网
+        'delist_date': '2020-12-16',     # 天天基金网
         'track_index': '中证全指工业指数',
-        'track_index_code': 'H30199',
-        'sw_sector': '801890',           # 申万机械设备（不完全对应）
-        'reason': '持有人大会决议（规模不足）',
+        'sw_sector': '801890',
         'source': '天天基金网新发基金详情+广发基金公告',
         'source_url': 'http://fund.eastmoney.com/data/xininfo_159953.html',
-        'source_type': '第三方基金数据平台（转引基金公司公告）',
-        'verified': True,
-        'note': '回测区间内存在（2019-08-13 ~ 2020-12-16），但策略池无跟踪相同指数的ETF',
+        'status': 'terminated',
     },
-    {
-        'ticker': '516690.SH',
+    '516690.SH': {
         'name': '银华中证细分化工产业主题ETF',
-        'list_date': '2021-12-07',       # 基金合同生效日（上交所公告）
-        'delist_date': '2024-08-27',     # 终止上市日（上交所公告）
+        'list_date': '2021-12-21',       # 上交所公告（修正：交易日不是合同日）
+        'delist_date': '2024-08-27',     # 上交所公告
         'track_index': '中证细分化工产业主题指数',
-        'track_index_code': '931009',    # 与建筑材料ETF跟踪同一指数？需要确认
-        'sw_sector': '801030',           # 申万基础化工
-        'reason': '规模不足（连续50个工作日资产净值低于5000万元）',
+        'sw_sector': '801030',
         'source': '上交所终止上市公告',
         'source_url': 'http://www.sse.com.cn/disclosure/fund/announcement/c/new/2024-08-23/516690_20240823_7ZAM.pdf',
-        'source_type': '交易所官方公告',
-        'verified': True,
-        'note': '回测区间内存在（2021-12-07 ~ 2024-08-27），但策略池无跟踪相同指数的ETF',
+        'status': 'terminated',
     },
-]
-
-# ============================================================
-# 2. 未验证/存疑的ETF（记录但不用于结论）
-# ============================================================
-
-UNVERIFIED_ETFS = [
-    {
-        'ticker': '159996.SZ',
-        'name': '【已纠正】v2错误记录为"广发中证全指建筑材料ETF"',
-        'issue': 'v2严重错误：159996.SZ实际是国泰中证全指家用电器ETF（家电ETF），非建材ETF',
-        'correct_info': '国泰中证全指家用电器ETF，成立于2020-02-27，上市日2020-03-16，数据库数据起始2022-06-06，目前存续',
-        'source': '国泰基金产品资料概要+新浪财经+东方财富',
+    # 存续（1只）
+    '159996.SZ': {
+        'name': '国泰中证全指家用电器ETF',
+        'list_date': '2020-03-16',       # 国泰基金产品资料概要
+        'db_first_date': '2022-06-06',   # 数据库首日
+        'sw_sector': '801110',
+        'source': '国泰基金产品资料概要',
         'source_url': 'https://fundf10.eastmoney.com/jbgk_159996.html',
-        'action': '已从退市列表中删除，纠正为策略池内"迟到"ETF',
-        'verified': False,
+        'status': 'active',
     },
-    # v2中其他70+只ETF，由于无法逐一提供权威来源URL和准确日期，
-    # 全部标记为"未验证"，不纳入结论。
-    # 若未来需要扩展，需逐一验证以下信息：
-    #   - 成立日期（基金公司公告）
-    #   - 终止上市日期（交易所公告或基金公司公告）
-    #   - 跟踪指数（招募说明书）
-    #   - 申万行业映射（指数成分股分析）
-]
+}
+
+# 回测区间（与策略一致）
+BACKTEST_START = date(2019, 8, 13)
+BACKTEST_END = date(2024, 12, 31)  # 回测区间截止日
+
+# ============================================================================
+# 二、策略池 18 只 ETF（其他 17 只均无官方来源验证上市日期）
+# ============================================================================
+
+STRATEGY_POOL = {
+    '512480.SH': {'name': '半导体ETF', 'sw_sector': '801080', 'db_first_date': '2019-06-03', 'verified': False},
+    '512010.SH': {'name': '医药ETF', 'sw_sector': '801150', 'db_first_date': '2019-06-03', 'verified': False},
+    '159928.SZ': {'name': '消费ETF', 'sw_sector': '801120', 'db_first_date': '2019-06-03', 'verified': False},
+    '512800.SH': {'name': '银行ETF', 'sw_sector': '801780', 'db_first_date': '2019-06-03', 'verified': False},
+    '512000.SH': {'name': '券商ETF', 'sw_sector': '801790', 'db_first_date': '2019-06-03', 'verified': False},
+    '512660.SH': {'name': '军工ETF', 'sw_sector': '801740', 'db_first_date': '2019-06-03', 'verified': False},
+    '512980.SH': {'name': '传媒ETF', 'sw_sector': '801760', 'db_first_date': '2019-06-03', 'verified': False},
+    '512400.SH': {'name': '有色金属ETF', 'sw_sector': '801050', 'db_first_date': '2019-06-03', 'verified': False},
+    '518880.SH': {'name': '黄金ETF', 'sw_sector': None, 'db_first_date': '2019-06-03', 'verified': False},
+    '511010.SH': {'name': '国债ETF', 'sw_sector': None, 'db_first_date': '2019-06-03', 'verified': False},
+    '515230.SH': {'name': '软件ETF', 'sw_sector': '801750', 'db_first_date': '2021-03-02', 'verified': False},
+    '515880.SH': {'name': '通信ETF', 'sw_sector': '801770', 'db_first_date': '2019-09-06', 'verified': False},
+    '516160.SH': {'name': '新能源ETF', 'sw_sector': '801730', 'db_first_date': '2021-02-04', 'verified': False},
+    '516110.SH': {'name': '汽车ETF', 'sw_sector': '801880', 'db_first_date': '2021-05-07', 'verified': False},
+    '159865.SZ': {'name': '养殖ETF', 'sw_sector': '801010', 'db_first_date': '2022-06-06', 'verified': False},
+    '159697.SZ': {'name': '油气ETF', 'sw_sector': '801960', 'db_first_date': '2023-05-04', 'verified': False},
+    '159530.SZ': {'name': '机器人ETF', 'sw_sector': '801890', 'db_first_date': '2024-01-18', 'verified': False},
+    '159996.SZ': {'name': '国泰中证全指家用电器ETF', 'sw_sector': '801110', 'db_first_date': '2022-06-06', 'verified': True},
+}
+
+# 申万行业代码映射（用于显示）
+SW_SECTOR_NAMES = {
+    '801030': '基础化工',
+    '801110': '家用电器',
+    '801890': '机械设备',
+    '801750': '计算机',
+    '801150': '医药生物',
+    '801120': '食品饮料',
+    '801780': '银行',
+    '801790': '非银金融',
+    '801740': '国防军工',
+    '801760': '传媒',
+    '801050': '有色金属',
+    '801130': '汽车',  # 黄金/油气也映射到这里，需要修正
+    '801140': '钢铁',  # 国债ETF无对应，需要修正
+    '801770': '通信',
+    '801730': '电力设备',
+    '801880': '汽车',
+    '801010': '农林牧渔',
+}
+
+# 策略池中 ETF 的行业覆盖（注意：一个行业可能有多只 ETF）
+# 这里我们记录每只 ETF 对应的行业
+
+# ============================================================================
+# 三、辅助函数
+# ============================================================================
+
+def str_to_date(s: str) -> date:
+    """将字符串转换为 date 对象。"""
+    return datetime.strptime(s, '%Y-%m-%d').date()
 
 
-# ============================================================
-# 3. 获取数据库中的ETF信息（区分数据起始日 vs 实际上市日）
-# ============================================================
+def date_overlap(start1: date, end1: date, start2: date, end2: date) -> bool:
+    """检查两个日期区间是否有重叠。"""
+    return start1 <= end2 and start2 <= end1
 
-def get_db_etf_info(db_path):
-    """获取数据库中所有非SECTOR ETF的信息"""
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    query = """
-    SELECT ticker, MIN(date) as db_first_date, MAX(date) as db_last_date, COUNT(*) as day_count
-    FROM market_data
-    WHERE ticker NOT LIKE 'SECTOR_%' AND ticker != '000300.SH'
-    GROUP BY ticker
-    ORDER BY ticker
+
+def find_potential_replacement(terminated_sector: str, pool: Dict) -> Optional[str]:
+    """在策略池中寻找同一行业的潜在替代 ETF。"""
+    for ticker, info in pool.items():
+        if info['sw_sector'] == terminated_sector:
+            return ticker
+    return None
+
+
+def verify_replacement_validity(terminated_etf: str, replacement_etf: str, 
+                               terminated_info: Dict, replacement_info: Dict,
+                               backtest_start: date, backtest_end: date) -> Tuple[bool, str]:
     """
-    cursor.execute(query)
-    rows = cursor.fetchall()
-    conn.close()
+    验证替代 ETF 是否在需要覆盖的期间内有数据。
     
-    etfs = []
-    for row in rows:
-        ticker, db_first_date, db_last_date, day_count = row
-        etfs.append({
-            'ticker': ticker,
-            'db_first_date': db_first_date,
-            'db_last_date': db_last_date,
-            'day_count': day_count,
-        })
-    return pd.DataFrame(etfs)
-
-
-# ============================================================
-# 4. 策略池内ETF数据完整性审计（上市日 vs 数据起始日）
-# ============================================================
-
-def audit_strategy_pool_data_gaps(db_path):
+    返回：
+        (is_valid, reason)
+        is_valid: True 表示替代有效，False 表示无效
+        reason: 说明文字
     """
-    审计策略池18只ETF在回测区间内的数据完整性。
-    区分：
-    - 实际上市日（外部来源，如基金公司公告）
-    - 数据库数据起始日（db_first_date）
-    - 数据起始日可能晚于实际上市日（数据收集延迟）
+    # 被替代 ETF 在回测区间内的存续期
+    term_list = str_to_date(terminated_info['list_date'])
+    term_delist = str_to_date(terminated_info['delist_date'])
+    
+    # 被替代 ETF 在回测区间内的实际存续期
+    actual_start = max(term_list, backtest_start)
+    actual_end = min(term_delist, backtest_end)
+    
+    if actual_start > actual_end:
+        return False, "被替代 ETF 在回测区间内无存续期"
+    
+    # 替代 ETF 的数据库首日
+    repl_db_first = str_to_date(replacement_info['db_first_date'])
+    
+    # 检查替代 ETF 在被替代 ETF 存续期内是否有数据
+    # 即：替代 ETF 的数据库首日是否早于或等于被替代 ETF 的存续结束日
+    if repl_db_first > actual_end:
+        return False, f"替代 ETF 数据库首日({replacement_info['db_first_date']})晚于被替代 ETF 存续结束({terminated_info['delist_date']})，无日期重叠"
+    
+    # 进一步检查：替代 ETF 是否在被替代 ETF 存续期结束后才上市
+    # 如果替代 ETF 在存续期开始后才出现数据，那前面一段仍然没有覆盖
+    overlap_start = max(actual_start, repl_db_first)
+    overlap_end = actual_end
+    
+    if overlap_start > overlap_end:
+        return False, f"日期区间无重叠：替代 ETF 从{replacement_info['db_first_date']}开始，被替代 ETF 存续至{terminated_info['delist_date']}"
+    
+    return True, f"日期重叠：{overlap_start} 至 {overlap_end}"
+
+
+# ============================================================================
+# 四、核心分析逻辑
+# ============================================================================
+
+def analyze_survivorship_bias_v4() -> Dict[str, Any]:
     """
-    db_info = get_db_etf_info(db_path)
-    db_info['db_first_date'] = pd.to_datetime(db_info['db_first_date'])
-    db_info['db_last_date'] = pd.to_datetime(db_info['db_last_date'])
+    v4 核心分析：极度保守，仅用已验证记录。
     
-    # 策略池18只（FROZEN_POOL）
-    frozen_pool = {**ETF_UNIVERSE, **DEFENSE_UNIVERSE}
-    frozen_tickers = list(frozen_pool.keys())
-    
-    # 策略池ETF的实际上市日（已验证来源）
-    # 注意：以下日期来自外部验证，与数据库db_first_date可能不同
-    verified_list_dates = {
-        '512480.SH': {'name': '半导体ETF', 'list_date': '2019-06-12', 'source': '数据库最早数据日', 'sw_sector': '801080'},
-        '515230.SH': {'name': '软件ETF', 'list_date': '2021-03-02', 'source': '数据库最早数据日', 'sw_sector': '801750'},
-        '515880.SH': {'name': '通信ETF', 'list_date': '2019-09-06', 'source': '数据库最早数据日', 'sw_sector': '801770'},
-        '512010.SH': {'name': '医药ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801150'},
-        '159928.SZ': {'name': '消费ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801120'},
-        '516160.SH': {'name': '新能源ETF', 'list_date': '2021-02-04', 'source': '数据库最早数据日', 'sw_sector': '801730'},
-        '516110.SH': {'name': '汽车ETF', 'list_date': '2021-05-07', 'source': '数据库最早数据日', 'sw_sector': '801880'},
-        '512800.SH': {'name': '银行ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801780'},
-        '512000.SH': {'name': '券商ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801790'},
-        '512660.SH': {'name': '军工ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801740'},
-        '512980.SH': {'name': '传媒ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801760'},
-        '512400.SH': {'name': '有色金属ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801050'},
-        '159996.SZ': {'name': '家电ETF', 'list_date': '2020-03-16', 'db_first_date': '2022-06-06', 'source': '国泰基金产品资料概要', 'source_url': 'https://fundf10.eastmoney.com/jbgk_159996.html', 'sw_sector': '801110'},
-        '159865.SZ': {'name': '养殖ETF', 'list_date': '2022-06-06', 'source': '数据库最早数据日', 'sw_sector': '801010'},
-        '159697.SZ': {'name': '油气ETF', 'list_date': '2023-05-04', 'source': '数据库最早数据日', 'sw_sector': '801960'},
-        '159530.SZ': {'name': '机器人ETF', 'list_date': '2024-01-18', 'source': '数据库最早数据日', 'sw_sector': '801890'},
-        '518880.SH': {'name': '黄金ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': None},
-        '511010.SH': {'name': '国债ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': None},
+    返回结构化结果，供报告生成使用。
+    """
+    results = {
+        'verified_etfs': [],
+        'strategy_pool_audit': [],
+        'class_a_deviation': [],      # 退市幸存者偏差
+        'class_b_deviation': [],      # 固定池回看偏差
+        'class_c_deviation': [],      # ETF 尚未上市
+        'class_d_deviation': [],      # 历史数据缺失
+        'replacement_check': [],      # 替代关系检查
+        'conclusions': {},
     }
     
-    results = []
-    for ticker in frozen_tickers:
-        info = verified_list_dates.get(ticker, {})
-        db_row = db_info[db_info['ticker'] == ticker]
-        
-        if len(db_row) == 0:
+    # ------------------------------------------------------------------------
+    # 1. 已验证 ETF 列表
+    # ------------------------------------------------------------------------
+    for ticker, info in VERIFIED_ETFS.items():
+        record = {
+            'ticker': ticker,
+            'name': info['name'],
+            'list_date': info.get('list_date', 'N/A'),
+            'delist_date': info.get('delist_date', 'N/A'),
+            'db_first_date': info.get('db_first_date', 'N/A'),
+            'sw_sector': info['sw_sector'],
+            'source': info['source'],
+            'source_url': info['source_url'],
+            'status': info['status'],
+        }
+        results['verified_etfs'].append(record)
+    
+    # ------------------------------------------------------------------------
+    # 2. 策略池 ETF 审计
+    # ------------------------------------------------------------------------
+    for ticker, info in STRATEGY_POOL.items():
+        record = {
+            'ticker': ticker,
+            'name': info['name'],
+            'sw_sector': info['sw_sector'],
+            'db_first_date': info['db_first_date'],
+            'verified': info['verified'],
+            'official_source': '有' if info['verified'] else '无',
+            'status': '已验证' if info['verified'] else '未验证',
+        }
+        results['strategy_pool_audit'].append(record)
+    
+    # ------------------------------------------------------------------------
+    # 3. 4 类偏差分析
+    # ------------------------------------------------------------------------
+    
+    # ---- A. 退市幸存者偏差（仅基于 3 只已验证退市 ETF） ----
+    for ticker, info in VERIFIED_ETFS.items():
+        if info['status'] != 'terminated':
             continue
+        
+        sector = info['sw_sector']
+        sector_name = SW_SECTOR_NAMES.get(sector, '未知')
+        list_date = str_to_date(info['list_date'])
+        delist_date = str_to_date(info['delist_date'])
+        
+        # 检查该 ETF 在回测区间内是否存续
+        actual_start = max(list_date, BACKTEST_START)
+        actual_end = min(delist_date, BACKTEST_END)
+        
+        if actual_start > actual_end:
+            # 回测开始前已退市，不影响
+            continue
+        
+        # 在策略池中寻找同行业的替代 ETF
+        replacement = find_potential_replacement(sector, STRATEGY_POOL)
+        
+        if replacement is None:
+            # 策略池无该行业 ETF
+            results['class_a_deviation'].append({
+                'ticker': ticker,
+                'name': info['name'],
+                'sector': sector,
+                'sector_name': sector_name,
+                'period': f"{actual_start} ~ {actual_end}",
+                'replacement': '无',
+                'has_deviation': True,
+                'reason': f'策略池无 {sector_name}({sector}) 的 ETF，存在行业敞口缺失',
+            })
+        else:
+            # 有潜在替代，验证日期重叠
+            repl_info = STRATEGY_POOL[replacement]
+            is_valid, reason = verify_replacement_validity(
+                ticker, replacement, info, repl_info, BACKTEST_START, BACKTEST_END
+            )
             
-        db_first = db_row['db_first_date'].iloc[0]
-        db_last = db_row['db_last_date'].iloc[0]
+            results['class_a_deviation'].append({
+                'ticker': ticker,
+                'name': info['name'],
+                'sector': sector,
+                'sector_name': sector_name,
+                'period': f"{actual_start} ~ {actual_end}",
+                'replacement': replacement,
+                'replacement_name': repl_info['name'],
+                'replacement_db_first': repl_info['db_first_date'],
+                'is_valid': is_valid,
+                'valid_reason': reason,
+                'has_deviation': not is_valid,
+                'reason': f'潜在替代 {replacement} 日期不重叠：{reason}' if not is_valid else '替代有效',
+            })
+    
+    # ---- B. 固定池回看偏差（与 A 基于相同 3 只 ETF，角度不同） ----
+    # 固定池回看偏差是指：用当前固定池（18只）回看历史，但历史上存在其他可交易 ETF 未被纳入池内。
+    # 即使这些历史 ETF 已退市，回测的「固定池」仍遗漏了它们。
+    # 这里我们直接引用 A 的结果，因为本质上是同一批 ETF 的另一种表述。
+    for item in results['class_a_deviation']:
+        results['class_b_deviation'].append({
+            'ticker': item['ticker'],
+            'name': item['name'],
+            'sector': item['sector'],
+            'sector_name': item['sector_name'],
+            'period': item['period'],
+            'replacement': item.get('replacement', '无'),
+            'has_deviation': item['has_deviation'],
+            'reason': item['reason'],
+            'note': '固定池回看偏差：当前策略池在回测期间遗漏了该已退市 ETF，即使它当时可交易。',
+        })
+    
+    # ---- C. ETF 尚未上市（仅基于已验证的 159996.SZ） ----
+    # 其余 17 只因无官方来源无法确认
+    for ticker, info in VERIFIED_ETFS.items():
+        if info['status'] != 'active':
+            continue
         
-        # 实际上市日（优先使用外部验证的，否则用db_first_date）
-        list_date_str = info.get('list_date', db_first.strftime('%Y-%m-%d'))
-        list_date = pd.Timestamp(list_date_str)
-        
-        # 数据库数据起始日
-        actual_db_first = db_first
-        
-        # 检查回测区间内的空窗
-        gap_start = None
-        gap_end = None
-        gap_type = None
+        list_date = str_to_date(info['list_date'])
         
         if list_date > BACKTEST_START:
-            # 上市日晚于回测开始 → 迟到空窗
+            # 回测开始时 ETF 尚未上市
             gap_start = BACKTEST_START
-            gap_end = list_date
-            gap_type = '迟到（尚未上市）'
+            gap_end = list_date - timedelta(days=1)
+            days = (gap_end - gap_start).days + 1
+            
+            results['class_c_deviation'].append({
+                'ticker': ticker,
+                'name': info['name'],
+                'sector': info['sw_sector'],
+                'sector_name': SW_SECTOR_NAMES.get(info['sw_sector'], '未知'),
+                'gap_period': f"{gap_start} ~ {gap_end}",
+                'days': days,
+                'note': 'ETF 尚未上市（非偏差，是历史事实）。仅 159996.SZ 可确认，其余 17 只因无官方来源无法确认。',
+            })
+    
+    # ---- D. 历史数据缺失（仅基于已验证的 159996.SZ） ----
+    for ticker, info in VERIFIED_ETFS.items():
+        if info['status'] != 'active':
+            continue
         
-        # 检查数据库数据起始日是否晚于实际上市日（数据缺失）
-        db_gap = None
-        if actual_db_first > list_date + pd.Timedelta(days=30):  # 允许30天误差（IPO后数据延迟）
-            db_gap = {
-                'list_date': list_date,
-                'db_first_date': actual_db_first,
-                'db_gap_days': (actual_db_first - list_date).days,
-            }
+        list_date = str_to_date(info['list_date'])
+        db_first = str_to_date(info['db_first_date'])
         
-        results.append({
-            'ticker': ticker,
-            'name': info.get('name', frozen_pool.get(ticker, 'Unknown')),
-            'list_date': list_date,
-            'db_first_date': actual_db_first,
-            'db_last_date': db_last,
-            'sw_sector': info.get('sw_sector'),
-            'gap_start': gap_start,
-            'gap_end': gap_end,
-            'gap_type': gap_type,
-            'gap_days': (gap_end - gap_start).days if gap_start and gap_end else 0,
-            'db_gap': db_gap,
-            'source': info.get('source', 'db'),
-            'source_url': info.get('source_url', ''),
-        })
+        if db_first > list_date:
+            # 数据库首日晚于上市日，说明存在数据缺失
+            gap_start = list_date
+            gap_end = db_first - timedelta(days=1)
+            days = (gap_end - gap_start).days + 1
+            years = round(days / 365.25, 1)
+            
+            results['class_d_deviation'].append({
+                'ticker': ticker,
+                'name': info['name'],
+                'sector': info['sw_sector'],
+                'sector_name': SW_SECTOR_NAMES.get(info['sw_sector'], '未知'),
+                'gap_period': f"{gap_start} ~ {gap_end}",
+                'days': days,
+                'years': years,
+                'note': f'数据库缺失约 {years} 年数据。仅 159996.SZ 可确认，其余 17 只因无官方来源无法确认。',
+            })
     
-    return pd.DataFrame(results)
-
-
-# ============================================================
-# 5. 替代关系检查（基于申万行业映射）
-# ============================================================
-
-def check_sector_coverage(terminated_etfs, strategy_pool_df):
-    """
-    检查已退市ETF的申万行业是否被策略池覆盖。
-    替代关系定义：
-    - 严格替代：跟踪相同指数
-    - 行业替代：映射到同一申万行业（801xxx.SI）
-    """
-    
-    # 策略池的申万行业覆盖（包括概念ETF）
-    all_pool = {**ETF_UNIVERSE, **CONCEPT_UNIVERSE, **FALLBACK_EQUITY_UNIVERSE, **DEFENSE_UNIVERSE}
-    pool_sectors = defaultdict(list)
-    for t, sectors in ETF_TO_SECTOR_MAPPING.items():
-        for s in sectors:
-            pool_sectors[s].append(t)
-    
-    results = []
-    for etf in terminated_etfs:
-        sector = etf.get('sw_sector')
-        # 将 '801890' 转换为 '801890.SI' 以匹配 SECTOR_INDEX_UNIVERSE
-        sector_key = f"{sector}.SI" if sector and not sector.endswith('.SI') else sector
-        sector_name = SECTOR_INDEX_UNIVERSE.get(sector_key, ('', []))[0] if sector_key else ''
+    # ------------------------------------------------------------------------
+    # 4. 替代关系检查（含日期重叠验证）
+    # ------------------------------------------------------------------------
+    for ticker, info in VERIFIED_ETFS.items():
+        if info['status'] != 'terminated':
+            continue
         
-        # 查找策略池中同申万行业的ETF（包括概念ETF）
-        sector_alt_tickers = pool_sectors.get(sector_key, []) if sector_key else []
-        # 过滤只保留在策略池中的
-        sector_alt_tickers = [t for t in sector_alt_tickers if t in all_pool]
+        sector = info['sw_sector']
+        sector_name = SW_SECTOR_NAMES.get(sector, '未知')
+        list_date = str_to_date(info['list_date'])
+        delist_date = str_to_date(info['delist_date'])
         
-        has_sector_alt = len(sector_alt_tickers) > 0
+        replacement = find_potential_replacement(sector, STRATEGY_POOL)
         
-        # 检查是否在回测区间内有实际存续
-        active_in_backtest = pd.Timestamp(etf['list_date']) <= BACKTEST_END and pd.Timestamp(etf['delist_date']) >= BACKTEST_START
-        in_backtest_period = pd.Timestamp(etf['delist_date']) >= BACKTEST_START
-        
-        results.append({
-            'ticker': etf['ticker'],
-            'name': etf['name'],
-            'track_index': etf['track_index'],
-            'sw_sector': sector,
-            'sector_name': sector_name,
-            'has_sector_alt': has_sector_alt,
-            'sector_alt_tickers': sector_alt_tickers,
-            'in_backtest_period': in_backtest_period,
-            'active_in_backtest': active_in_backtest,
-        })
-    
-    return pd.DataFrame(results)
-
-
-# ============================================================
-# 6. 主分析函数
-# ============================================================
-
-def analyze_survivorship_bias_v3():
-    """主分析函数 v3"""
-    print("=" * 80)
-    print("Phase 7.1: ETF幸存者偏差审计 v3（严格验证版）")
-    print("=" * 80)
-    print()
-    print(f"回测区间: {BACKTEST_START.strftime('%Y-%m-%d')} ~ {BACKTEST_END.strftime('%Y-%m-%d')}")
-    print()
-    
-    db_path = r'D:\etf_rotation_model\database\etf_model.db'
-    
-    # 1. 审计策略池内ETF数据完整性
-    print("[1] 策略池18只ETF数据完整性审计（区分上市日 vs 数据库数据起始日）")
-    print("-" * 80)
-    pool_df = audit_strategy_pool_data_gaps(db_path)
-    
-    gap_etfs = pool_df[pool_df['gap_type'].notna()]
-    print(f"\n发现 {len(gap_etfs)} 只ETF在回测区间内存在空窗（迟到）:")
-    print()
-    
-    for _, row in gap_etfs.iterrows():
-        print(f"  {row['ticker']} {row['name']}")
-        print(f"    实际上市日: {row['list_date'].strftime('%Y-%m-%d')}  来源: {row['source']}")
-        print(f"    数据库数据起始: {row['db_first_date'].strftime('%Y-%m-%d')}")
-        print(f"    空窗类型: {row['gap_type']}")
-        print(f"    空窗期: {BACKTEST_START.strftime('%Y-%m-%d')} ~ {row['list_date'].strftime('%Y-%m-%d')} ({row['gap_days']} 交易日)")
-        if row['db_gap']:
-            print(f"    [注意] 数据库数据起始日晚于上市日 {row['db_gap']['db_gap_days']} 天")
-        print(f"    申万行业: {row['sw_sector']} ({SECTOR_INDEX_UNIVERSE.get(row['sw_sector'], ('', []))[0] if row['sw_sector'] else 'N/A'})")
-        print()
-    
-    # 2. 已验证的已退市ETF分析
-    print("-" * 80)
-    print("[2] 已验证的已退市ETF分析（每只均有权威来源）")
-    print("-" * 80)
-    print()
-    
-    verified_df = pd.DataFrame(VERIFIED_TERMINATED_ETFS)
-    verified_df['list_date'] = pd.to_datetime(verified_df['list_date'])
-    verified_df['delist_date'] = pd.to_datetime(verified_df['delist_date'])
-    
-    # 只统计在回测区间内有实际存续的
-    in_period = verified_df[
-        (verified_df['list_date'] <= BACKTEST_END) & 
-        (verified_df['delist_date'] >= BACKTEST_START)
-    ]
-    
-    print(f"已验证退市ETF总数: {len(verified_df)} 只")
-    print(f"在回测区间内有存续的: {len(in_period)} 只")
-    print()
-    
-    for _, row in in_period.iterrows():
-        print(f"  {row['ticker']} {row['name']}")
-        print(f"    存续期: {row['list_date'].strftime('%Y-%m-%d')} ~ {row['delist_date'].strftime('%Y-%m-%d')}")
-        print(f"    跟踪指数: {row['track_index']}")
-        print(f"    申万行业: {row['sw_sector']} ({SECTOR_INDEX_UNIVERSE.get(row['sw_sector'], ('', []))[0] if row['sw_sector'] else 'N/A'})")
-        print(f"    来源: {row['source']}")
-        print(f"    URL: {row['source_url']}")
-        print(f"    验证状态: {'[已验证]' if row['verified'] else '[未验证]'}")
-        print()
-    
-    # 3. 替代关系检查
-    print("-" * 80)
-    print("[3] 替代关系检查（基于申万行业映射）")
-    print("-" * 80)
-    print()
-    
-    coverage_df = check_sector_coverage(VERIFIED_TERMINATED_ETFS, pool_df)
-    
-    for _, row in coverage_df.iterrows():
-        print(f"  {row['ticker']} {row['name']}")
-        print(f"    申万行业: {row['sw_sector']} {row['sector_name']}")
-        print(f"    策略池有同行业ETF: {'是' if row['has_sector_alt'] else '否'}")
-        if row['has_sector_alt']:
-            print(f"    替代ETF: {', '.join(row['sector_alt_tickers'])}")
+        if replacement is None:
+            results['replacement_check'].append({
+                'terminated_ticker': ticker,
+                'terminated_name': info['name'],
+                'sector': sector,
+                'sector_name': sector_name,
+                'survival_period': f"{info['list_date']} ~ {info['delist_date']}",
+                'potential_replacement': '无',
+                'replacement_db_first': 'N/A',
+                'overlap': 'N/A',
+                'is_valid': False,
+                'conclusion': '策略池无该行业 ETF，替代无效',
+            })
         else:
-            print(f"    [警告] 策略池无同行业ETF -> 行业敞口缺失")
-        print(f"    在回测区间内存续: {'是' if row['active_in_backtest'] else '否'}")
-        print()
+            repl_info = STRATEGY_POOL[replacement]
+            is_valid, reason = verify_replacement_validity(
+                ticker, replacement, info, repl_info, BACKTEST_START, BACKTEST_END
+            )
+            
+            results['replacement_check'].append({
+                'terminated_ticker': ticker,
+                'terminated_name': info['name'],
+                'sector': sector,
+                'sector_name': sector_name,
+                'survival_period': f"{info['list_date']} ~ {info['delist_date']}",
+                'potential_replacement': replacement,
+                'replacement_name': repl_info['name'],
+                'replacement_db_first': repl_info['db_first_date'],
+                'overlap': reason,
+                'is_valid': is_valid,
+                'conclusion': '替代有效' if is_valid else '替代无效（日期不重叠）',
+            })
     
-    # 4. 纠正159996错误
-    print("-" * 80)
-    print("[4] v2错误记录纠正")
-    print("-" * 80)
-    print()
-    print("  v2中错误记录:")
-    print("    159996 被标记为'广发中证全指建筑材料ETF'（退市）")
-    print()
-    print("  经核实（来源：国泰基金产品资料概要、东方财富）:")
-    print("    159996.SZ = 国泰中证全指家用电器ETF（家电ETF）")
-    print("    成立日期: 2020-02-27")
-    print("    上市日期: 2020-03-16")
-    print("    数据库数据起始: 2022-06-06")
-    print("    状态: 存续（非退市）")
-    print("    映射申万行业: 801110 家用电器")
-    print()
-    print("  纠正措施:")
-    print("    - 已从退市列表中删除")
-    print("    - 纳入策略池内'迟到'ETF审计（2020-03-16上市，回测2019-08-13开始）")
-    print()
+    # ------------------------------------------------------------------------
+    # 5. 结论（极度保守，仅用已验证记录）
+    # ------------------------------------------------------------------------
     
-    # 5. 未验证数据声明
-    print("-" * 80)
-    print("[5] 未验证数据声明")
-    print("-" * 80)
-    print()
-    print(f"  v2中列出的其余 ~74 只退市ETF，由于以下原因标记为'未验证'：")
-    print("    - 无法逐一提供权威来源URL（基金公司公告/交易所公告）")
-    print("    - 上市日期和退市日期无法通过单一权威来源确认")
-    print("    - 跟踪指数与申万行业的映射关系未经核实")
-    print()
-    print("  未验证数据不用于本次结论。")
-    print()
+    # 统计已确认存在 A/B 类偏差的行业
+    affected_sectors = set()
+    for item in results['class_a_deviation']:
+        if item['has_deviation']:
+            affected_sectors.add(item['sector'])
     
-    # 6. 结论
-    print("=" * 80)
-    print("[6] 结论（仅基于已验证数据）")
-    print("=" * 80)
-    print()
-    
-    # 统计实质性偏差
-    missing_sectors = set()
-    
-    # 来自已退市ETF
-    for _, row in coverage_df.iterrows():
-        if row['active_in_backtest'] and not row['has_sector_alt'] and pd.notna(row['sw_sector']):
-            sector_name = row['sector_name']
-            missing_sectors.add(f"{row['sw_sector']} {sector_name}")
-    
-    # 来自策略池内迟到ETF
-    for _, row in gap_etfs.iterrows():
-        if pd.notna(row['sw_sector']):
-            sector_key = f"{row['sw_sector']}.SI"
-            sector_name = SECTOR_INDEX_UNIVERSE.get(sector_key, ('', []))[0]
-            missing_sectors.add(f"{row['sw_sector']} {sector_name}")
-    
-    print("**行业层面是否存在实质性幸存者偏差？**")
-    print()
-    
-    if missing_sectors:
-        print("**是，存在实质性幸存者偏差。**")
-        print()
-        print("以下行业在回测期间的部分时段内，策略池无法提供可交易的ETF：")
-        print()
-        for sector in sorted(missing_sectors):
-            print(f"  - {sector}")
-        print()
-        print("偏差来源:")
-        print("  1. 已退市ETF（无替代）：策略池从未覆盖该行业")
-        print("  2. 策略池ETF迟到：回测早期该行业ETF尚未上市")
-    else:
-        print("**否，基于已验证数据，不存在实质性幸存者偏差。**")
-    print()
-    
-    print("**需要补充的历史代理：**")
-    print("  - 基础化工（801030）：已退市化工ETF（516690）在回测期间存在，但策略池无化工ETF")
-    print("  - 机械设备（801890）：已退市工业ETF（512310/159953）在回测期间存在，策略池无工业ETF")
-    print("  - 家用电器（801110）：策略池家电ETF（159996）2020-03-16才上市，回测前7个月缺失")
-    print("  - 农林牧渔（801010）：策略池养殖ETF（159865）2022-06-06才上市")
-    print("  - 石油石化（801960）：策略池油气ETF（159697）2023-05-04才上市")
-    print()
-    
-    print("**后续行动：**")
-    print("  1. 本次不修改策略（偏差需量化后才能评估影响）")
-    print("  2. Phase 7.2可测试'冻结当时可交易池'方法")
-    print("  3. 建议补充申万行业指数（801030/801890等）作为历史代理")
-    print()
-    
-    return {
-        'pool_gap_etfs': gap_etfs.to_dict('records'),
-        'verified_terminated': in_period.to_dict('records'),
-        'coverage': coverage_df.to_dict('records'),
-        'missing_sectors': sorted(missing_sectors),
+    results['conclusions'] = {
+        'affected_sectors_count': len(affected_sectors),
+        'affected_sectors': sorted(list(affected_sectors)),
+        'affected_sector_names': [SW_SECTOR_NAMES.get(s, '未知') for s in sorted(affected_sectors)],
+        'verified_terminated_count': sum(1 for v in VERIFIED_ETFS.values() if v['status'] == 'terminated'),
+        'verified_active_count': sum(1 for v in VERIFIED_ETFS.values() if v['status'] == 'active'),
+        'unverified_pool_count': sum(1 for v in STRATEGY_POOL.values() if not v['verified']),
+        'total_pool_count': len(STRATEGY_POOL),
     }
+    
+    return results
 
 
-# ============================================================
-# 7. 生成Markdown报告
-# ============================================================
+# ============================================================================
+# 五、报告生成
+# ============================================================================
 
-def generate_report_v3():
-    """生成Markdown报告 v3"""
+def generate_report_v4(output_path: Optional[str] = None) -> str:
+    """
+    生成 v4 最终收口版 Markdown 报告。
     
-    results = analyze_survivorship_bias_v3()
+    Args:
+        output_path: 报告输出路径，默认为 D:\etf_rotation_model\reports\phase7_1_survivorship_bias_audit.md
     
-    report_lines = []
-    report_lines.append("# Phase 7.1: ETF幸存者偏差审计报告 v3（严格验证版）")
-    report_lines.append("")
-    report_lines.append("> **注意**：本报告仅审计研究，不修改策略。不修改生产配置。")
-    report_lines.append("")
-    report_lines.append("> 研究目标：严格核实每只退市ETF来源，基于已验证数据得出结论。")
-    report_lines.append("")
-    report_lines.append(f"> 回测区间：{BACKTEST_START.strftime('%Y-%m-%d')} ~ {BACKTEST_END.strftime('%Y-%m-%d')}")
-    report_lines.append("")
-    report_lines.append("---")
-    report_lines.append("")
+    Returns:
+        生成的报告内容（Markdown 字符串）
+    """
+    if output_path is None:
+        output_path = r'D:\etf_rotation_model\reports\phase7_1_survivorship_bias_audit.md'
     
-    # 一、方法论
-    report_lines.append("## 一、研究方法论（v3 vs v2 改进）")
-    report_lines.append("")
-    report_lines.append("| 要求 | v2（旧） | v3（新） |")
-    report_lines.append("|------|----------|----------|")
-    report_lines.append("| 159996记录 | 错误标记为'广发建材ETF' | **已纠正**为'国泰家电ETF' |")
-    report_lines.append("| 权威来源 | 无URL，日期推测 | **每只提供来源URL**，日期经核实 |")
-    report_lines.append("| 上市日 vs 数据日 | 不区分 | **明确区分**实际上市日和数据库数据起始日 |")
-    report_lines.append("| 替代关系 | 模糊主题替代（如'科技'） | **申万行业映射**（801xxx.SI） |")
-    report_lines.append("| 空窗统计 | 未限定区间 | **只统计回测区间**内的实际空窗 |")
-    report_lines.append("| 未验证数据 | 全部用于结论 | **标记'未验证'**，不用于结论 |")
-    report_lines.append("")
+    results = analyze_survivorship_bias_v4()
     
-    # 二、策略池内迟到ETF
-    report_lines.append("## 二、策略池内ETF数据完整性审计")
-    report_lines.append("")
-    report_lines.append("回测区间开始时（2019-08-13），以下ETF尚未上市或数据库无数据：")
-    report_lines.append("")
-    report_lines.append("| Ticker | 名称 | 实际上市日 | 数据库起始日 | 空窗类型 | 空窗天数 | 申万行业 | 来源 |")
-    report_lines.append("|--------|------|-----------|-------------|----------|----------|----------|------|")
+    lines = []
     
-    for etf in results['pool_gap_etfs']:
-        gap_days = etf['gap_days']
-        sector = etf['sw_sector'] or 'N/A'
-        sector_key = f"{sector}.SI" if sector != 'N/A' else None
-        sector_name = SECTOR_INDEX_UNIVERSE.get(sector_key, ('', []))[0] if sector_key else 'N/A'
-        source = etf['source']
-        if etf.get('source_url'):
-            source = f"[{source}]({etf['source_url']})"
-        report_lines.append(f"| {etf['ticker']} | {etf['name']} | {etf['list_date'].strftime('%Y-%m-%d') if hasattr(etf['list_date'], 'strftime') else etf['list_date']} | {etf['db_first_date'].strftime('%Y-%m-%d') if hasattr(etf['db_first_date'], 'strftime') else etf['db_first_date']} | {etf['gap_type'] or 'N/A'} | {gap_days} | {sector} {sector_name} | {source} |")
-    report_lines.append("")
+    # ========================================================================
+    # 标题
+    # ========================================================================
+    lines.append("# Phase 7.1: ETF 幸存者偏差审计报告 v4（最终收口版）")
+    lines.append("")
+    lines.append("> 原则：仅用已验证记录（有权威来源 URL）形成结论。")
+    lines.append("")
+    lines.append(f"- 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"- 回测区间：{BACKTEST_START} ~ {BACKTEST_END}")
+    lines.append("")
     
-    # 三、已验证的已退市ETF
-    report_lines.append("## 三、已验证的已退市ETF（每只均有权威来源）")
-    report_lines.append("")
-    report_lines.append("以下ETF的成立日期、终止上市日期、跟踪指数均经过权威来源核实：")
-    report_lines.append("")
-    report_lines.append("| Ticker | 名称 | 存续期 | 跟踪指数 | 申万行业 | 来源 | 来源URL |")
-    report_lines.append("|--------|------|--------|----------|----------|------|----------|")
+    # ========================================================================
+    # 一、研究方法论（v4 vs v3 改进）
+    # ========================================================================
+    lines.append("## 一、研究方法论（v4 vs v3 改进）")
+    lines.append("")
+    lines.append("v4 相比 v3 的核心改进：")
+    lines.append("")
+    lines.append("1. **新增 4 类偏差拆分**：将模糊的「幸存者偏差」拆分为 A（退市）、B（固定池回看）、C（尚未上市）、D（数据缺失）四类，每类单独讨论。")
+    lines.append("2. **数据库首日不等于上市日**：无官方来源（基金公司公告、交易所公告）验证上市日期的 ETF，一律标记为「未验证」，不得断言「上市日=数据库首日」。")
+    lines.append("3. **替代 ETF 必须验证日期重叠**：检查替代 ETF 在被替代 ETF 空窗期或退市 ETF 存续期内是否也有数据，替代关系表中增加「替代有效？」列。")
+    lines.append("4. **结论极度保守，不扩大化**：仅使用已验证记录（3只退市 + 1只存续）形成结论，其余策略池 ETF 因缺少官方来源不纳入结论。")
+    lines.append("5. **修正 516690 上市交易日**：从 2021-12-07（基金合同生效日）修正为 2021-12-21（实际上市交易日）。")
+    lines.append("")
     
-    for etf in results['verified_terminated']:
-        sw = etf.get('sw_sector', 'N/A')
-        sector_key = f"{sw}.SI" if sw != 'N/A' else None
-        sector_name = SECTOR_INDEX_UNIVERSE.get(sector_key, ('', []))[0] if sector_key else 'N/A'
-        report_lines.append(f"| {etf['ticker']} | {etf['name']} | {pd.Timestamp(etf['list_date']).strftime('%Y-%m-%d') if isinstance(etf['list_date'], str) else etf['list_date'].strftime('%Y-%m-%d')} ~ {pd.Timestamp(etf['delist_date']).strftime('%Y-%m-%d') if isinstance(etf['delist_date'], str) else etf['delist_date'].strftime('%Y-%m-%d')} | {etf['track_index']} | {sw} {sector_name} | {etf['source']} | [{etf['source_url'][:30]}...]({etf['source_url']}) |")
-    report_lines.append("")
+    # ========================================================================
+    # 二、已验证的 ETF（4 只）
+    # ========================================================================
+    lines.append("## 二、已验证的 ETF（4 只）")
+    lines.append("")
+    lines.append("以下 4 只 ETF 均有权威来源 URL 验证，是 v4 唯一可用于结论的数据：")
+    lines.append("")
+    lines.append("| 代码 | 名称 | 上市日 | 退市日 | 数据库首日 | 申万行业 | 来源 | 状态 |")
+    lines.append("|------|------|--------|--------|------------|----------|------|------|")
     
-    # 四、替代关系检查
-    report_lines.append("## 四、替代关系检查（基于申万行业映射）")
-    report_lines.append("")
-    report_lines.append("| 退市ETF | 跟踪指数 | 申万行业 | 策略池有替代？ | 替代ETF | 结论 |")
-    report_lines.append("|---------|----------|----------|---------------|---------|------|")
+    for item in results['verified_etfs']:
+        delist = item.get('delist_date', 'N/A')
+        db_first = item.get('db_first_date', 'N/A')
+        lines.append(f"| {item['ticker']} | {item['name']} | {item['list_date']} | {delist} | {db_first} | {item['sw_sector']} | {item['source']} | {'已退市' if item['status'] == 'terminated' else '存续'} |")
     
-    for row in results['coverage']:
-        has_alt = '是' if row['has_sector_alt'] else '否'
-        alt_tickers = ', '.join(row['sector_alt_tickers']) if row['sector_alt_tickers'] else '无'
-        conclusion = '行业敞口被覆盖' if row['has_sector_alt'] else '**行业敞口缺失**'
-        report_lines.append(f"| {row['ticker']} | {row['track_index']} | {row['sw_sector']} {row['sector_name']} | {has_alt} | {alt_tickers} | {conclusion} |")
-    report_lines.append("")
+    lines.append("")
+    lines.append("来源 URL：")
+    for item in results['verified_etfs']:
+        lines.append(f"- {item['ticker']}：{item['source_url']}")
+    lines.append("")
     
-    # 五、159996纠正
-    report_lines.append("## 五、v2错误记录纠正：159996")
-    report_lines.append("")
-    report_lines.append("**v2错误：**")
-    report_lines.append("- 159996 被标记为'广发中证全指建筑材料ETF'，列为退市ETF")
-    report_lines.append("")
-    report_lines.append("**经权威来源核实（纠正）：**")
-    report_lines.append("- 159996.SZ = **国泰中证全指家用电器ETF**（家电ETF）")
-    report_lines.append("- 成立日期：2020-02-27 [来源：国泰基金产品资料概要](https://fundf10.eastmoney.com/jbgk_159996.html)")
-    report_lines.append("- 上市日期：2020-03-16")
-    report_lines.append("- 数据库数据起始：2022-06-06（晚于上市日约2.2年）")
-    report_lines.append("- 当前状态：**存续**（非退市）")
-    report_lines.append("- 申万行业映射：801110 家用电器")
-    report_lines.append("")
-    report_lines.append("**纠正措施：**")
-    report_lines.append("- 已从退市列表中删除")
-    report_lines.append("- 纳入策略池内'迟到'ETF审计（2020-03-16上市，回测2019-08-13开始，空窗约7个月）")
-    report_lines.append("")
+    # ========================================================================
+    # 三、策略池 ETF 审计（18 只）
+    # ========================================================================
+    lines.append("## 三、策略池 ETF 审计（18 只）")
+    lines.append("")
+    lines.append("策略池中仅 159996.SZ 有官方来源验证上市日期，其余 17 只均标记为「未验证」：")
+    lines.append("")
+    lines.append("| 代码 | 名称 | 申万行业 | 数据库首日 | 官方来源验证 | 状态 |")
+    lines.append("|------|------|----------|------------|--------------|------|")
     
-    # 六、未验证数据声明
-    report_lines.append("## 六、未验证数据声明")
-    report_lines.append("")
-    report_lines.append("v2中列出的其余 ~74 只退市ETF，**全部标记为'未验证'**，不纳入本次结论。")
-    report_lines.append("")
-    report_lines.append("未通过验证的原因：")
-    report_lines.append("- 无法逐一提供权威来源URL（基金公司官网公告、交易所公告）")
-    report_lines.append("- 上市日期和退市日期无法通过单一权威来源交叉确认")
-    report_lines.append("- 跟踪指数与申万行业的映射关系未经独立核实")
-    report_lines.append("- 部分ETF名称、代码在公开数据库中无法检索到")
-    report_lines.append("")
-    report_lines.append("> **原则**：无法核实的数据不得用于结论。本次报告仅基于上述3只已验证退市ETF + 策略池内8只迟到ETF得出结论。")
-    report_lines.append("")
+    for item in results['strategy_pool_audit']:
+        lines.append(f"| {item['ticker']} | {item['name']} | {item['sw_sector']} | {item['db_first_date']} | {item['official_source']} | {item['status']} |")
     
-    # 七、结论
-    report_lines.append("## 七、结论（仅基于已验证数据）")
-    report_lines.append("")
+    lines.append("")
+    lines.append("**注意**：数据库首日（db_first_date）仅反映数据收集起始，不等于上市日。无官方来源验证的 ETF，其数据库首日之前的空窗原因无法确认（可能是「ETF 未上市」，也可能是「数据缺失」）。")
+    lines.append("")
     
-    if results['missing_sectors']:
-        report_lines.append("**行业层面存在实质性幸存者偏差。**")
-        report_lines.append("")
-        report_lines.append("以下行业在回测期间的部分时段内，策略池无法提供可交易的ETF：")
-        report_lines.append("")
-        for sector in results['missing_sectors']:
-            report_lines.append(f"- **{sector}**")
-        report_lines.append("")
-        report_lines.append("偏差来源分解：")
-        report_lines.append("")
-        report_lines.append("1. **已退市且无替代**（来自已验证退市ETF）：")
-        report_lines.append("   - 基础化工（801030）：516690化工ETF在回测期间存在，但策略池无化工ETF")
-        report_lines.append("   - 机械设备（801890）：512310/159953工业ETF在回测期间存在，策略池无工业ETF")
-        report_lines.append("")
-        report_lines.append("2. **策略池ETF迟到**（回测开始时尚未上市）：")
-        report_lines.append("   - 家用电器（801110）：159996家电ETF 2020-03-16上市，回测前7个月缺失")
-        report_lines.append("   - 农林牧渔（801010）：159865养殖ETF 2022-06-06上市，回测前2.8年缺失")
-        report_lines.append("   - 石油石化（801960）：159697油气ETF 2023-05-04上市，回测前3.7年缺失")
-        report_lines.append("   - 计算机（801750）：515230软件ETF 2021-03-02上市，回测前1.5年缺失")
-        report_lines.append("   - 电力设备（801730）：516160新能源ETF 2021-02-04上市，回测前1.4年缺失")
-        report_lines.append("   - 汽车（801880）：516110汽车ETF 2021-05-07上市，回测前1.7年缺失")
-        report_lines.append("   - 通信（801770）：515880通信ETF 2019-09-06上市，回测前0.8个月缺失")
+    # ========================================================================
+    # 四、4 类偏差分析
+    # ========================================================================
+    lines.append("## 四、4 类偏差分析")
+    lines.append("")
+    
+    # ---- A. 退市幸存者偏差 ----
+    lines.append("### A. 退市幸存者偏差（基于 3 只已验证退市 ETF）")
+    lines.append("")
+    lines.append("定义：回测区间内曾经存在、但已退市的 ETF，其行业敞口未被策略池替代 ETF 覆盖。")
+    lines.append("")
+    
+    if results['class_a_deviation']:
+        lines.append("| 代码 | 名称 | 申万行业 | 回测区间内存续期 | 潜在替代 | 替代有效？ | 结论 |")
+        lines.append("|------|------|----------|------------------|----------|------------|------|")
+        for item in results['class_a_deviation']:
+            repl = item.get('replacement', '无')
+            valid = '是' if item.get('is_valid') else '否'
+            conclusion = '存在偏差' if item['has_deviation'] else '无偏差'
+            lines.append(f"| {item['ticker']} | {item['name']} | {item['sector_name']}({item['sector']}) | {item['period']} | {repl} | {valid} | {conclusion} |")
     else:
-        report_lines.append("**基于已验证数据，不存在实质性幸存者偏差。**")
-    report_lines.append("")
+        lines.append("无已验证的退市 ETF 在回测区间内存续。")
     
-    # 八、建议
-    report_lines.append("## 八、建议与后续行动")
-    report_lines.append("")
-    report_lines.append("1. **本次不修改策略**：偏差对回测的量化影响需补齐真实行情后才能评估。")
-    report_lines.append("2. **数据补充建议**：")
-    report_lines.append("   - 申万基础化工指数（801030.SI）→ 替代化工ETF空窗")
-    report_lines.append("   - 申万机械设备指数（801890.SI）→ 替代工业ETF空窗")
-    report_lines.append("   - 申万家用电器指数（801110.SI）→ 补充家电ETF迟到空窗")
-    report_lines.append("3. **Phase 7.2方向**：测试'冻结当时可交易池'方法，验证偏差大小。")
-    report_lines.append("4. **扩大验证**：如需更完整结论，需对v2中其余~74只ETF逐一验证来源。")
-    report_lines.append("")
-    report_lines.append("---")
-    report_lines.append("")
-    report_lines.append("*报告生成时间：2026-06-21*")
-    report_lines.append("*数据来源：数据库直接查询 + 权威来源验证（上交所/华宝证券/天天基金网/国泰基金）*")
-    report_lines.append("*验证原则：每只ETF必须提供权威来源URL和准确日期，否则标记'未验证'*")
+    lines.append("")
     
-    report_text = "\n".join(report_lines)
+    # 详细说明
+    for item in results['class_a_deviation']:
+        if item['has_deviation']:
+            lines.append(f"- **{item['ticker']}**（{item['name']}）：{item['reason']}")
+    lines.append("")
     
-    # 保存报告
-    report_path = r'D:\etf_rotation_model\reports\phase7_1_survivorship_bias_audit.md'
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write(report_text)
+    # ---- B. 固定池回看偏差 ----
+    lines.append("### B. 固定池回看偏差（基于 3 只已验证退市 ETF）")
+    lines.append("")
+    lines.append("定义：用当前固定池（18只）回看历史，但历史上存在其他可交易 ETF（如退市 ETF）未被纳入池内。即使这些历史 ETF 已退市，回测的「固定池」仍遗漏了它们。")
+    lines.append("")
     
-    print(f"\n报告已保存: {report_path}")
-    return report_text
+    if results['class_b_deviation']:
+        lines.append("| 代码 | 名称 | 申万行业 | 回测区间内存续期 | 策略池遗漏 | 结论 |")
+        lines.append("|------|------|----------|------------------|------------|------|")
+        for item in results['class_b_deviation']:
+            conclusion = '存在偏差' if item['has_deviation'] else '无偏差'
+            lines.append(f"| {item['ticker']} | {item['name']} | {item['sector_name']}({item['sector']}) | {item['period']} | 是 | {conclusion} |")
+    else:
+        lines.append("无已验证的退市 ETF 在回测区间内存续。")
+    
+    lines.append("")
+    
+    # 详细说明
+    for item in results['class_b_deviation']:
+        if item['has_deviation']:
+            lines.append(f"- **{item['ticker']}**（{item['name']}）：{item['note']}")
+    lines.append("")
+    
+    # ---- C. ETF 尚未上市 ----
+    lines.append("### C. ETF 尚未上市（仅基于已验证的 159996.SZ）")
+    lines.append("")
+    lines.append("定义：策略池中的某些 ETF 在回测早期确实没有成立/上市。此类不是「偏差」，是历史事实。但仅对取得官方来源验证的 ETF 讨论此类。")
+    lines.append("")
+    
+    if results['class_c_deviation']:
+        lines.append("| 代码 | 名称 | 申万行业 | 尚未上市期间 | 天数 | 说明 |")
+        lines.append("|------|------|----------|--------------|------|------|")
+        for item in results['class_c_deviation']:
+            lines.append(f"| {item['ticker']} | {item['name']} | {item['sector_name']}({item['sector']}) | {item['gap_period']} | {item['days']} | {item['note']} |")
+    else:
+        lines.append("无已验证的存续 ETF 在回测开始时未上市。")
+    
+    lines.append("")
+    lines.append("**重要**：其余 17 只策略池 ETF 因无官方来源验证上市日期，无法确认其空窗原因是「ETF 未上市」还是「数据缺失」，不纳入 C 类结论。")
+    lines.append("")
+    
+    # ---- D. 历史数据缺失 ----
+    lines.append("### D. 历史数据缺失（仅基于已验证的 159996.SZ）")
+    lines.append("")
+    lines.append("定义：权威来源验证的上市日早于数据库首日，说明数据库在上市初期缺失数据。此类属于数据采集偏差。仅对取得官方来源验证的 ETF 讨论此类。")
+    lines.append("")
+    
+    if results['class_d_deviation']:
+        lines.append("| 代码 | 名称 | 申万行业 | 缺失期间 | 天数 | 约年数 | 说明 |")
+        lines.append("|------|------|----------|----------|------|--------|------|")
+        for item in results['class_d_deviation']:
+            lines.append(f"| {item['ticker']} | {item['name']} | {item['sector_name']}({item['sector']}) | {item['gap_period']} | {item['days']} | {item['years']} | {item['note']} |")
+    else:
+        lines.append("无已验证的存续 ETF 存在数据库首日晚于上市日的情况。")
+    
+    lines.append("")
+    lines.append("**重要**：其余 17 只策略池 ETF 因无官方来源验证上市日期，无法确认其空窗原因是「ETF 未上市」还是「数据缺失」，不纳入 D 类结论。")
+    lines.append("")
+    
+    # ========================================================================
+    # 五、替代关系检查（含日期重叠验证）
+    # ========================================================================
+    lines.append("## 五、替代关系检查（含日期重叠验证）")
+    lines.append("")
+    lines.append("| 退市 ETF | 申万行业 | 潜在替代 | 替代数据库首日 | 退市 ETF 存续期 | 日期重叠？ | 结论 |")
+    lines.append("|----------|----------|----------|----------------|-----------------|------------|------|")
+    
+    for item in results['replacement_check']:
+        overlap = item.get('overlap', 'N/A')
+        lines.append(f"| {item['terminated_ticker']} | {item['sector_name']}({item['sector']}) | {item['potential_replacement']} | {item['replacement_db_first']} | {item['survival_period']} | {overlap} | {item['conclusion']} |")
+    
+    lines.append("")
+    lines.append("**关键发现**：")
+    for item in results['replacement_check']:
+        if not item['is_valid']:
+            lines.append(f"- {item['terminated_ticker']}（{item['terminated_name']}）的潜在替代 {item['potential_replacement']} 在退市 ETF 存续期内无有效数据，替代无效。")
+    lines.append("")
+    
+    # ========================================================================
+    # 六、结论（极度保守，仅用已验证记录）
+    # ========================================================================
+    lines.append("## 六、结论（极度保守，仅用已验证记录）")
+    lines.append("")
+    lines.append("**基于已验证记录（3 只退市 + 1 只存续）：**")
+    lines.append("")
+    
+    conc = results['conclusions']
+    
+    lines.append(f"1. **已确认存在 A/B 类偏差（退市/固定池回看）**：{conc['affected_sectors_count']} 个行业")
+    if conc['affected_sectors']:
+        sector_desc = ", ".join([f"{name}({code})" for code, name in zip(conc['affected_sectors'], conc['affected_sector_names'])])
+        lines.append(f"   - {sector_desc}")
+        
+        # 详细说明每个行业
+        for sector in conc['affected_sectors']:
+            sector_name = SW_SECTOR_NAMES.get(sector, '未知')
+            if sector == '801030':
+                lines.append(f"   - 基础化工（801030）：516690 在回测期间存续（2021-12-21 ~ 2024-08-27），策略池无化工 ETF，存在行业敞口缺失。")
+            elif sector == '801890':
+                lines.append(f"   - 机械设备（801890）：512310（2015-04-08 ~ 2021-01-07）和 159953（2017-06-13 ~ 2020-12-16）在回测期间存续，策略池潜在替代 159530.SZ 数据库首日为 2024-01-18，在退市 ETF 存续期内无数据，替代无效。")
+    else:
+        lines.append("   - 无已确认的行业存在 A/B 类偏差。")
+    
+    lines.append("")
+    lines.append("2. **已确认 C/D 类但仅 159996.SZ 一例**：")
+    if results['class_c_deviation']:
+        for item in results['class_c_deviation']:
+            lines.append(f"   - {item['gap_period']}：ETF 尚未上市（C 类，非偏差），共 {item['days']} 天。")
+    if results['class_d_deviation']:
+        for item in results['class_d_deviation']:
+            lines.append(f"   - {item['gap_period']}：数据库缺失约 {item['years']} 年数据（D 类）。")
+    lines.append("   - 仅 159996.SZ 可确认 C/D 类，其余 17 只因无官方来源无法确认。")
+    
+    lines.append("")
+    lines.append(f"3. **其余 {conc['unverified_pool_count']} 只策略池 ETF**：因缺少官方来源验证的上市日期，无法确认其空窗原因是「ETF 未上市」还是「数据缺失」，**不纳入结论**。数据库首日仅反映数据收集起始，不等同于上市日。")
+    
+    lines.append("")
+    lines.append("4. **v2 中其余约 74 只退市 ETF**：全部标记为「未验证」，不纳入结论。")
+    
+    lines.append("")
+    lines.append("**总结**：v4 不再宣称「9 个行业均存在实质性幸存者偏差」。基于已验证的 3 只退市 ETF，仅确认 2 个行业（801030 基础化工、801890 机械设备）在回测期间内有退市 ETF 存续且策略池无有效替代。其余策略池 ETF 因缺少官方来源验证，无法确认其偏差类型，不纳入结论。")
+    lines.append("")
+    
+    # ========================================================================
+    # 七、建议与后续行动
+    # ========================================================================
+    lines.append("## 七、建议与后续行动")
+    lines.append("")
+    lines.append("1. **本次不修改策略**：偏差需量化后才能评估影响，当前仅完成定性识别。")
+    lines.append("2. **已确认偏差行业建议补充历史代理**：801030（基础化工）和 801890（机械设备）建议补充申万行业指数作为历史代理，以评估回测偏差的具体影响。")
+    lines.append("3. **其余策略池 ETF 需获取官方来源验证**：通过基金公司公告或交易所公告获取其余 17 只 ETF 的准确上市日期，确认后方可判断 C/D 类偏差。")
+    lines.append("4. **不进入 Phase 7.2**：Phase 7.1 已收口，仅保留定性结论，不进行策略修改。")
+    lines.append("")
+    
+    # ========================================================================
+    # 附录：版本历史
+    # ========================================================================
+    lines.append("---")
+    lines.append("")
+    lines.append("## 附录：版本历史")
+    lines.append("")
+    lines.append("- **v4**（最终收口版）：极度保守，4 类偏差拆分，替代日期重叠验证，仅用已验证记录。")
+    lines.append("- v3：初步分析，含 516690 上市日错误（2021-12-07 合同生效日误作上市日）。")
+    lines.append("- v2：扩大化分析，含约 74 只退市 ETF，但多数未验证。")
+    lines.append("")
+    
+    report = "\n".join(lines)
+    
+    # 确保目录存在
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(report)
+    
+    print(f"[OK] 报告已生成：{output_path}")
+    print(f"[INFO] 回测区间：{BACKTEST_START} ~ {BACKTEST_END}")
+    print(f"[INFO] 已验证 ETF：{len(results['verified_etfs'])} 只（{conc['verified_terminated_count']} 只退市 + {conc['verified_active_count']} 只存续）")
+    print(f"[INFO] 策略池未验证：{conc['unverified_pool_count']}/{conc['total_pool_count']} 只")
+    print(f"[INFO] 已确认 A/B 类偏差行业：{conc['affected_sectors_count']} 个")
+    
+    return report
 
+
+# ============================================================================
+# 主入口
+# ============================================================================
 
 if __name__ == '__main__':
-    generate_report_v3()
+    generate_report_v4()
