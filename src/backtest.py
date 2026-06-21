@@ -55,11 +55,12 @@ class BacktestEngine:
         bench_df = bench_df[bench_df['date'] <= cutoff].copy()
         
         # ========== v6.2: 日期验证 ==========
-        all_tickers = set(_core_tickers) | set(_fallback_tickers) | set(_defense_tickers)
+        # 使用实际传入的行情池，而非硬编码的全池（B0.3只传入18只，不应显示38只）
+        all_tickers = set(market_df['ticker'].unique())
         market_max_date = market_df['date'].max()
         bench_max_date = bench_df['date'].max()
         
-        # 2026-06-18当日有数据的ETF
+        # 截止日有数据的ETF
         cutoff_date = pd.Timestamp(as_of_date) if as_of_date else market_max_date
         last_day_data = market_df[market_df['date'] == cutoff_date]
         present_tickers = set(last_day_data['ticker'].unique()) if not last_day_data.empty else set()
@@ -71,7 +72,7 @@ class BacktestEngine:
         print(f"  请求截止日期:        {cutoff_date.strftime('%Y-%m-%d')}")
         print(f"  ETF数据最大日期:     {market_max_date.strftime('%Y-%m-%d')}")
         print(f"  基准数据最大日期:    {bench_max_date.strftime('%Y-%m-%d')}")
-        print(f"  参与回测ETF数量:     {len(all_tickers)}")
+        print(f"  参与回测ETF数量:     {len(all_tickers)} (实际传入行情池)")
         print(f"  截止日有数据ETF:     {len(present_tickers)}")
         print(f"  数据缺失ETF:         {len(missing_tickers)} 只")
         if missing_tickers:
