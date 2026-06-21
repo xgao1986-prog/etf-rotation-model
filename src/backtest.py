@@ -42,6 +42,9 @@ class BacktestEngine:
         v6.1：支持 early_exit_days，用于测试3日失败退出规则
         v6.2：支持 as_of_date，显式指定回测截止日期
         """
+        # v2: 初始化被跳过的BUY记录（用于滑点测试验证）
+        self._skipped_buys = []
+        
         import config as _cfg_module
         _core_tickers = list(getattr(_cfg_module, 'CORE_UNIVERSE', {}).keys())
         _fallback_tickers = list(getattr(_cfg_module, 'FALLBACK_EQUITY_UNIVERSE', {}).keys())
@@ -486,15 +489,19 @@ class BacktestEngine:
         # 4. 准备 prices 和 last_prices
         prices = dict(day_prices)
         last_prices = dict(last_valid_close) if last_valid_close else None
+
+        # v2: 构造滑点后的执行价格（规划阶段使用，确保执行阶段不再跳过）
+        sell_prices = {t: p * (1 - slippage) for t, p in prices.items()}
+        buy_prices = {t: p * (1 + slippage) for t, p in prices.items()}
         
-        # 5. 调用纯函数
+        # 5. 调用纯函数（规划阶段使用执行价格，NAV估值仍用原始价格）
         orders, state = plan_rebalance_v2_5(
             nav=nav,
             cash=portfolio['cash'],
             current_positions=current_positions,
             industry_candidates=raw_industry_candidates,
             defense_candidates=raw_defense_candidates,
-            prices=prices,
+            prices=prices,  # 原始价，用于估值和可交易性判断
             industry_tickers=set(_core_tickers) | set(_fallback_tickers),
             defense_tickers=set(_defense_tickers),
             last_prices=last_prices,
@@ -506,6 +513,8 @@ class BacktestEngine:
             commission_rate=self.cfg['commission_rate'],
             min_commission=self.cfg['min_commission'],
             lot_size=100,
+            sell_prices=sell_prices,  # 滑点后的卖出价
+            buy_prices=buy_prices,    # 滑点后的买入价
         )
         
         # 6. 执行订单（先卖出，后买入）
@@ -520,8 +529,8 @@ class BacktestEngine:
             
             pos = portfolio['positions'][ticker]
             shares = order['shares']
-            # 应用滑点：卖出成交价下调
-            price = order['price'] * (1 - slippage)
+            # v2: order['price'] 已由规划阶段使用 sell_prices（滑点价）计算，直接执行
+            price = order['price']
             amount = shares * price
             commission = calc_commission(amount)
             net_proceeds = amount - commission
@@ -554,8 +563,8 @@ class BacktestEngine:
             
             ticker = order['ticker']
             shares = order['shares']
-            # 应用滑点：买入成交价上调
-            price = order['price'] * (1 + slippage)
+            # v2: order['price'] 已由规划阶段使用 buy_prices（滑点价）计算，直接执行
+            price = order['price']
             amount = shares * price
             commission = calc_commission(amount)
             total_cost = amount + commission
@@ -579,8 +588,20 @@ class BacktestEngine:
                 if len(group_holdings) >= same_group_max:
                     continue
             
-            # 现金检查（纯函数已确保，但保险）
+            # 现金检查（v2: 纯函数已使用滑点价确保可执行，此处记录而非静默跳过）
             if total_cost > portfolio['cash']:
+                # 记录被跳过的 BUY（用于测试验证）
+                if not hasattr(self, '_skipped_buys'):
+                    self._skipped_buys = []
+                self._skipped_buys.append({
+                    'date': date_str,
+                    'ticker': ticker,
+                    'shares': shares,
+                    'price': price,
+                    'total_cost': total_cost,
+                    'cash': portfolio['cash'],
+                    'reason': '执行阶段现金不足（规划阶段遗漏滑点）',
+                })
                 continue
             
             portfolio['cash'] -= total_cost

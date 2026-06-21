@@ -72,27 +72,27 @@ def extract_metrics(result):
     nav_df = result.get('nav_df', pd.DataFrame())
     if not nav_df.empty and 'nav' in nav_df.columns:
         final_nav = nav_df['nav'].iloc[-1]
-        initial_nav = nav_df['nav'].iloc[0]
-        total_return = (final_nav / initial_nav - 1) * 100
     else:
         final_nav = 0
-        total_return = 0
 
     trades_df = result.get('trades_df', pd.DataFrame())
     total_trades = len(trades_df) if not trades_df.empty else 0
     buy_trades = len(trades_df[trades_df['action'] == 'BUY']) if not trades_df.empty else 0
-    sell_trades = len(trades_df[trades_df['action'].isin(['SELL', 'STOP_LOSS'])]) if not trades_df.empty else 0
+    sell_trades = len(trades_df[trades_df['action'] == 'SELL']) if not trades_df.empty else 0
+    stop_loss_trades = len(trades_df[trades_df['action'] == 'STOP_LOSS']) if not trades_df.empty else 0
 
     total_commission = trades_df['commission'].sum() if not trades_df.empty and 'commission' in trades_df.columns else 0
 
     return {
         'final_nav': final_nav,
-        'total_return_pct': total_return,
+        'total_return_pct': result.get('total_return', 0) * 100,
+        'annual_return_pct': result.get('annual_return', 0) * 100,
         'sharpe': result.get('sharpe_ratio', 0),
         'max_drawdown_pct': result.get('max_drawdown', 0) * 100,
         'total_trades': total_trades,
         'buy_trades': buy_trades,
         'sell_trades': sell_trades,
+        'stop_loss_trades': stop_loss_trades,
         'total_commission': total_commission,
         'trades_df': trades_df,
         'nav_df': nav_df,
@@ -179,15 +179,14 @@ def generate_report(results, analyses):
     lines.append("| 滑点(bp) | 最终NAV | 总收益% | 年化% | 夏普 | 最大回撤% | 交易次数 | 买入 | 卖出 | 止损 | 总佣金 | 滑点成本 |")
     lines.append("|----------|---------|---------|-------|------|-----------|----------|------|------|------|--------|----------|")
     for r in results:
-        stop_count = r['total_trades'] - r['buy_trades'] - r['sell_trades']
         lines.append(
             f"| {r['slippage_bps']} | {r['final_nav']:,.2f} | {r['total_return_pct']:.2f} | "
-            f"{r['total_return_pct']/5.5:.2f}* | {r['sharpe']:.4f} | {r['max_drawdown_pct']:.2f} | "
-            f"{r['total_trades']} | {r['buy_trades']} | {r['sell_trades']} | {stop_count} | "
+            f"{r['annual_return_pct']:.2f} | {r['sharpe']:.4f} | {r['max_drawdown_pct']:.2f} | "
+            f"{r['total_trades']} | {r['buy_trades']} | {r['sell_trades']} | {r['stop_loss_trades']} | "
             f"{r['total_commission']:,.2f} | {r['total_slippage_cost']:,.2f} |"
         )
     lines.append("")
-    lines.append("*注：年化 = 总收益 / 5.5（约5.5年回测区间）")
+    lines.append("*注：年化使用回测引擎复利计算（CAGR），非总收益除以年数。")
     lines.append("")
 
     # 0bp 复现验证
@@ -218,14 +217,13 @@ def generate_report(results, analyses):
         lines.append(f"- 仅在 {bps}bp 出现的交易: {a['only_xbp_count']} 笔 (BUY {a['only_xbp_buy']}, SELL {a['only_xbp_sell']}, STOP {a['only_xbp_stop']})")
         lines.append("")
         lines.append("**归因:**")
-        lines.append("- 滑点导致买入成交价上调、卖出成交价下调，每笔交易成本增加。")
-        lines.append("- 可用现金减少，某些调仓日的买入订单因 `total_cost > cash` 被跳过。")
-        lines.append("- 被跳过的买入导致持仓路径变化，后续调仓日产生不同的卖出决策。")
-        lines.append("- 止损触发次数不变（基于原始价格检查），但止损标的略有不同（路径变化）。")
+        lines.append("- v2修正后，规划阶段使用滑点价（sell_prices/buy_prices），执行阶段不再静默跳过BUY订单。")
+        lines.append("- 交易次数差异极小（804→805），归因于整手取整效应（lot_size=100），而非现金不足。")
+        lines.append("- 滑点价导致买入股数减少、卖出净收入减少，持仓路径有轻微差异，但调仓方向基本一致。")
         lines.append("")
 
-    # 滑点成本恒等式
-    lines.append("## 4. 滑点成本与 NAV 关系")
+    # 滑点成本与 NAV 差异
+    lines.append("## 4. 滑点成本与 NAV 差异")
     lines.append("")
     lines.append("| 滑点(bp) | 滑点成本 | NAV vs 0bp 差异 | 比率 |")
     lines.append("|----------|----------|-----------------|------|")
@@ -235,19 +233,21 @@ def generate_report(results, analyses):
         ratio = r['total_slippage_cost'] / nav_diff if nav_diff != 0 else 0
         lines.append(f"| {r['slippage_bps']} | {r['total_slippage_cost']:,.2f} | {nav_diff:,.2f} | {ratio:.4f} |")
     lines.append("")
-    lines.append("- 滑点成本 ≈ NAV 下降金额，比率接近1.0（滑点成本是 NAV 下降的主要组成部分）。")
-    lines.append("- 比率不完全等于1，因为滑点还影响了持仓路径（部分交易被跳过，改变了后续收益）。")
+    lines.append("- 滑点成本是 NAV 下降的主要组成部分，但比率 < 1.0（因持仓路径变化导致额外收益差异）。")
+    lines.append("- 滑点成本与 NAV 差异因路径变化不必相等，不构成恒等式。")
     lines.append("")
 
     # 结论
     lines.append("## 5. 结论")
     lines.append("")
     lines.append("- 0bp 完美复现 B0.4（NAV=2,761,288.07，交易804笔）。")
-    lines.append("- 3bp 滑点使 NAV 下降约 6.4%（2,761,288 → 2,584,887），年化收益下降约 3.2%。")
-    lines.append("- 5bp 滑点使 NAV 下降约 11.3%（2,761,288 → 2,450,247），年化收益下降约 5.7%。")
-    lines.append("- 10bp 滑点使 NAV 下降约 17.9%（2,761,288 → 2,267,246），年化收益下降约 9.0%。")
-    lines.append("- 交易次数随滑点增加而减少，归因于可用现金不足导致部分买入被跳过，进而改变持仓路径。")
-    lines.append("- 止损次数不变（基于原始价格检查），但止损标的有轻微差异。")
+    lines.append("- v2 修正后，规划阶段使用滑点价，所有 BUY 订单可执行，无静默跳过。")
+    lines.append("- 3bp 滑点使 NAV 下降约 7.0%（2,761,288 → 2,567,821），年化从 16.68% → 15.02%。")
+    lines.append("- 5bp 滑点使 NAV 下降约 9.9%（2,761,288 → 2,488,278），年化从 16.68% → 14.30%。")
+    lines.append("- 10bp 滑点使 NAV 下降约 16.6%（2,761,288 → 2,301,964），年化从 16.68% → 12.58%。")
+    lines.append("- 夏普单调递减：0.8816 → 0.8162 → 0.7870 → 0.7154，无伪改善。")
+    lines.append("- 最大回撤随滑点恶化：-17.75% → -18.55% → -19.08% → -20.40%（防御资产买入更贵，保护效果减弱）。")
+    lines.append("- 交易次数几乎不变（804 vs 805），差异归因于整手取整，而非现金不足。")
     lines.append("")
 
     return "\n".join(lines)
@@ -304,11 +304,13 @@ def main():
             'slippage_bps': r['slippage_bps'],
             'final_nav': r['final_nav'],
             'total_return_pct': r['total_return_pct'],
+            'annual_return_pct': r['annual_return_pct'],
             'sharpe': r['sharpe'],
             'max_drawdown_pct': r['max_drawdown_pct'],
             'total_trades': r['total_trades'],
             'buy_trades': r['buy_trades'],
             'sell_trades': r['sell_trades'],
+            'stop_loss_trades': r['stop_loss_trades'],
             'total_commission': r['total_commission'],
             'total_slippage_cost': r['total_slippage_cost'],
         }

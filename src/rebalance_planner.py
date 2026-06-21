@@ -61,7 +61,7 @@ def plan_rebalance_v2_5(
     current_positions: Dict[str, int],  # ticker -> shares
     industry_candidates: List[Tuple[str, float]],  # [(ticker, score), ...] 任意顺序
     defense_candidates: List[Tuple[str, float]],  # [(ticker, score), ...] 任意顺序
-    prices: Dict[str, float],  # ticker -> 当日交易价格（用于执行）
+    prices: Dict[str, float],  # ticker -> 当日市场价（用于估值和可交易性判断）
     industry_tickers: Set[str],
     defense_tickers: Set[str],
     last_prices: Optional[Dict[str, float]] = None,  # 最近有效价格（用于缺价估值）
@@ -73,6 +73,8 @@ def plan_rebalance_v2_5(
     commission_rate: float = 0.0003,
     min_commission: float = 5.0,
     lot_size: int = 100,
+    sell_prices: Optional[Dict[str, float]] = None,  # 卖出价（滑点后的），默认=prices
+    buy_prices: Optional[Dict[str, float]] = None,   # 买入价（滑点后的），默认=prices
 ) -> Tuple[List[Dict], Dict]:
     """
     v2.5 纯函数：顺序独立，防御让路，总仓位受控，缺价不强制归零
@@ -90,6 +92,10 @@ def plan_rebalance_v2_5(
     # 按评分重新排序，确保内部顺序一致（消除传入顺序依赖）
     industry_candidates = sorted(industry_candidates, key=lambda x: (-x[1], x[0]))
     defense_candidates = sorted(defense_candidates, key=lambda x: (-x[1], x[0]))
+
+    # 默认执行价格=估值价格（向后兼容，无滑点时行为不变）
+    sell_prices = sell_prices if sell_prices is not None else prices
+    buy_prices = buy_prices if buy_prices is not None else prices
 
     industry_score_map = {t: s for t, s in industry_candidates}
     defense_score_map = {t: s for t, s in defense_candidates}
@@ -159,7 +165,7 @@ def plan_rebalance_v2_5(
         if t not in working_positions:
             continue
         shares = working_positions[t]
-        price = prices.get(t, 0)
+        price = sell_prices.get(t, 0)
         if price is None or price <= 0 or shares <= 0:
             continue  # 缺价无法卖出
         amount = shares * price
@@ -203,7 +209,7 @@ def plan_rebalance_v2_5(
         for t, shares, _ in current_defense:
             if slots_needed <= 0:
                 break
-            price = prices.get(t, 0)
+            price = sell_prices.get(t, 0)
             if price is None or price <= 0 or shares <= 0:
                 continue
             amount = shares * price
@@ -237,7 +243,7 @@ def plan_rebalance_v2_5(
     # 先计算所有订单的目标股数（未缩放）
     industry_buy_orders = []
     for t in buy_industry:
-        price = prices.get(t, 0)
+        price = buy_prices.get(t, 0)
         if price is None or price <= 0:
             continue
         shares = _calc_buy_shares(per_etf_target, price, lot_size)
@@ -287,7 +293,7 @@ def plan_rebalance_v2_5(
         for t, shares, _ in current_defense:
             if cash_shortfall <= 0 and position_excess <= 0:
                 break
-            price = prices.get(t, 0)
+            price = sell_prices.get(t, 0)
             if price is None or price <= 0 or shares <= 0:
                 continue
 
@@ -441,7 +447,7 @@ def plan_rebalance_v2_5(
 
         defense_orders = []
         for t in new_defense:
-            price = prices.get(t, 0)
+            price = buy_prices.get(t, 0)
             if price is None or price <= 0:
                 continue
             shares = _calc_buy_shares(defense_per_etf, price, lot_size)
