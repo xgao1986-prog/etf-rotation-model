@@ -271,8 +271,9 @@ def analyze_survivorship_bias_v4() -> Dict[str, Any]:
                 'sector_name': sector_name,
                 'period': f"{actual_start} ~ {actual_end}",
                 'replacement': '无',
-                'has_deviation': True,
-                'reason': f'策略池无 {sector_name}({sector}) 的 ETF，存在行业敞口缺失',
+                'has_deviation': False,  # v4 修正：降为待验证，未完成全市场检查
+                'status': '待验证',
+                'reason': f'策略池无 {sector_name}({sector}) 的 ETF，但未完成全市场同指数ETF检查，不能确认行业敞口缺失。',
             })
         else:
             # 有潜在替代，验证日期重叠
@@ -292,14 +293,15 @@ def analyze_survivorship_bias_v4() -> Dict[str, Any]:
                 'replacement_db_first': repl_info['db_first_date'],
                 'is_valid': is_valid,
                 'valid_reason': reason,
-                'has_deviation': not is_valid,
-                'reason': f'潜在替代 {replacement} 日期不重叠：{reason}' if not is_valid else '替代有效',
+                'has_deviation': False,  # v4 修正：降为待验证，未完成全市场检查
+                'status': '待验证',
+                'reason': f'潜在替代 {replacement} 日期不重叠：{reason}；但未完成全市场同指数ETF检查，不能确认行业敞口缺失。',
             })
     
     # ---- B. 固定池回看偏差（与 A 基于相同 3 只 ETF，角度不同） ----
     # 固定池回看偏差是指：用当前固定池（18只）回看历史，但历史上存在其他可交易 ETF 未被纳入池内。
     # 即使这些历史 ETF 已退市，回测的「固定池」仍遗漏了它们。
-    # 这里我们直接引用 A 的结果，因为本质上是同一批 ETF 的另一种表述。
+    # B类与A类不同：B类不依赖替代验证，仅确认"固定池遗漏了历史上可交易的ETF"这一事实。
     for item in results['class_a_deviation']:
         results['class_b_deviation'].append({
             'ticker': item['ticker'],
@@ -308,9 +310,8 @@ def analyze_survivorship_bias_v4() -> Dict[str, Any]:
             'sector_name': item['sector_name'],
             'period': item['period'],
             'replacement': item.get('replacement', '无'),
-            'has_deviation': item['has_deviation'],
-            'reason': item['reason'],
-            'note': '固定池回看偏差：当前策略池在回测期间遗漏了该已退市 ETF，即使它当时可交易。',
+            'has_deviation': True,  # B类保留：固定池遗漏历史上可交易ETF是事实
+            'reason': f'固定池回看偏差：当前策略池在回测期间遗漏了该已退市 ETF（{item["period"]}），即使它当时可交易。',
         })
     
     # ---- C. ETF 尚未上市（仅基于已验证的 159996.SZ） ----
@@ -414,16 +415,24 @@ def analyze_survivorship_bias_v4() -> Dict[str, Any]:
     # 5. 结论（极度保守，仅用已验证记录）
     # ------------------------------------------------------------------------
     
-    # 统计已确认存在 A/B 类偏差的行业
-    affected_sectors = set()
+    # A类：退市幸存者偏差 — 降为待验证（未完成全市场同指数ETF检查）
+    a_class_sectors = set()
     for item in results['class_a_deviation']:
+        a_class_sectors.add(item['sector'])
+    
+    # B类：固定池回看偏差 — 已确认（固定池遗漏历史上可交易ETF是事实）
+    b_class_sectors = set()
+    for item in results['class_b_deviation']:
         if item['has_deviation']:
-            affected_sectors.add(item['sector'])
+            b_class_sectors.add(item['sector'])
     
     results['conclusions'] = {
-        'affected_sectors_count': len(affected_sectors),
-        'affected_sectors': sorted(list(affected_sectors)),
-        'affected_sector_names': [SW_SECTOR_NAMES.get(s, '未知') for s in sorted(affected_sectors)],
+        'a_class_sectors_count': len(a_class_sectors),
+        'a_class_sectors': sorted(list(a_class_sectors)),
+        'a_class_sector_names': [SW_SECTOR_NAMES.get(s, '未知') for s in sorted(list(a_class_sectors))],
+        'b_class_sectors_count': len(b_class_sectors),
+        'b_class_sectors': sorted(list(b_class_sectors)),
+        'b_class_sector_names': [SW_SECTOR_NAMES.get(s, '未知') for s in sorted(list(b_class_sectors))],
         'verified_terminated_count': sum(1 for v in VERIFIED_ETFS.values() if v['status'] == 'terminated'),
         'verified_active_count': sum(1 for v in VERIFIED_ETFS.values() if v['status'] == 'active'),
         'unverified_pool_count': sum(1 for v in STRATEGY_POOL.values() if not v['verified']),
@@ -457,9 +466,11 @@ def generate_report_v4(output_path: Optional[str] = None) -> str:
     # ========================================================================
     # 标题
     # ========================================================================
-    lines.append("# Phase 7.1: ETF 幸存者偏差审计报告 v4（最终收口版）")
+    lines.append("# Phase 7.1: ETF 幸存者偏差审计报告 v4（最终收口版 — A类待验证/B类已确认）")
     lines.append("")
     lines.append("> 原则：仅用已验证记录（有权威来源 URL）形成结论。")
+    lines.append(">")
+    lines.append("> **v4 修订**：A类（退市幸存者偏差）降为**待验证**，B类（固定池回看偏差）保留**已确认**。未完成全市场同指数ETF检查前，不宣称基础化工、机械设备行业敞口缺失。")
     lines.append("")
     lines.append(f"- 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"- 回测区间：{BACKTEST_START} ~ {BACKTEST_END}")
@@ -477,6 +488,7 @@ def generate_report_v4(output_path: Optional[str] = None) -> str:
     lines.append("3. **替代 ETF 必须验证日期重叠**：检查替代 ETF 在被替代 ETF 空窗期或退市 ETF 存续期内是否也有数据，替代关系表中增加「替代有效？」列。")
     lines.append("4. **结论极度保守，不扩大化**：仅使用已验证记录（3只退市 + 1只存续）形成结论，其余策略池 ETF 因缺少官方来源不纳入结论。")
     lines.append("5. **修正 516690 上市交易日**：从 2021-12-07（基金合同生效日）修正为 2021-12-21（实际上市交易日）。")
+    lines.append("6. **v4 修订（本次）**：A类（退市幸存者偏差）降为**待验证**，B类（固定池回看偏差）保留**已确认**。未完成全市场同指数ETF检查前，不宣称基础化工、机械设备行业敞口缺失。")
     lines.append("")
     
     # ========================================================================
@@ -535,7 +547,7 @@ def generate_report_v4(output_path: Optional[str] = None) -> str:
         for item in results['class_a_deviation']:
             repl = item.get('replacement', '无')
             valid = '是' if item.get('is_valid') else '否'
-            conclusion = '存在偏差' if item['has_deviation'] else '无偏差'
+            conclusion = item.get('status', '待验证')
             lines.append(f"| {item['ticker']} | {item['name']} | {item['sector_name']}({item['sector']}) | {item['period']} | {repl} | {valid} | {conclusion} |")
     else:
         lines.append("无已验证的退市 ETF 在回测区间内存续。")
@@ -543,9 +555,9 @@ def generate_report_v4(output_path: Optional[str] = None) -> str:
     lines.append("")
     
     # 详细说明
+    lines.append("**说明**：A类偏差（退市幸存者偏差）已降为**待验证**。原因：策略池内无替代ETF，但未完成全市场同指数ETF检查，不能确认是否存在其他可交易ETF覆盖了该行业敞口。")
     for item in results['class_a_deviation']:
-        if item['has_deviation']:
-            lines.append(f"- **{item['ticker']}**（{item['name']}）：{item['reason']}")
+        lines.append(f"- **{item['ticker']}**（{item['name']}）：{item['reason']}")
     lines.append("")
     
     # ---- B. 固定池回看偏差 ----
@@ -566,9 +578,9 @@ def generate_report_v4(output_path: Optional[str] = None) -> str:
     lines.append("")
     
     # 详细说明
+    lines.append("**说明**：B类偏差（固定池回看偏差）已确认。当前18只固定池确实遗漏了这3只历史上可交易的已退市ETF。")
     for item in results['class_b_deviation']:
-        if item['has_deviation']:
-            lines.append(f"- **{item['ticker']}**（{item['name']}）：{item['note']}")
+        lines.append(f"- **{item['ticker']}**（{item['name']}）：{item['reason']}")
     lines.append("")
     
     # ---- C. ETF 尚未上市 ----
@@ -636,23 +648,27 @@ def generate_report_v4(output_path: Optional[str] = None) -> str:
     
     conc = results['conclusions']
     
-    lines.append(f"1. **已确认存在 A/B 类偏差（退市/固定池回看）**：{conc['affected_sectors_count']} 个行业")
-    if conc['affected_sectors']:
-        sector_desc = ", ".join([f"{name}({code})" for code, name in zip(conc['affected_sectors'], conc['affected_sector_names'])])
-        lines.append(f"   - {sector_desc}")
-        
-        # 详细说明每个行业
-        for sector in conc['affected_sectors']:
-            sector_name = SW_SECTOR_NAMES.get(sector, '未知')
-            if sector == '801030':
-                lines.append(f"   - 基础化工（801030）：516690 在回测期间存续（2021-12-21 ~ 2024-08-27），策略池无化工 ETF，存在行业敞口缺失。")
-            elif sector == '801890':
-                lines.append(f"   - 机械设备（801890）：512310（2015-04-08 ~ 2021-01-07）和 159953（2017-06-13 ~ 2020-12-16）在回测期间存续，策略池潜在替代 159530.SZ 数据库首日为 2024-01-18，在退市 ETF 存续期内无数据，替代无效。")
+    lines.append(f"1. **A类：退市幸存者偏差 — 待验证**（涉及 {conc['a_class_sectors_count']} 个行业）")
+    if conc['a_class_sectors']:
+        sector_desc = ", ".join([f"{name}({code})" for code, name in zip(conc['a_class_sectors'], conc['a_class_sector_names'])])
+        lines.append(f"   - 涉及行业：{sector_desc}")
+        lines.append(f"   - 策略池内无替代ETF，但**未完成全市场同指数ETF检查**，不能确认是否存在其他可交易ETF覆盖了该行业敞口。")
+        lines.append(f"   - 在确认全市场无替代之前，**不宣称**基础化工、机械设备行业敞口缺失。")
     else:
-        lines.append("   - 无已确认的行业存在 A/B 类偏差。")
+        lines.append("   - 无待验证的行业。")
     
     lines.append("")
-    lines.append("2. **已确认 C/D 类但仅 159996.SZ 一例**：")
+    lines.append(f"2. **B类：固定池回看偏差 — 已确认**（涉及 {conc['b_class_sectors_count']} 个行业）")
+    if conc['b_class_sectors']:
+        sector_desc = ", ".join([f"{name}({code})" for code, name in zip(conc['b_class_sectors'], conc['b_class_sector_names'])])
+        lines.append(f"   - 涉及行业：{sector_desc}")
+        lines.append(f"   - 3只已验证退市ETF（512310/159953/516690）在回测期间可交易，当前18只固定池确实遗漏了它们。")
+        lines.append(f"   - 这是固定池回看偏差的定性确认，不涉及行业敞口是否被其他ETF覆盖。")
+    else:
+        lines.append("   - 无已确认的行业。")
+    
+    lines.append("")
+    lines.append("3. **已确认 C/D 类但仅 159996.SZ 一例**：")
     if results['class_c_deviation']:
         for item in results['class_c_deviation']:
             lines.append(f"   - {item['gap_period']}：ETF 尚未上市（C 类，非偏差），共 {item['days']} 天。")
@@ -662,13 +678,13 @@ def generate_report_v4(output_path: Optional[str] = None) -> str:
     lines.append("   - 仅 159996.SZ 可确认 C/D 类，其余 17 只因无官方来源无法确认。")
     
     lines.append("")
-    lines.append(f"3. **其余 {conc['unverified_pool_count']} 只策略池 ETF**：因缺少官方来源验证的上市日期，无法确认其空窗原因是「ETF 未上市」还是「数据缺失」，**不纳入结论**。数据库首日仅反映数据收集起始，不等同于上市日。")
+    lines.append(f"4. **其余 {conc['unverified_pool_count']} 只策略池 ETF**：因缺少官方来源验证的上市日期，无法确认其空窗原因是「ETF 未上市」还是「数据缺失」，**不纳入结论**。数据库首日仅反映数据收集起始，不等同于上市日。")
     
     lines.append("")
-    lines.append("4. **v2 中其余约 74 只退市 ETF**：全部标记为「未验证」，不纳入结论。")
+    lines.append("5. **v2 中其余约 74 只退市 ETF**：全部标记为「未验证」，不纳入结论。")
     
     lines.append("")
-    lines.append("**总结**：v4 不再宣称「9 个行业均存在实质性幸存者偏差」。基于已验证的 3 只退市 ETF，仅确认 2 个行业（801030 基础化工、801890 机械设备）在回测期间内有退市 ETF 存续且策略池无有效替代。其余策略池 ETF 因缺少官方来源验证，无法确认其偏差类型，不纳入结论。")
+    lines.append("**总结**：v4 不再宣称「9 个行业均存在实质性幸存者偏差」。基于已验证的 3 只退市 ETF，**B类（固定池回看偏差）已确认**：3只已退市ETF在回测期间可交易，当前固定池遗漏了它们。**A类（退市幸存者偏差）降为待验证**：未完成全市场同指数ETF检查前，不宣称基础化工、机械设备行业敞口缺失。其余策略池 ETF 因缺少官方来源验证，不纳入结论。")
     lines.append("")
     
     # ========================================================================
@@ -677,9 +693,10 @@ def generate_report_v4(output_path: Optional[str] = None) -> str:
     lines.append("## 七、建议与后续行动")
     lines.append("")
     lines.append("1. **本次不修改策略**：偏差需量化后才能评估影响，当前仅完成定性识别。")
-    lines.append("2. **已确认偏差行业建议补充历史代理**：801030（基础化工）和 801890（机械设备）建议补充申万行业指数作为历史代理，以评估回测偏差的具体影响。")
-    lines.append("3. **其余策略池 ETF 需获取官方来源验证**：通过基金公司公告或交易所公告获取其余 17 只 ETF 的准确上市日期，确认后方可判断 C/D 类偏差。")
-    lines.append("4. **不进入 Phase 7.2**：Phase 7.1 已收口，仅保留定性结论，不进行策略修改。")
+    lines.append("2. **B类（固定池回看偏差）已确认**：当前18只固定池确实遗漏了3只历史上可交易的已退市ETF。如需评估影响，可测试'冻结当时可交易池'方法。")
+    lines.append("3. **A类（退市幸存者偏差）待验证**：在确认全市场无同指数/同行业替代ETF之前，不宣称行业敞口缺失。不扩展验证74只ETF。")
+    lines.append("4. **其余策略池 ETF 需获取官方来源验证**：通过基金公司公告或交易所公告获取其余 17 只 ETF 的准确上市日期，确认后方可判断 C/D 类偏差。")
+    lines.append("5. **不进入 Phase 7.2**：Phase 7.1 已收口，仅保留定性结论，不进行策略修改。")
     lines.append("")
     
     # ========================================================================
@@ -690,6 +707,7 @@ def generate_report_v4(output_path: Optional[str] = None) -> str:
     lines.append("## 附录：版本历史")
     lines.append("")
     lines.append("- **v4**（最终收口版）：极度保守，4 类偏差拆分，替代日期重叠验证，仅用已验证记录。")
+    lines.append("- **v4 修订**：A类（退市幸存者偏差）降为待验证，保留B类（固定池回看偏差）。未完成全市场同指数ETF检查前，不宣称行业敞口缺失。")
     lines.append("- v3：初步分析，含 516690 上市日错误（2021-12-07 合同生效日误作上市日）。")
     lines.append("- v2：扩大化分析，含约 74 只退市 ETF，但多数未验证。")
     lines.append("")
@@ -706,7 +724,8 @@ def generate_report_v4(output_path: Optional[str] = None) -> str:
     print(f"[INFO] 回测区间：{BACKTEST_START} ~ {BACKTEST_END}")
     print(f"[INFO] 已验证 ETF：{len(results['verified_etfs'])} 只（{conc['verified_terminated_count']} 只退市 + {conc['verified_active_count']} 只存续）")
     print(f"[INFO] 策略池未验证：{conc['unverified_pool_count']}/{conc['total_pool_count']} 只")
-    print(f"[INFO] 已确认 A/B 类偏差行业：{conc['affected_sectors_count']} 个")
+    print(f"[INFO] A类（退市幸存者偏差）待验证行业：{conc['a_class_sectors_count']} 个")
+    print(f"[INFO] B类（固定池回看偏差）已确认行业：{conc['b_class_sectors_count']} 个")
     
     return report
 
