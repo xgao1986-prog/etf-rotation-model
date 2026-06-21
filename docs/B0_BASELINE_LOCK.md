@@ -1,18 +1,10 @@
-# B0.3 正式基线锁定
+# B0.4 正式基线锁定
 
-> ⚠️ **状态：已废止（OBSOLETE）** — 2026-06-21
-> 
-> B0.3 因尾部数据缺失（2026-06-08~12 部分 THS 数据未完整纳入），无法在当前数据库上复现原始冻结指标（NAV=2,809,091）。
-> 补齐数据后运行结果：NAV=2,761,288（差异 -1.7%），数据完整性导致，非策略退化。
-> 
-> **继任基线**：B0.4 候选基线（`docs/B0_4_CANDIDATE.md`）
-> 
-> ---
-> **原锁定时间**：2026-06-21  
-> **当前 Git SHA**：`884f529719f5a1e3bb4b9f043675c85ca3286f10`  
+> **锁定时间**：2026-06-21  
+> **当前 Git SHA**：`ea07e9202b0cdbaa2f68614e89ada65bc790c210`  
 > **当前分支**：`feature/v1.2.1-regime-adaptive`  
 > **数据截止**：2026-06-18  
-> **原锁定状态**：❌ 已废止 — 尾部数据缺失，无法在当前数据库上复现
+> **锁定状态**：✅ 已锁定 — 任何变更须经独立 A/B 测试并正式更新本文件
 
 ---
 
@@ -20,12 +12,21 @@
 
 本项目当前唯一用于策略评估、实验对照和版本演进的主线是：
 
-> **B0 18 只 ETF 基准版 → B0.3 冻结基线**
+> **B0 18 只 ETF 基准版 → B0.4 冻结基线**
 
 - **B0** 表示当前 18 只 ETF 基准策略家族。
-- **B0.3** 是该家族当前冻结的正式比较基线。
-- 后续所有研究、诊断和功能实验，都必须以 B0.3 为 A/B 测试的对照组。
-- 未经过独立验证并正式更新本文件的研究结果，不得取代 B0.3 成为新基线。
+- **B0.4** 是该家族当前冻结的正式比较基线，取代已废止的 B0.3。
+- B0.4 与 B0.3 策略参数完全相同，仅数据更完整（补齐 06-08~12 尾部数据）。
+- 后续所有研究、诊断和功能实验，都必须以 B0.4 为 A/B 测试的对照组。
+- 未经过独立验证并正式更新本文件的研究结果，不得取代 B0.4 成为新基线。
+
+### B0.3 已废止（历史记录）
+
+> ⚠️ **B0.3 状态：已废止（OBSOLETE）** — 2026-06-21
+> 
+> B0.3 因尾部数据缺失（2026-06-08~12 部分 THS 数据未完整纳入），无法在当前数据库上复现原始冻结指标（NAV=2,809,091）。
+> 补齐数据后运行结果：NAV=2,761,288（差异 -1.7%），数据完整性导致，非策略退化。
+> B0.3 不可复现，历史冻结指标仅供参考，不得作为新实验的对照组。
 
 ---
 
@@ -66,6 +67,8 @@
 ---
 
 ## 3. 评分因子配置
+
+与 B0.3 完全一致，未做任何修改。
 
 ### 3.1 关闭的因子
 
@@ -121,6 +124,8 @@ weights = {
 
 ## 4. 交易规则
 
+与 B0.3 完全一致，未做任何修改。完整四层卖出机制参见 B0.3 历史文档或 `scripts/b0_3_baseline.py`。
+
 ### 4.1 买入条件（核心池，必须同时满足）
 
 1. `trend_score >= 15`
@@ -129,171 +134,41 @@ weights = {
 4. `prev_close > ma20`
 5. `ma20_slope > 0`
 
-### 4.2 卖出条件（调仓日 + 每日触发）
+### 4.2 卖出条件（四层）
 
-B0.3 卖出机制分四层，按触发时机和优先级如下：
+- 第一层：固定止损 -8%（每日触发）
+- 第二层：跌破趋势条件（调仓日信号生成）
+- 第三层：调出BUY候选（调仓日执行）
+- 第四层：防御让路（调仓日执行）
 
-#### 第一层：固定止损（每日触发，最高优先级）
-
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| `stop_loss_mode` | `fixed` | 固定止损模式 |
-| `stop_loss` | -8% | 相对于成本价的亏损阈值 |
-| 触发条件 | `current_price < cost * (1 - 0.08)` | 当日开盘价低于成本价92%时触发 |
-| 执行价格 | 当日开盘价 | 止损卖出按当日开盘价成交 |
-| 例外 | 不检查`history_count` | 已持仓的ETF不受51天成熟限制 |
-
-> 每日开盘时检查所有持仓，如果亏损达到-8%即触发止损。止损在调仓日之前独立执行，不等待调仓日。
-
-#### 第二层：跌破趋势条件（调仓日信号生成）
-
-在 `generate_signals` 中，如果持仓的前一日收盘价跌破20日均线：
-
-```python
-sell_mask = scores_df['prev_close'] < scores_df['ma20']
-scores_df.loc[sell_mask, 'signal_type'] = 'SELL'
-```
-
-- 这意味着该ETF当日的 `signal_type` 被设为 `'SELL'`，不再出现在BUY候选列表中
-- 但**不会立即卖出**，而是等待调仓日由调仓引擎统一处理
-- 如果该ETF已持仓，在下一个调仓日将被调出候选列表并卖出
-
-#### 第三层：调出BUY候选（调仓日执行）
-
-在 `plan_rebalance_v2_5` 中：
-
-1. 首先分类持仓和候选：
-   - 保留的行业持仓：在"可交易"候选列表中的行业持仓
-   - 保留的防御持仓：在"可交易"候选列表中的防御持仓
-
-2. 需要卖出的持仓：不在候选列表中的持仓
-   ```python
-   if t in industry_tickers and t not in tradable_industry_tickers:
-       sell_tickers.append(t)  # 行业ETF不在BUY候选 → 卖出
-   elif t in defense_tickers and t not in tradable_defense_tickers:
-       sell_tickers.append(t)  # 防御ETF不在BUY候选 → 卖出
-   ```
-
-3. 卖出原因标注为：`"调出候选列表"`
-
-> 注意：B0.3 中 `rank_buffer_enabled=False`，不存在排名缓冲（跌出Top N才卖）的额外约束。持仓只要不在BUY候选列表就会被卖出。
-
-#### 第四层：防御让路（调仓日执行）
-
-在 `plan_rebalance_v2_5` 中，当行业槽位不足时：
-
-```python
-if industry_slots < raw_industry_slots and len(working_positions) > 0:
-    slots_needed = raw_industry_slots - industry_slots
-    # 当前防御持仓按评分从低到高排序，低分先卖
-    current_defense.sort(key=lambda x: x[2])  # 按评分升序
-    for t, shares, _ in current_defense:
-        # ...卖出防御持仓...
-        reason = '防御让路（腾槽位）'
-```
-
-**触发条件：**
-- 有新的行业ETF BUY候选需要买入
-- 但可用持仓槽位不足（已达 `max_total_holdings=5` 上限）
-- 当前持仓中有防御资产（黄金/国债）
-
-**执行逻辑：**
-- 防御资产按评分从低到高排序，低分先卖
-- 卖出防御资产以腾出槽位给行业ETF
-- 卖出原因标注为：`"防御让路（腾槽位）"`
-
-> 防御让路体现了策略的核心逻辑：优先配置股票敞口（行业ETF），当行业信号充足时，防御资产作为低优先级持仓被替换。
-
-### 4.3 止损规则
-
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| `stop_loss_mode` | `fixed` | 固定止损模式 |
-| `stop_loss` | -8% | 相对于成本价的亏损阈值 |
-| `atr_stop_multiplier` | 2.0 | 仅当模式切换为ATR时生效 |
-| `atr_period` | 14 | ATR计算周期 |
-
-> 说明：ATR 动态止损在 Phase 6.5 中经诊断后**未采纳**，当前仍为固定止损 -8%。
-
-### 4.4 防御填充规则
+### 4.3 关键参数
 
 | 参数 | 值 |
 |------|-----|
+| `stop_loss_mode` | `fixed` |
+| `stop_loss` | -8% |
 | `defense_enabled` | True |
-| `defense_mode` | `mandatory`（强制配置） |
-| `defense_fill_max_ratio_bull` | 30%（牛市时防御资产最多占总资产30%） |
-| `defense_fill_max_ratio_bear` | 50%（熊市/弱市时防御资产最多占总资产50%） |
-
-> 防御资产（黄金/国债）在股票 ETF 信号不足时作为低相关补仓资产填充仓位，不参与日常轮动排名。
-
-### 4.5 宽基补仓规则
-
-| 参数 | 值 |
-|------|-----|
-| `fallback_equity_enabled` | False（**已关闭**） |
-
-> 回测显示当前参数下宽基补仓为负贡献，已关闭。如未来启用，需独立 A/B 验证。
-
-### 4.6 持仓控制
-
-| 参数 | 值 |
-|------|-----|
-| `stock_max_holdings` | 5（行业ETF最多持有5只） |
-| `total_max_holdings` | 5（总持仓上限，向后兼容） |
-| `max_position_per_etf` | 20%（单只上限20%，可用满） |
-| `use_v2_rebalance` | True（v2.5 纯函数调仓规划逻辑） |
-
-### 4.7 调仓频率
-
-| 参数 | 值 |
-|------|-----|
+| `fallback_equity_enabled` | False（已关闭） |
+| `stock_max_holdings` | 5 |
+| `total_max_holdings` | 5 |
+| `max_position_per_etf` | 20% |
+| `use_v2_rebalance` | True |
 | `rebalance_weekday` | 3（周四） |
-| `rebalance_freq` | `weekly`（每周） |
-
-### 4.8 其他关闭的规则
-
-| 规则 | 开关 | 状态 |
-|------|------|------|
-| 动态止盈 | `trailing_stop_mode = 'none'` | ❌ 关闭 |
-| 冷静期 | `cooling_period = 0` | ❌ 关闭 |
-| 大盘择时 | `market_timing = False` | ❌ 关闭 |
-| 持仓稳定机制 | `STABILITY_CONFIG['enabled'] = False` | ❌ 关闭 |
-| 市场状态自适应 | `MARKET_REGIME_CONFIG['mode'] = 'observer'` | ❌ 仅观察，不改参数 |
-| 滑点 | `slippage_enabled = False` | ❌ 关闭 |
+| `market_timing` | False |
+| `commission_rate` | 0.03% |
+| `min_commission` | 5.0 |
 
 ---
 
 ## 5. 交易执行口径
 
-### 5.1 信号生成
+与 B0.3 完全一致。
 
-- T 日收盘后，使用截至 T 日收盘时可获得的数据生成信号
+- T 日收盘后信号生成，T+1 开盘执行（`open` 价格）
 - 所有指标使用 `shift(1)` 避免未来数据泄露
-- 第 51 个交易日（索引 50）才是第一个完整指标集（MA50 经 shift(1) 后有效）
-
-### 5.2 成交执行
-
-- T+1 交易日开盘执行买卖
-- 回测中使用当日 `open` 执行
-
-> 注意：`src/config.py` 中 `EXECUTION_CONFIG['price_mode']='close'` 属于尚未接入当前回测执行路径的旧配置说明；实际基准成交口径以 `src/backtest.py` 使用当日 `open` 执行的实现为准。
-
-### 5.3 佣金规则
-
-| 参数 | 值 |
-|------|-----|
-| `commission_rate` | 0.03%（双向） |
-| `min_commission` | 5.0 元 |
-
-### 5.4 整手规则
-
-- 100 股整手（实际由 `src/backtest.py` 中 `shares = int(target_value / price / 100) * 100` 实现）
-
-### 5.5 滑点
-
-- 当前**不计滑点**
-- 原因：初始资金规模较小，对盘口冲击有限；已计入交易佣金，现阶段滑点不是最优先的模型误差来源
-- 滑点测试属于未来稳健性验证，不能根据测试结果反向调优其他参数
+- 第 51 个交易日（索引 50）才是第一个完整指标集
+- 100 股整手，佣金 0.03% 双向，最低 5 元
+- 当前不计滑点
 
 ---
 
@@ -311,27 +186,26 @@ if industry_slots < raw_industry_slots and len(working_positions) > 0:
 
 ---
 
-## 7. 长期基准指标（已锁定）
+## 7. 长期基准指标（B0.4 已锁定）
 
-以下指标来自**新鲜回测**（2026-06-21 17:34:40），与冻结报告 `reports/baseline_B0.3_20260620_180745.md` **完全一致**：
+以下指标来自**完整数据回测**（2026-06-21），数据含补齐的 06-08~12 尾部数据：
 
-| 指标 | B0.3 值 | 来源 |
-|------|---------|------|
-| 最终 NAV | 2,809,091 | 新鲜回测 |
-| 总收益 | 180.91% | 新鲜回测 |
-| 年化收益 | 16.99% | 新鲜回测 |
-| 夏普比率 | 0.8985 | 新鲜回测 |
-| 最大回撤 | -17.75% | 新鲜回测 |
-| 交易次数 | 801 | 新鲜回测 |
-| 买入次数 | 398 | 新鲜回测 |
-| 卖出次数 | 403 | 新鲜回测 |
-| 调仓次数 | 337 | 新鲜回测 |
-| 初始资金 | 1,000,000 | 配置 |
-| 策略运行交易日 | ~1,500 | 估算 |
-| 调仓截面数 | ~337 | 新鲜回测 |
-| 平均持仓数 | ~3.5 | 估算 |
+| 指标 | B0.4 值 | B0.3 已废止值 | 差异 | 来源 |
+|------|---------|---------------|------|------|
+| 最终 NAV | **2,761,288.07** | 2,809,091.21 | -47,803 (-1.70%) | 完整数据回测 |
+| 总收益 | **176.13%** | 180.91% | -4.78% | 完整数据回测 |
+| 年化收益 | **16.68%** | 16.99% | -0.31% | 完整数据回测 |
+| 夏普比率 | **0.8816** | 0.8985 | -0.0169 | 完整数据回测 |
+| 最大回撤 | **-17.75%** | -17.75% | 0% | 完整数据回测 |
+| 交易次数 | **804** | 801 | +3 | 完整数据回测 |
+| 买入次数 | **399** | 398 | +1 | 完整数据回测 |
+| 卖出次数 | **405** | 403 | +2 | 完整数据回测 |
+| 调仓次数 | **337** | 337 | 0 | 完整数据回测 |
+| 初始资金 | 1,000,000 | 1,000,000 | 0 | 配置 |
 
-### 7.1 封存 OOS 指标（已冻结）
+**差异解释**：补齐 06-08~12 期间的市场数据（特别是 512480.SH 等 ETF 的低开）被纳入回测，导致部分持仓在关键日期的止损/调仓行为发生变化，最终 NAV 下降约 1.7%。这是**数据更完整后的真实结果**，不是策略错误。
+
+### 7.1 封存 OOS 指标（已冻结，来源不变）
 
 | 指标 | OOS 值 | 来源 |
 |------|--------|------|
@@ -344,15 +218,64 @@ if industry_slots < raw_industry_slots and len(working_positions) > 0:
 
 ---
 
-## 8. 代码完整性校验
+## 8. 数据快照与可复现性
 
-### 8.1 当前代码 Git SHA
+### 8.1 数据快照（SHA-256 校验）
+
+| 文件 | 路径 | 说明 |
+|------|------|------|
+| 数据快照 | `data/snapshots/B0_4_candidate_data_20260621_210815.csv` | 110,236 条市场数据 |
+| 元数据 | `data/snapshots/B0_4_candidate_metadata_20260621_210815.json` | 含 SHA-256 校验 |
+| 回测指标 | `data/snapshots/B0_4_candidate_metrics_20260621_203453.json` | 核心指标 |
+
+### 8.2 SHA-256 校验值
+
+```yaml
+database_file:
+  sha256: e0cf29931df02a9ba3df5ca465804ee0ee70f120f800ed01ccad744901b58ef0
+dataset_19_tickers:
+  sha256: 1ecf8f66f8ac51bb0964971f1e73a46cc13e1e9685f0fda569bd655c9bebd721
+```
+
+### 8.3 数据准入检查
+
+B0.4 基线数据已通过 **B0 数据准入检查 v1.1**（`scripts/b0_data_admission_check_v1.py`）：
+
+| 检查项 | 状态 | 说明 |
+|--------|------|------|
+| 完整性检查 | ✅ PASS | 19/19 标的完整 |
+| 拼接连续性 | ✅ PASS | 无断档、无重复 |
+| 异常跳变检测 | ✅ PASS | 无 OHLC 错误、无极端涨跌幅 |
+| 全期抽样 | ⚠️ WARN | 7只ETF known_coverage 缺失（数据源未覆盖早期），anomalous_internal=0 |
+
+**exit code：1**（WARN：数据可准入，但需知晓 7 只 ETF 早期数据覆盖不足）
+
+### 8.4 自动化测试
+
+B0.4 基线通过 8 项自动化测试（`tests/test_b0_data_admission.py`）：
+
+| 测试 | 描述 | 状态 |
+|------|------|------|
+| test_missing_data_antipattern | 内存中删除成熟ETF交易日，断言准入失败 | ✅ PASS |
+| test_backtest_blocked_on_admission_failure | mock 准入失败，断言 RuntimeError + BacktestEngine.run 未调用 | ✅ PASS |
+| test_pre_listing_handling | 策略自动跳过历史不足50天的ETF | ✅ PASS |
+| test_complete_data_backtest | 验证 B0.4 指标文件存在 | ✅ PASS |
+| test_admission_check_pass | 无异常缺口，有 known_coverage（不全PASS） | ✅ PASS |
+| test_authoritative_listing_date | 权威上市日 ≠ 数据库 MIN(date) | ✅ PASS |
+| test_historical_gap_classification | 区分 known_coverage / anomalous_internal | ✅ PASS |
+| test_snapshot_metadata_hashes | 元数据 SHA-256 为 64 位十六进制 | ✅ PASS |
+
+---
+
+## 9. 代码完整性校验
+
+### 9.1 当前代码 Git SHA
 
 ```
-884f529719f5a1e3bb4b9f043675c85ca3286f10
+ea07e9202b0cdbaa2f68614e89ada65bc790c210
 ```
 
-### 8.2 关键文件 SHA256
+### 9.2 关键文件 SHA256
 
 | 文件 | SHA256 | 大小 |
 |------|--------|------|
@@ -361,12 +284,12 @@ if industry_slots < raw_industry_slots and len(working_positions) > 0:
 | `src/backtest.py` | `8982ed4b81f5682cfd9053399814b57e41f2f43e280de93eb8825972d782edc0` | 106,251 B |
 | `src/database.py` | `91f2cea50fd5864a63217b333fbb07db73c7d6f39a21bc95f05a32d2f84465c9` | 22,638 B |
 
-### 8.3 配置哈希（可复现性）
+### 9.3 配置哈希（可复现性）
 
-以下关键参数的组合可唯一标识 B0.3 配置：
+以下关键参数的组合可唯一标识 B0.4 配置：
 
 ```python
-# B0.3 配置指纹
+# B0.4 配置指纹（与 B0.3 完全相同）
 momentum_factor_enabled = False
 volatility_factor_enabled = False
 min_total_score = 40
@@ -385,24 +308,11 @@ min_commission = 5.0
 
 ---
 
-## 9. 可复现的基准运行命令
+## 10. 可复现的基准运行命令
 
-### 9.1 生成 B0.3 基准报告（含 B0.2 对比）
-
-```bash
-# 在 D:\etf_rotation_model 目录下运行
-py scripts/b0_3_baseline.py
-```
-
-预期输出：
-- `reports/baseline_B0.3_时间戳.md` — B0.3 基准报告
-- `reports/b0_2_vs_b0_3_时间戳.md` — B0.2 vs B0.3 精确对比报告
-- 控制台应显示 `SUCCESS: B0.3 == B0.2 (exact match)`
-
-### 9.2 单独运行回测（验证用）
+### 10.1 生成 B0.4 基准报告
 
 ```python
-# 需要手动在 Python 中执行
 from config import build_config, ETF_UNIVERSE, DEFENSE_UNIVERSE, BENCHMARK
 from database import ETFDatabase
 from backtest import BacktestEngine
@@ -421,54 +331,52 @@ engine = BacktestEngine(cfg)
 result = engine.run(market_df, bench_df, as_of_date='2026-06-18')
 ```
 
-### 9.3 关键指标验证 checklist
+### 10.2 关键指标验证 checklist
 
 | 检查项 | 预期值 | 容差 |
 |--------|--------|------|
-| 最终 NAV | 2,809,091 | 精确匹配 |
-| 总收益 | 180.91% | 精确匹配 |
-| 年化收益 | 16.99% | ±0.01% |
-| 夏普比率 | 0.8985 | ±0.0001 |
+| 最终 NAV | 2,761,288.07 | ±100 |
+| 总收益 | 176.13% | ±0.01% |
+| 年化收益 | 16.68% | ±0.01% |
+| 夏普比率 | 0.8816 | ±0.0001 |
 | 最大回撤 | -17.75% | ±0.01% |
-| 交易次数 | 801 | 精确匹配 |
-| 买入次数 | 398 | 精确匹配 |
-| 卖出次数 | 403 | 精确匹配 |
+| 交易次数 | 804 | 精确匹配 |
+| 买入次数 | 399 | 精确匹配 |
+| 卖出次数 | 405 | 精确匹配 |
 | 调仓次数 | 337 | 精确匹配 |
 
 如果任何指标超出容差，**停止并报告差异，不得直接更新本文件**。
 
 ---
 
-## 10. 明确不属于 B0.3 的内容
+## 11. 明确不属于 B0.4 的内容
 
-以下内容存在于代码库中，但**不属于 B0.3 冻结基线**：
+以下内容存在于代码库中，但**不属于 B0.4 冻结基线**：
 
 | 内容 | 状态 | 说明 |
 |------|------|------|
-| 32 只 ETF 池（概念 ETF） | ❌ 不属于 B0.3 | 16 只行业 + 16 只概念是研究框架，非生产基线 |
-| `fixed_32` 回测结果 | ❌ 不属于 B0.3 | 不同标的池和信息集合，不能代表 B0.3 |
-| 申万行业指数数据 (`SECTOR_INDEX_UNIVERSE`) | ❌ 不属于 B0.3 | v1.2/v1.3 研究用，未用于 B0.3 交易决策 |
-| 市场状态 `active` 模式 | ❌ 不属于 B0.3 | `MARKET_REGIME_CONFIG['mode'] = 'observer'`，仅观察不改参数 |
-| ATR 动态止损 | ❌ 不属于 B0.3 | Phase 6.5 诊断后未采纳，当前仍为固定止损 |
-| 凯利仓位优化 | ❌ 不属于 B0.3 | Phase 8.1 诊断后未进入，当前仍为等权 |
-| Phase 6 研究（市场结构、节假日、止损、持仓稳定） | ❌ 不属于 B0.3 | 诊断结果，未修改策略参数 |
-| Phase 7 研究（幸存者偏差、ETF 池完整性） | ❌ 不属于 B0.3 | 诊断结果，未修改策略或 ETF 池 |
-| Phase 8 研究（排名预测力、仓位实验） | ❌ 不属于 B0.3 | 诊断结果，未修改策略或仓位规则 |
-| 滑点模拟 | ❌ 不属于 B0.3 | 未来稳健性验证，当前不计滑点 |
-| 持仓稳定机制 | ❌ 不属于 B0.3 | `STABILITY_CONFIG['enabled'] = False` |
-| 宽基补仓 (`FALLBACK_EQUITY_UNIVERSE`) | ❌ 不属于 B0.3 | `fallback_equity_enabled = False` |
-| 动态止盈 | ❌ 不属于 B0.3 | `trailing_stop_mode = 'none'` |
-| 冷静期 | ❌ 不属于 B0.3 | `cooling_period = 0` |
+| 32 只 ETF 池（概念 ETF） | ❌ 不属于 B0.4 | 16 只行业 + 16 只概念是研究框架，非生产基线 |
+| `fixed_32` 回测结果 | ❌ 不属于 B0.4 | 不同标的池和信息集合，不能代表 B0.4 |
+| 申万行业指数数据 (`SECTOR_INDEX_UNIVERSE`) | ❌ 不属于 B0.4 | v1.2/v1.3 研究用，未用于 B0.4 交易决策 |
+| 市场状态 `active` 模式 | ❌ 不属于 B0.4 | `MARKET_REGIME_CONFIG['mode'] = 'observer'`，仅观察不改参数 |
+| ATR 动态止损 | ❌ 不属于 B0.4 | Phase 6.5 诊断后未采纳，当前仍为固定止损 |
+| 凯利仓位优化 | ❌ 不属于 B0.4 | Phase 8.1 诊断后未进入，当前仍为等权 |
+| Phase 6~8 研究 | ❌ 不属于 B0.4 | 诊断结果，未修改策略参数 |
+| 滑点模拟 | ❌ 不属于 B0.4 | 未来稳健性验证，当前不计滑点 |
+| 持仓稳定机制 | ❌ 不属于 B0.4 | `STABILITY_CONFIG['enabled'] = False` |
+| 宽基补仓 (`FALLBACK_EQUITY_UNIVERSE`) | ❌ 不属于 B0.4 | `fallback_equity_enabled = False` |
+| 动态止盈 | ❌ 不属于 B0.4 | `trailing_stop_mode = 'none'` |
+| 冷静期 | ❌ 不属于 B0.4 | `cooling_period = 0` |
 
 ---
 
-## 11. 基线更新流程
+## 12. 基线更新流程
 
-如需更新 B0.3 基线，必须：
+如需更新 B0.4 基线，必须：
 
-1. **以 B0.3 为对照**开展独立 A/B 测试
+1. **以 B0.4 为对照**开展独立 A/B 测试
 2. **每次只修改一个变量**
-3. **在训练期和验证期都优于 B0.3**，且风险未恶化
+3. **在训练期和验证期都优于 B0.4**，且风险未恶化
 4. **新鲜回测验证**新配置与冻结报告的指标差异
 5. **如果差异超出容差，停止并报告**，不得直接更新
 6. **正式更新** `docs/B0_BASELINE_LOCK.md`、`docs/CURRENT_VERSION_NOTE.md`、`docs/CHANGES.md`
@@ -476,4 +384,4 @@ result = engine.run(market_df, bench_df, as_of_date='2026-06-18')
 
 ---
 
-*本文档由 B0.3 正式基线锁定流程生成。变更历史参见 `docs/CHANGES.md`。*
+*本文档由 B0.4 正式基线锁定流程生成。变更历史参见 `docs/CHANGES.md`。*

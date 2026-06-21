@@ -1,8 +1,8 @@
 # 当前工程现场
 
-**最后更新**：2026-06-21（B0数据准入检查v1.1最终收口：exit_code=0/1允许快照、mock回测入口测试、元数据哈希验证）
+**最后更新**：2026-06-21（B0.4 从候选基线转为正式冻结基线，更新 B0_BASELINE_LOCK、DECISIONS、CHANGES）
 **工作目录**：`D:\etf_rotation_model`
-**当前基线**：B0.4 候选基线 — 见 `docs/B0_4_CANDIDATE.md`（B0.3 已废止，见 `docs/B0_BASELINE_LOCK.md`）
+**当前基线**：**B0.4 正式冻结基线** — 见 `docs/B0_BASELINE_LOCK.md`（B0.3 已废止）
 
 ---
 
