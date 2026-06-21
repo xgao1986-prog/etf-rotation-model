@@ -3,7 +3,8 @@
 **最后更新**：2026-06-21  
 **工作目录**：`D:\etf_rotation_model`  
 **当前分支**：`feature/v1.2.1-regime-adaptive`  
-**HEAD**：`5057140`  
+**当前版本**：v1.2.3  
+**HEAD**：`5e28b75`  
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）  
 **数据截止**：2026-06-18
 
