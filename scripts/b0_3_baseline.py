@@ -31,14 +31,32 @@ AS_OF_DATE = '2026-06-18'
 
 
 def run_baseline(cfg, label):
-    """运行回测并返回结果"""
+    """运行回测并返回结果（B0.3：仅18只ETF）"""
     db = ETFDatabase()
     tickers = sorted(set(list(ETF_UNIVERSE.keys()) + list(DEFENSE_UNIVERSE.keys())))
+    assert len(tickers) == 18, f"B0.3 ETF池数量应为18，实际为{len(tickers)}"
+    
     market_df = db.get_market_data(ticker=tickers, start_date='2019-01-01', end_date=AS_OF_DATE)
     bench_df = db.get_market_data(ticker=BENCHMARK, start_date='2019-01-01', end_date=AS_OF_DATE)
     
+    # 断言：行情池中所有ticker都属于18只ETF
+    actual_market_tickers = set(market_df['ticker'].unique())
+    assert actual_market_tickers.issubset(set(tickers)), \
+        f"行情池中有不在18只ETF列表中的ticker: {actual_market_tickers - set(tickers)}"
+    
     engine = BacktestEngine(cfg)
     result = engine.run(market_df, bench_df, as_of_date=AS_OF_DATE)
+    
+    # 断言：所有交易中的ticker都属于18只ETF
+    if not result['trades_df'].empty:
+        trade_tickers = set(result['trades_df']['ticker'].unique())
+        assert trade_tickers.issubset(set(tickers)), \
+            f"交易中有不在18只ETF列表中的ticker: {trade_tickers - set(tickers)}"
+    
+    # 附加：确认实际参与回测的ETF数量
+    result['b0_3_tickers'] = tickers
+    result['b0_3_ticker_count'] = len(tickers)
+    
     return result
 
 
@@ -133,6 +151,9 @@ def main():
     
     print(f"\nB0.2 config: momentum=False, vol=old logic (broken thresholds)")
     print(f"B0.3 config: momentum=False, volatility_factor_enabled=False")
+    print(f"\nB0.3 实际加载ETF: {len(ETF_UNIVERSE) + len(DEFENSE_UNIVERSE)} 只")
+    print(f"  行业ETF: {len(ETF_UNIVERSE)} 只")
+    print(f"  防御ETF: {len(DEFENSE_UNIVERSE)} 只")
     
     # 运行两个回测
     print("\n[1/3] Running B0.2 (old logic)...")
@@ -140,6 +161,10 @@ def main():
     
     print("\n[2/3] Running B0.3 (explicit off)...")
     result_b03 = run_baseline(cfg_b03, "B0.3")
+    
+    # 验证：B0.3实际交易的所有ticker都属于18只ETF
+    print(f"\n  B0.3 验证: 实际交易ticker {len(set(result_b03['trades_df']['ticker'].unique()))} 只")
+    print(f"  全部属于18只ETF池: {set(result_b03['trades_df']['ticker'].unique()).issubset(set(result_b03['b0_3_tickers']))}")
     
     # 精确对比
     print("\n[3/3] Exact comparison...")
@@ -182,6 +207,14 @@ def main():
     lines.append(f"| stop_loss | {cfg_b03['stop_loss']:.0%} |")
     lines.append(f"| max_position_per_etf | {cfg_b03['max_position_per_etf']:.0%} |")
     lines.append("")
+    lines.append("## ETF池")
+    lines.append("")
+    lines.append(f"| 类型 | 数量 | 说明 |")
+    lines.append(f"|------|------|------|")
+    lines.append(f"| 行业ETF | {len(ETF_UNIVERSE)} | ETF_UNIVERSE |")
+    lines.append(f"| 防御ETF | {len(DEFENSE_UNIVERSE)} | DEFENSE_UNIVERSE |")
+    lines.append(f"| 合计 | {len(ETF_UNIVERSE) + len(DEFENSE_UNIVERSE)} | B0.3 实际加载池 |")
+    lines.append("")
     lines.append("## 核心指标")
     lines.append("")
     lines.append(f"| 指标 | B0.3 |")
@@ -198,6 +231,7 @@ def main():
     lines.append("")
     lines.append("---")
     lines.append(f"*B0.3 config: momentum_factor_enabled=False, volatility_factor_enabled=False*")
+    lines.append(f"*B0.3 实际加载ETF: {len(ETF_UNIVERSE) + len(DEFENSE_UNIVERSE)} 只 (行业{len(ETF_UNIVERSE)} + 防御{len(DEFENSE_UNIVERSE)})*")
     
     with open(b03_report, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
@@ -233,6 +267,9 @@ def main():
     lines2.append("")
     lines2.append("| 指标 | B0.2 | B0.3 | Delta |")
     lines2.append("|------|------|------|-------|")
+    lines2.append(f"| 实际加载ETF | 18 | 18 | 0 |")
+    lines2.append(f"| 行业ETF | {len(ETF_UNIVERSE)} | {len(ETF_UNIVERSE)} | 0 |")
+    lines2.append(f"| 防御ETF | {len(DEFENSE_UNIVERSE)} | {len(DEFENSE_UNIVERSE)} | 0 |")
     lines2.append(f"| 最终NAV | {result_b02['nav_df']['nav'].iloc[-1]:,.0f} | {result_b03['nav_df']['nav'].iloc[-1]:,.0f} | 0 |")
     lines2.append(f"| 总收益 | {result_b02['total_return']:.2%} | {result_b03['total_return']:.2%} | 0 |")
     lines2.append(f"| 年化收益 | {result_b02['annual_return']:.2%} | {result_b03['annual_return']:.2%} | 0 |")

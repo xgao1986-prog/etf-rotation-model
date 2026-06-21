@@ -121,18 +121,89 @@ weights = {
 4. `prev_close > ma20`
 5. `ma20_slope > 0`
 
-### 4.2 卖出条件（任一满足）
+### 4.2 卖出条件（调仓日 + 每日触发）
 
-1. `prev_close < ma20`（前一日收盘价跌破20日均线）
+B0.3 卖出机制分四层，按触发时机和优先级如下：
+
+#### 第一层：固定止损（每日触发，最高优先级）
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `stop_loss_mode` | `fixed` | 固定止损模式 |
+| `stop_loss` | -8% | 相对于成本价的亏损阈值 |
+| 触发条件 | `current_price < cost * (1 - 0.08)` | 当日开盘价低于成本价92%时触发 |
+| 执行价格 | 当日开盘价 | 止损卖出按当日开盘价成交 |
+| 例外 | 不检查`history_count` | 已持仓的ETF不受51天成熟限制 |
+
+> 每日开盘时检查所有持仓，如果亏损达到-8%即触发止损。止损在调仓日之前独立执行，不等待调仓日。
+
+#### 第二层：跌破趋势条件（调仓日信号生成）
+
+在 `generate_signals` 中，如果持仓的前一日收盘价跌破20日均线：
+
+```python
+sell_mask = scores_df['prev_close'] < scores_df['ma20']
+scores_df.loc[sell_mask, 'signal_type'] = 'SELL'
+```
+
+- 这意味着该ETF当日的 `signal_type` 被设为 `'SELL'`，不再出现在BUY候选列表中
+- 但**不会立即卖出**，而是等待调仓日由调仓引擎统一处理
+- 如果该ETF已持仓，在下一个调仓日将被调出候选列表并卖出
+
+#### 第三层：调出BUY候选（调仓日执行）
+
+在 `plan_rebalance_v2_5` 中：
+
+1. 首先分类持仓和候选：
+   - 保留的行业持仓：在"可交易"候选列表中的行业持仓
+   - 保留的防御持仓：在"可交易"候选列表中的防御持仓
+
+2. 需要卖出的持仓：不在候选列表中的持仓
+   ```python
+   if t in industry_tickers and t not in tradable_industry_tickers:
+       sell_tickers.append(t)  # 行业ETF不在BUY候选 → 卖出
+   elif t in defense_tickers and t not in tradable_defense_tickers:
+       sell_tickers.append(t)  # 防御ETF不在BUY候选 → 卖出
+   ```
+
+3. 卖出原因标注为：`"调出候选列表"`
+
+> 注意：B0.3 中 `rank_buffer_enabled=False`，不存在排名缓冲（跌出Top N才卖）的额外约束。持仓只要不在BUY候选列表就会被卖出。
+
+#### 第四层：防御让路（调仓日执行）
+
+在 `plan_rebalance_v2_5` 中，当行业槽位不足时：
+
+```python
+if industry_slots < raw_industry_slots and len(working_positions) > 0:
+    slots_needed = raw_industry_slots - industry_slots
+    # 当前防御持仓按评分从低到高排序，低分先卖
+    current_defense.sort(key=lambda x: x[2])  # 按评分升序
+    for t, shares, _ in current_defense:
+        # ...卖出防御持仓...
+        reason = '防御让路（腾槽位）'
+```
+
+**触发条件：**
+- 有新的行业ETF BUY候选需要买入
+- 但可用持仓槽位不足（已达 `max_total_holdings=5` 上限）
+- 当前持仓中有防御资产（黄金/国债）
+
+**执行逻辑：**
+- 防御资产按评分从低到高排序，低分先卖
+- 卖出防御资产以腾出槽位给行业ETF
+- 卖出原因标注为：`"防御让路（腾槽位）"`
+
+> 防御让路体现了策略的核心逻辑：优先配置股票敞口（行业ETF），当行业信号充足时，防御资产作为低优先级持仓被替换。
 
 ### 4.3 止损规则
 
-| 参数 | 值 |
-|------|-----|
-| `stop_loss_mode` | `fixed`（固定止损） |
-| `stop_loss` | -8%（相对于成本价） |
-| `atr_stop_multiplier` | 2.0（仅当模式切换为ATR时生效） |
-| `atr_period` | 14 |
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `stop_loss_mode` | `fixed` | 固定止损模式 |
+| `stop_loss` | -8% | 相对于成本价的亏损阈值 |
+| `atr_stop_multiplier` | 2.0 | 仅当模式切换为ATR时生效 |
+| `atr_period` | 14 | ATR计算周期 |
 
 > 说明：ATR 动态止损在 Phase 6.5 中经诊断后**未采纳**，当前仍为固定止损 -8%。
 

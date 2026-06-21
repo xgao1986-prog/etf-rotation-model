@@ -5,6 +5,40 @@
 
 ---
 
+## 2026-06-21（本次 - B0.3 基线文档补全 + b0_3_baseline.py 修正）
+
+**目标：** 补全B0.3卖出规则文档；修正b0_3_baseline.py只声明18只ETF并增加断言。
+
+**B0_BASELINE_LOCK.md 卖出规则补全（四层）：**
+1. **固定止损（每日触发）**：`current_price < cost * 0.92`，亏损达-8%即触发，当日开盘价执行
+2. **跌破趋势条件（调仓日信号生成）**：`prev_close < ma20` 时 `signal_type='SELL'`，不再出现在BUY候选列表中
+3. **调出BUY候选（调仓日执行）**：`plan_rebalance_v2_5` 中，持仓不在 `tradable_industry_tickers` 或 `tradable_defense_tickers` 中时卖出，原因标注为"调出候选列表"
+4. **防御让路（调仓日执行）**：当行业槽位不足（`industry_slots < raw_industry_slots`）且当前持仓中有防御资产时，防御资产按评分从低到高排序卖出，原因标注为"防御让路（腾槽位）"
+
+> 注意：B0.3 中 `rank_buffer_enabled=False`，不存在排名缓冲约束。持仓只要不在BUY候选列表就会被卖出。
+
+**b0_3_baseline.py 修正：**
+1. `run_baseline()` 中增加断言：`assert len(tickers) == 18`
+2. 断言：行情池中所有ticker都属于18只ETF池
+3. 断言：所有交易中的ticker都属于18只ETF池
+4. `main()` 中明确输出"B0.3 实际加载ETF: 18 只"（行业16 + 防御2）
+5. B0.3 基准报告和对比报告中均增加ETF数量确认行
+6. 验证输出显示："实际交易ticker 18 只，全部属于18只ETF池: True"
+
+**测试：**
+- `py scripts/b0_3_baseline.py` 通过，B0.3 == B0.2（exact match）
+- 断言全部通过，无异常
+
+**文件：**
+- 修改 `docs/B0_BASELINE_LOCK.md` - 补全卖出规则四层机制
+- 修改 `scripts/b0_3_baseline.py` - 18只ETF断言和验证输出
+
+**不修改：** 生产交易逻辑（`src/backtest.py`、`src/strategy.py` 等）、策略参数、基准指标
+
+**Commit：** 1ba6f70（B0.3 基线锁定） → 本次提交
+
+---
+
 ## 2026-06-21（本次 - B0.3 正式基线锁定）
 
 **目标：** 正式锁定 B0.3 作为唯一基准基线，确保所有后续研究有可复现的对照组。
