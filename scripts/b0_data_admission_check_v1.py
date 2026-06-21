@@ -694,7 +694,7 @@ def run_admission_check(conn_or_path=None, market_df=None, skip_snapshot=False):
         
         snapshot_csv = None
         meta_path = None
-        if state.exit_code == 0 and not skip_snapshot:
+        if state.exit_code < 2 and not skip_snapshot:
             snapshot_csv, meta_path = generate_snapshot(state, conn, market_df=market_df)
         
         generate_report(state, check_dates, completeness_df, splicing_df, anomaly_df, full_df)
@@ -705,7 +705,7 @@ def run_admission_check(conn_or_path=None, market_df=None, skip_snapshot=False):
         
         return {
             'exit_code': state.exit_code,
-            'passed': state.exit_code == 0,
+            'passed': state.exit_code < 2,
             'errors': state.errors,
             'warnings': state.warnings,
             'check_dates': check_dates,

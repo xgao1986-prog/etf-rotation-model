@@ -5,6 +5,55 @@
 
 ---
 
+## 2026-06-21（本次 - B0数据准入检查v1.1最终收口）
+
+**目标：** v1.1最终修正：exit_code=0或1允许生成快照，mock回测入口动态测试，元数据哈希验证。
+
+**v1.1 final修正：**
+1. **快照生成条件**：`exit_code < 2`（即0或1）时均允许生成快照；只有 `exit_code >= 2` 时禁止生成快照。
+2. **B0.4候选快照重新生成**：确认元数据实际包含：
+   - `database_file` SHA-256: `e0cf29931df02a9b...`（64位十六进制）
+   - `dataset_19_tickers` SHA-256: `1ecf8f66f8ac51bb...`（64位十六进制）
+3. **回测入口测试改为动态测试**：`test_backtest_blocked_on_admission_failure` 使用 `unittest.mock.patch` 
+   mock `run_admission_check` 返回 `exit_code=2`，动态调用 `b0_3_baseline.run_baseline()`，
+   断言抛出 `RuntimeError` 且 `BacktestEngine.run` 未被调用。
+4. **元数据哈希测试**：`test_snapshot_metadata_hashes` 运行准入检查（不skip_snapshot），
+   断言元数据 `sha256.database_file` 和 `sha256.dataset_19_tickers` 存在且为64位十六进制字符串。
+5. **不改变策略和B0.4指标**：不重新运行回测，不覆盖B0.4候选指标。
+
+**准入检查v1.1结果（不变）：**
+
+| 检查项 | 状态 | 说明 |
+|--------|------|------|
+| 完整性检查 | ✅ PASS | 19/19标的完整 |
+| 拼接连续性 | ✅ PASS | 无断档、无重复 |
+| 异常跳变检测 | ✅ PASS | 无OHLC错误、无极端涨跌幅 |
+| 全期抽样 | ⚠️ WARN | 7只ETF known_coverage 缺失（数据源未覆盖早期），anomalous_internal=0 |
+
+**exit code：1**（WARN：有 known_coverage 缺失，但无 anomalous_internal，数据可准入但需知晓早期覆盖不足）
+
+**自动化测试（8项）：**
+
+| 测试 | 描述 | 状态 |
+|------|------|------|
+| test_missing_data_antipattern | 内存中删除成熟ETF交易日，断言准入失败 | ✅ PASS |
+| test_backtest_blocked_on_admission_failure | **mock**准入失败，动态调用run_baseline，断言RuntimeError+BacktestEngine.run未调用 | ✅ PASS |
+| test_pre_listing_handling | 策略自动跳过历史不足50天的ETF | ✅ PASS |
+| test_complete_data_backtest | 验证已有B0.4指标文件（不重新运行） | ✅ PASS |
+| test_admission_check_pass | 准入检查通过（anomalous=0, known>0, 不全PASS） | ✅ PASS |
+| test_authoritative_listing_date | 权威上市日≠数据库MIN(date) | ✅ PASS |
+| test_historical_gap_classification | 区分 known_coverage / anomalous_internal | ✅ PASS |
+| **test_snapshot_metadata_hashes** | **元数据包含database_file和dataset_19_tickers SHA-256（64位十六进制）** | ✅ PASS |
+
+**改了哪些文件：**
+- `scripts/b0_data_admission_check_v1.py` — 快照生成条件改为 `exit_code < 2`
+- `tests/test_b0_data_admission.py` — 8项测试（新增mock回测入口测试、元数据哈希测试）
+- `docs/B0_DATA_ADMISSION_CHECK_v1.md` — 重新生成（exit_code=1时含快照）
+- `docs/B0_data_admission_check_v1.csv` — 重新生成
+- `data/snapshots/B0_4_candidate_*` — 新快照（含SHA-256元数据）
+
+---
+
 ## 2026-06-21（本次 - B0数据准入检查v1.1修正）
 
 **目标：** 修正准入检查v1.1，接入回测入口、缺失反例、权威上市日、缺失分类、SHA-256快照。

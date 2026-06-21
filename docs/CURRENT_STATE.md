@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-21（B0数据准入检查v1.1完成：接入回测入口、缺失反例、权威上市日、缺失分类、SHA-256快照）
+**最后更新**：2026-06-21（B0数据准入检查v1.1最终收口：exit_code=0/1允许快照、mock回测入口测试、元数据哈希验证）
 **工作目录**：`D:\etf_rotation_model`
 **当前基线**：B0.4 候选基线 — 见 `docs/B0_4_CANDIDATE.md`（B0.3 已废止，见 `docs/B0_BASELINE_LOCK.md`）
 
@@ -8,21 +8,42 @@
 
 ## 全部完成 ✅
 
-### B0.4: 数据准入检查 v1.1（已完成 ✅）
+### B0.4: 数据准入检查 v1.1 final（已完成 ✅）
 
 **时间**：2026-06-21
-**目标**：修正准入检查，接入回测入口、缺失反例、权威上市日、缺失分类、SHA-256
+**目标**：v1.1最终收口：快照生成条件、mock回测入口测试、元数据SHA-256验证
 
-**v1.1关键修正：**
-1. **回测入口接入**：`b0_3_baseline.py` 在 `run_baseline` 中调用 `run_admission_check()`，
-   exit_code>=2 时抛出 `RuntimeError` 阻止回测；exit_code=1 时继续但打印警告。
-2. **缺失反例**：`test_missing_data_antipattern` 在内存中删除成熟ETF（512000.SH）一个交易日，
-   构建 `:memory:` SQLite 运行准入检查，断言 `exit_code>=2`（准入失败）。
-3. **权威上市日**：从 `database/etf_metadata.json` 加载，不使用数据库 `MIN(date)` 自动缩短。
-4. **缺失分类**：
-   - `known_coverage`：数据库最早日晚于权威上市日（数据源未覆盖早期），7只ETF共2,617天
-   - `anomalous_internal`：数据库最早日之后仍缺失（异常缺口），当前0天
-   - 满足"不得全部PASS"：exit_code=1（WARN），有 known_coverage 缺失。
+**v1.1 final关键修正：**
+1. **快照生成条件**：`exit_code < 2`（0或1）时均允许生成快照；只有 `exit_code >= 2` 禁止。
+2. **B0.4候选快照重新生成**：确认元数据包含：
+   - `database_file` SHA-256: `e0cf29931df02a9b...`（64位十六进制）
+   - `dataset_19_tickers` SHA-256: `1ecf8f66f8ac51bb...`（64位十六进制）
+3. **回测入口动态测试**：`test_backtest_blocked_on_admission_failure` 使用 `unittest.mock.patch` 
+   mock `run_admission_check` 返回 `exit_code=2`，动态调用 `b0_3_baseline.run_baseline()`，
+   断言抛出 `RuntimeError` 且 `BacktestEngine.run` 未被调用。
+4. **元数据哈希测试**：`test_snapshot_metadata_hashes` 验证 `sha256.database_file` 
+   和 `sha256.dataset_19_tickers` 存在且为64位十六进制字符串。
+5. **不改变策略和B0.4指标**：不重新运行回测，不覆盖已有指标。
+
+**准入检查v1.1结果（不变）：**
+- exit_code: 1（WARN）
+- 错误：0
+- 警告：7（7只ETF known_coverage 缺失）
+- anomalous_internal: 0
+
+**文件**：
+- `scripts/b0_data_admission_check_v1.py`（v1.1 final 准入检查脚本，可编程API）
+- `scripts/b0_3_baseline.py`（接入准入检查的回测入口）
+- `tests/test_b0_data_admission.py`（**8项**自动化测试，含mock回测入口和元数据哈希）
+- `docs/B0_DATA_ADMISSION_CHECK_v1.md`（准入检查报告）
+- `data/snapshots/B0_4_candidate_data_20260621_210815.csv`（新快照）
+- `data/snapshots/B0_4_candidate_metadata_20260621_210815.json`（新元数据，含SHA-256）
+
+**状态**：🟡 数据可准入（有 known_coverage 警告，但无异常缺口），exit_code=1时生成快照
+
+---
+
+### B0.4: 候选基线（已完成 ✅）"不得全部PASS"：exit_code=1（WARN），有 known_coverage 缺失。
 5. **SHA-256快照**：元数据增加数据库文件SHA-256和19只标的数据集SHA-256。
 6. **可编程API**：`run_admission_check(conn, market_df, skip_snapshot)` 返回结构化字典。
 
