@@ -21,7 +21,7 @@ from rebalance_planner import plan_rebalance_v2_5
 class BacktestEngine:
     """回测引擎"""
     
-    def __init__(self, cfg=None, s1_mode=False):
+    def __init__(self, cfg=None, s1_mode=False, slippage_bps=0):
         self.cfg = cfg or STRATEGY_CONFIG.copy()
         # v1.2: 自动合并市场状态配置（observer 模式，不改变交易逻辑）
         # 仅当用户未显式设置 enabled 时，才注入默认 MARKET_REGIME_CONFIG
@@ -31,6 +31,7 @@ class BacktestEngine:
             self.cfg.update(MARKET_REGIME_CONFIG)
         self.strategy = StrategyEngine(self.cfg, s1_mode=s1_mode)
         self.initial_capital = self.cfg.get('initial_capital', BACKTEST_CONFIG['initial_capital'])
+        self.slippage_bps = slippage_bps  # 实验性：滑点（基点），默认0不影响现有行为
     
     def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame, universe_builder=None, eval_date=None, performance_start=None, early_exit_days=None, as_of_date=None) -> dict:
         """
@@ -427,7 +428,7 @@ class BacktestEngine:
                       _defense_tickers, etf_group_map, same_group_max, rank_buffer_enabled,
                       buy_rank_n, sell_rank_n, candidate_rank, exit_debounce,
                       min_hold_for_candidate_exit, corr_matrix, corr_threshold,
-                      calc_commission):
+                      calc_commission, slippage=0.0):
         """
         v2.5 纯函数调仓集成：顺序独立、总仓位受控、缺价不强制归零
         替代旧调仓大段逻辑（防御模块 + 核心池 + 备选池 + 防御填充）
@@ -519,9 +520,10 @@ class BacktestEngine:
             
             pos = portfolio['positions'][ticker]
             shares = order['shares']
-            price = order['price']
-            amount = order['amount']
-            commission = order['commission']
+            # 应用滑点：卖出成交价下调
+            price = order['price'] * (1 - slippage)
+            amount = shares * price
+            commission = calc_commission(amount)
             net_proceeds = amount - commission
             
             portfolio['cash'] += net_proceeds
@@ -552,9 +554,10 @@ class BacktestEngine:
             
             ticker = order['ticker']
             shares = order['shares']
-            price = order['price']
-            amount = order['amount']
-            commission = order['commission']
+            # 应用滑点：买入成交价上调
+            price = order['price'] * (1 + slippage)
+            amount = shares * price
+            commission = calc_commission(amount)
             total_cost = amount + commission
             
             # 相关性去重检查
@@ -950,9 +953,10 @@ class BacktestEngine:
                             })
             
             # 执行止损
+            slippage = getattr(self, 'slippage_bps', 0) / 10000.0
             for stop in stops:
                 ticker = stop['ticker']
-                price = stop['current_price']
+                price = stop['current_price'] * (1 - slippage)
                 pos = portfolio['positions'][ticker]
                 shares = pos['shares']
                 
@@ -1024,7 +1028,7 @@ class BacktestEngine:
                         _defense_tickers, etf_group_map, same_group_max, rank_buffer_enabled,
                         buy_rank_n, sell_rank_n, candidate_rank, exit_debounce,
                         min_hold_for_candidate_exit, corr_matrix, corr_threshold,
-                        calc_commission,
+                        calc_commission, slippage,
                     )
                 else:
                     
