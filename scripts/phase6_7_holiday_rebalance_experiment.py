@@ -220,31 +220,12 @@ def compute_variant_d(trading_days, holidays, target_weekday=3):
     
     for thu in plan_thursdays:
         if thu in trading_set:
-            # 检查与已选日期的间隔
-            prev_rebalance = None
-            for d in sorted(rebalance_dates):
-                if d < thu:
-                    prev_rebalance = d
-            next_rebalance = None
-            for d in sorted(rebalance_dates):
-                if d > thu:
-                    next_rebalance = d
-                    break
-            
-            if prev_rebalance is not None:
-                days_between = sum(1 for td in trading_list if prev_rebalance < td < thu)
-                if days_between < 3:
-                    continue
-            if next_rebalance is not None:
-                days_between = sum(1 for td in trading_list if thu < td < next_rebalance)
-                if days_between < 3:
-                    continue
-            
+            # 周四是交易日，直接保留，不做任何间隔检查
             rebalance_dates.add(thu)
             used_dates.add(thu)
             continue
         
-        # 周四休市，找最近的交易日
+        # 周四休市，找最近交易日
         prev_td = None
         for d in reversed(trading_list):
             if d < thu:
@@ -268,28 +249,9 @@ def compute_variant_d(trading_days, holidays, target_weekday=3):
         else:
             continue
         
+        # 如果该日期已被另一个休市周四映射，跳过（每周最多一次）
         if chosen in used_dates:
             continue
-        
-        # 检查与已选日期前后间隔>=3个交易日
-        prev_rebalance = None
-        for d in sorted(rebalance_dates):
-            if d < chosen:
-                prev_rebalance = d
-        next_rebalance = None
-        for d in sorted(rebalance_dates):
-            if d > chosen:
-                next_rebalance = d
-                break
-        
-        if prev_rebalance is not None:
-            days_between = sum(1 for td in trading_list if prev_rebalance < td < chosen)
-            if days_between < 3:
-                continue
-        if next_rebalance is not None:
-            days_between = sum(1 for td in trading_list if chosen < td < next_rebalance)
-            if days_between < 3:
-                continue
         
         substitutions.append({
             'source_date': thu,
@@ -332,7 +294,8 @@ def validate_rebalance_dates(variant_name, rebalance_dates, substitutions, tradi
     
     # 断言5：只检查新增替代不得制造不符合明确规则的重复调仓
     # 即：每个新增的替代target_date与前后相邻调仓日之间必须>=3个交易日
-    if substitutions:
+    # 注意：D方案不检查此断言，因为D只增加调仓日不改变正常日历，新增替代可能与正常周四间隔<3
+    if substitutions and variant_name != 'D':
         sorted_dates = sorted(rebalance_dates)
         for sub in substitutions:
             target = sub['target_date']
@@ -438,8 +401,9 @@ class CustomRebalanceEngine(BacktestEngine):
 # ============ 数据加载 ============
 
 def load_data_from_db():
+    """从数据库加载数据，显式加载ETF_UNIVERSE + DEFENSE_UNIVERSE"""
     db = ETFDatabase(config.DB_PATH)
-    all_tickers = list(config.ETF_UNIVERSE.keys()) + ['000300.SH']
+    all_tickers = list(set(list(config.ETF_UNIVERSE.keys()) + list(config.DEFENSE_UNIVERSE.keys()))) + ['000300.SH']
     market_df = db.get_market_data(ticker=all_tickers)
     bench_df = market_df[market_df['ticker'] == '000300.SH'][['date', 'open', 'high', 'low', 'close', 'adj_close']].copy()
     market_df = market_df[market_df['ticker'] != '000300.SH']
@@ -527,6 +491,16 @@ def run_calendar_tests(trading_days, holidays, target_weekday=3):
     a2, _ = compute_variant_a(shuffled, target_weekday)
     assert a1 == a2, "[FAIL] 测试6: 输入顺序影响结果"
     print("[PASS] 测试6: 输入顺序不影响结果")
+    
+    # 测试7：D必须包含A的全部调仓日
+    a_dates, _ = compute_variant_a(truncated, target_weekday)
+    d_dates, _ = compute_variant_d(truncated, holidays, target_weekday)
+    assert a_dates.issubset(d_dates), "[FAIL] 测试7: D不包含A的全部调仓日"
+    print("[PASS] 测试7: D包含A的全部调仓日")
+    
+    # 测试8：D调仓数不得少于A
+    assert len(d_dates) >= len(a_dates), f"[FAIL] 测试8: D调仓数({len(d_dates)})少于A({len(a_dates)})"
+    print("[PASS] 测试8: D调仓数不少于A")
     
     print("--- 所有日历测试通过 ---\n")
     return True
