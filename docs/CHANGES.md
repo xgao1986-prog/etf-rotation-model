@@ -5,6 +5,61 @@
 
 ---
 
+## 2026-06-21（本次 - app.py B0签名构造修复 + 最小测试）
+
+**目标：** 修复 `app.py` 中 `B0_18_SIGNATURE` 的构造方式：不再在 `cfg_signature(STRATEGY_CONFIG)` 后追加参数，而是使用完整 B0.4 默认配置调用 `cfg_signature` 生成标准签名。新增 6 项最小测试验证签名正确性。
+
+**修复内容：**
+1. **B0_18_SIGNATURE 构造修复**：
+   - 修复前：`cfg_signature(STRATEGY_CONFIG)` 后追加 8 个参数元组，容易遗漏或错位
+   - 修复后：使用 `build_config(strategy_cfg=..., trading_rules_cfg=..., defense_cfg=..., backtest_cfg=...)` 构造完整 B0.4 配置，调用 `cfg_signature(B0_18_CFG)` 一次性生成标准签名
+   - 确保所有影响回测结果的参数（因子开关、冷却期、调仓频率、止损模式等）都在签名中
+
+2. **新增最小测试**（`tests/test_app_b0_signature.py`，6 项全部通过）：
+   | 测试 | 描述 | 状态 |
+   |------|------|------|
+   | test_default_is_b0_18 | 默认完整配置（两因子关闭）→ 签名与标准签名一致 | ✅ PASS |
+   | test_enable_momentum_deviates | 开启动量因子 → 签名偏离 | ✅ PASS |
+   | test_enable_volatility_deviates | 开启波动率因子 → 签名偏离 | ✅ PASS |
+   | test_change_stop_loss_deviates | 修改止损线 → 签名偏离 | ✅ PASS |
+   | test_change_weights_deviates | 修改评分权重 → 签名偏离 | ✅ PASS |
+   | test_change_max_holdings_deviates | 修改最大持仓数 → 签名偏离 | ✅ PASS |
+
+3. **测试策略**：`cfg_signature` 复制到测试文件中（避免导入整个 `app.py` 触发 streamlit/plotly 依赖），与 `app.py` 中的实现保持完全同步
+
+**改了哪些文件：**
+- `app.py` — B0_18_SIGNATURE 构造修复（从追加参数改为完整配置调用），新增 TRADING_RULES_CONFIG / DEFENSE_CONFIG 导入
+- `tests/test_app_b0_signature.py` — 新增 6 项最小测试
+- `docs/CHANGES.md` — 添加本条目
+
+---
+
+## 2026-06-21（本次 - app.py 动量+波动率因子总开关）
+
+**目标：** 在 app.py 侧边栏新增一个总开关，控制 momentum_rank 和 vol_score 是否计入总分，使 B0.4 基线状态（关闭）可被正确标识。
+
+**背景：**
+- B0.4 基线中 `momentum_factor_enabled=False`、`volatility_factor_enabled=False`，动量与波动率因子不参与评分
+- 但 app.py 此前无 UI 控制这两个开关，cfg_signature 也未包含它们，导致用户可能通过代码修改后仍显示"标准 B0-18"
+
+**修改内容：**
+1. **UI 新增开关**：侧边栏"评分权重" expander 内增加复选框 `启用动量+波动率因子`，默认 `False`（B0.4 状态）
+   - 关闭时显示：⚠️ 动量与波动率因子已关闭，仅趋势+确认+成交量参与评分
+   - 开启时显示：✅ 全部5个因子参与评分
+2. **配置传递**：开关值同步写入 `cfg["momentum_factor_enabled"]` 和 `cfg["volatility_factor_enabled"]`
+3. **签名函数更新**：`cfg_signature()` 新增 `momentum_factor_enabled` 和 `volatility_factor_enabled` 两个字段
+4. **B0_18_SIGNATURE 更新**：基准签名加入 `False, False`（对应 B0.4 关闭状态）
+
+**验证：**
+- 默认关闭时，`is_b0_18=True`，状态标识为"✅ 标准 B0-18"
+- 打开开关时，`is_b0_18=False`，状态标识变为"⚠️ 自定义实验"
+- 开关值通过 `cfg` 传递给 `StrategyEngine.calculate_total_score()`，与 `src/strategy.py` 逻辑对接
+
+**改了哪些文件：**
+- `app.py` — 新增 UI 开关、配置传递、签名更新（4处修改）
+
+---
+
 ## 2026-06-21（本次 - B0.4 从候选基线转为正式冻结基线）
 
 **目标：** B0.4 候选基线确认为正式冻结基线，取代已废止的 B0.3。引用已保存的 SHA-256 快照，不重新运行回测或调整策略。

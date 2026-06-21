@@ -19,7 +19,8 @@ sys.path.insert(0, "src")
 
 from backtest import BacktestEngine
 from config import (BACKTEST_CONFIG, BENCHMARK, ETF_UNIVERSE, DEFENSE_UNIVERSE,
-                    FALLBACK_EQUITY_UNIVERSE, ALL_TRADABLE_ETFS, STRATEGY_CONFIG, build_config)
+                    FALLBACK_EQUITY_UNIVERSE, ALL_TRADABLE_ETFS, STRATEGY_CONFIG,
+                    TRADING_RULES_CONFIG, DEFENSE_CONFIG, build_config)
 from database import ETFDatabase
 from strategy import StrategyEngine
 
@@ -164,6 +165,13 @@ def build_sidebar_config():
         raw_weights["volatility"] = col1.slider("波动率", 0.0, 1.0, 0.10, 0.05)
         weights, raw_total = normalize_weights(raw_weights)
         st.caption(f"输入合计 {raw_total:.2f}，已自动归一化用于实时评分。")
+        
+        # v1.2.1: 动量/波动率因子总开关（B0.4默认关闭）
+        enable_momentum_vol = st.checkbox("启用动量+波动率因子", False, help="关闭时动量排名与波动率评分不计入总分（B0.4基线状态）")
+        if not enable_momentum_vol:
+            st.caption("⚠️ 动量与波动率因子已关闭，仅趋势+确认+成交量参与评分")
+        else:
+            st.caption("✅ 全部5个因子参与评分")
 
     with st.sidebar.expander("入场阈值", expanded=True):
         min_trend = st.slider("趋势最低分", 0, 30, STRATEGY_CONFIG["min_trend_score"])
@@ -268,6 +276,8 @@ def build_sidebar_config():
     cfg["stop_loss_mode"] = stop_loss_mode
     cfg["atr_stop_multiplier"] = atr_multiplier
     cfg["market_timing"] = use_timing
+    cfg["momentum_factor_enabled"] = enable_momentum_vol
+    cfg["volatility_factor_enabled"] = enable_momentum_vol
     
     # 构建交易规则配置
     trading_rules_cfg = {
@@ -320,14 +330,14 @@ def build_sidebar_config():
     cfg = build_config(strategy_cfg=cfg, trading_rules_cfg=trading_rules_cfg, defense_cfg=defense_cfg, backtest_cfg=backtest_cfg)
 
     # B0-18 标准配置签名（一键复现基准）
-    B0_18_SIGNATURE = cfg_signature(STRATEGY_CONFIG) + (
-        0,  # cooling_period=0
-        "weekly",  # rebalance_freq
-        3,  # rebalance_weekday
-        "none",  # trailing_stop_mode
-        True,  # defense_enabled
-        False,  # sector_boost_enabled
+    # 使用完整 B0.4 默认配置生成标准签名，避免在 cfg_signature 后追加参数
+    B0_18_CFG = build_config(
+        strategy_cfg=STRATEGY_CONFIG,
+        trading_rules_cfg=TRADING_RULES_CONFIG,
+        defense_cfg=DEFENSE_CONFIG,
+        backtest_cfg=BACKTEST_CONFIG,
     )
+    B0_18_SIGNATURE = cfg_signature(B0_18_CFG)
     
     current_sig = cfg_signature(cfg)
     is_b0_18 = (current_sig == B0_18_SIGNATURE)
@@ -447,6 +457,8 @@ def cfg_signature(cfg):
         cfg.get("trailing_stop_mode", "none"),
         cfg.get("defense_enabled", True),
         cfg.get("sector_boost_enabled", False),
+        cfg.get("momentum_factor_enabled", True),
+        cfg.get("volatility_factor_enabled", True),
     )
     return weights + params
 
