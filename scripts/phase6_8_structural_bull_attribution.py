@@ -1,9 +1,9 @@
 """
-Phase 6.8: 结构牛市适应性归因（v2.3 覆盖分析完整性+数据隔离）
+Phase 6.8: 结构牛市适应性归因（v2.4 基准交易日对齐+完整性测试）
 
 冻结B0.3，不改生产策略，不使用2025-2026样本外数据。
 
-v2.3 修正：
+v2.4 修正：
 1. 数据严格隔离：strategy_market_df 仅 ETF_UNIVERSE+DEFENSE_UNIVERSE（18只，用于B0.3回测）；
    coverage_market_df 为数据库全部非SECTOR ETF（41只，仅用于覆盖度分析）。
 2. 强断言：B0.3交易记录必须为642笔；所有交易ticker必须属于冻结策略池。
@@ -11,8 +11,10 @@ v2.3 修正：
    然后连乘，与实际策略收益比较。
 4. 选股归因：按每个调仓日，计算"当时持仓的下一期收益" vs "当时未选中池内ETF的下一期收益"，
    各期平均后比较。
-5. 覆盖分析完整性：全市场候选ETF必须同时满足首个数据日期不晚于区间开始日、
-   区间开始交易日有有效价格、区间结束交易日有有效价格。中途上市或首尾缺价的ETF不得参与排名。
+5. 覆盖分析完整性：全市场候选ETF必须与基准交易日对齐（使用基准在区间内的首个/末个真实交易日），
+   候选必须同时满足首个数据日期不晚于基准首个交易日、基准首个交易日有有效价格、
+   基准末个交易日有有效价格。中途上市或首尾缺价的ETF不得参与排名。
+6. 添加正式pytest测试覆盖完整性检查。
 
 不修改生产代码。
 """
@@ -192,33 +194,57 @@ def compute_daily_returns(market_df, ticker, start, end):
     return 0
 
 
-def has_complete_data(market_df, ticker, start, end):
+def get_bench_trading_dates(bench_df, start, end):
     """
-    检查ETF在区间内数据是否完整：
-    1. 首个数据日期不晚于区间开始日（非中途上市）
-    2. 区间开始交易日（或第一个>=start的交易日）有有效价格
-    3. 区间结束交易日（或最后一个<=end的交易日）有有效价格
+    获取基准在区间内的首个和末个真实交易日。
+    必须与基准交易日对齐，不能仅检查ETF自身窗口的第一条/最后一条记录。
     """
+    start_ts = pd.Timestamp(start) if not isinstance(start, pd.Timestamp) else start
+    end_ts = pd.Timestamp(end) if not isinstance(end, pd.Timestamp) else end
+    
+    bench_in_range = bench_df[(bench_df['date'] >= start_ts) & (bench_df['date'] <= end_ts)]
+    if len(bench_in_range) < 2:
+        return None, None
+    
+    bench_sorted = bench_in_range.sort_values('date')
+    first_trading_date = bench_sorted['date'].iloc[0]
+    last_trading_date = bench_sorted['date'].iloc[-1]
+    return first_trading_date, last_trading_date
+
+
+def has_complete_data(market_df, ticker, first_bench_date, last_bench_date):
+    """
+    检查ETF在基准的首个和末个交易日是否有有效收盘价。
+    必须与基准交易日对齐，不能检查ETF自身窗口的第一条/最后一条记录。
+    
+    要求：
+    1. 首个数据日期不晚于首个基准交易日（非中途上市）
+    2. 首个基准交易日有有效收盘价
+    3. 末个基准交易日有有效收盘价
+    """
+    if first_bench_date is None or last_bench_date is None:
+        return False
+    
     ticker_data = market_df[market_df['ticker'] == ticker]
     if len(ticker_data) == 0:
         return False
     
-    start_ts = pd.Timestamp(start) if not isinstance(start, pd.Timestamp) else start
-    end_ts = pd.Timestamp(end) if not isinstance(end, pd.Timestamp) else end
+    first_bench_ts = pd.Timestamp(first_bench_date)
+    last_bench_ts = pd.Timestamp(last_bench_date)
     
-    # 检查首个数据日期
+    # 检查首个数据日期不晚于首个基准交易日（非中途上市）
     first_date = pd.Timestamp(ticker_data['date'].min())
-    if first_date > start_ts:
+    if first_date > first_bench_ts:
         return False
     
-    # 找区间内数据（>=start 且 <=end）
-    window = ticker_data[(ticker_data['date'] >= start_ts) & (ticker_data['date'] <= end_ts)]
-    if len(window) < 2:
+    # 检查首个基准交易日是否有有效收盘价
+    start_data = ticker_data[ticker_data['date'] == first_bench_ts]
+    if len(start_data) == 0 or pd.isna(start_data['close'].iloc[0]):
         return False
     
-    # 检查首尾价格是否有效
-    window_sorted = window.sort_values('date')
-    if pd.isna(window_sorted['close'].iloc[0]) or pd.isna(window_sorted['close'].iloc[-1]):
+    # 检查末个基准交易日是否有有效收盘价
+    end_data = ticker_data[ticker_data['date'] == last_bench_ts]
+    if len(end_data) == 0 or pd.isna(end_data['close'].iloc[0]):
         return False
     
     return True
@@ -259,32 +285,37 @@ def diagnose_cash_drag(nav_df, bench_df, start, end):
     return cash_drag, strategy_ret
 
 
-def diagnose_coverage_gap(coverage_market_df, strategy_market_df, start, end):
+def diagnose_coverage_gap(coverage_market_df, strategy_market_df, bench_df, start, end):
     """
     覆盖差距：使用数据库全部ETF（coverage_market_df）作为"市场"，
     使用策略池（strategy_market_df）中在start前已上市的ETF作为"池"。
     检查最领涨方向是否在策略池内。
     
     完整性口径：候选ETF必须同时满足：
-    1. 首个数据日期不晚于区间开始日（非中途上市）
-    2. 区间开始交易日（或第一个>=start的交易日）有有效价格
-    3. 区间结束交易日（或最后一个<=end的交易日）有有效价格
+    1. 首个数据日期不晚于基准首个交易日（非中途上市）
+    2. 基准首个交易日有有效收盘价
+    3. 基准末个交易日有有效收盘价
     """
+    # 获取基准在区间内的首个和末个真实交易日
+    first_bench_date, last_bench_date = get_bench_trading_dates(bench_df, start, end)
+    if first_bench_date is None or last_bench_date is None:
+        return 0, None, 0, None, 0
+    
     # 市场所有ETF（排除000300.SH）
     all_etfs = coverage_market_df[coverage_market_df['ticker'] != '000300.SH']['ticker'].unique().tolist()
     
-    # 完整性过滤：只保留首尾都有价格的ETF
+    # 完整性过滤：只保留在基准首尾交易日都有价格的ETF
     all_returns = {}
     excluded_mid = []   # 中途上市被排除
     excluded_no_price = []  # 缺起点/终点价格被排除
     
     for t in all_etfs:
-        if not has_complete_data(coverage_market_df, t, start, end):
+        if not has_complete_data(coverage_market_df, t, first_bench_date, last_bench_date):
             # 区分被排除原因
             ticker_data = coverage_market_df[coverage_market_df['ticker'] == t]
             if len(ticker_data) > 0:
                 first_date = pd.Timestamp(ticker_data['date'].min())
-                if first_date > pd.Timestamp(start):
+                if first_date > pd.Timestamp(first_bench_date):
                     excluded_mid.append(t)
                 else:
                     excluded_no_price.append((t, 'no_price'))
@@ -294,12 +325,12 @@ def diagnose_coverage_gap(coverage_market_df, strategy_market_df, start, end):
         if ret != 0:
             all_returns[t] = ret
     
-    # 策略池内ETF，同样使用完整性口径
+    # 策略池内ETF，同样使用完整性口径（与基准交易日对齐）
     available_pool = get_available_strategy_etfs(strategy_market_df, start)
     pool_returns = {}
     pool_excluded = []
     for t in available_pool:
-        if not has_complete_data(strategy_market_df, t, start, end):
+        if not has_complete_data(strategy_market_df, t, first_bench_date, last_bench_date):
             pool_excluded.append((t, 'no_complete'))
             continue
         
@@ -310,6 +341,8 @@ def diagnose_coverage_gap(coverage_market_df, strategy_market_df, start, end):
     # 测试输出：显示完整性检查结果
     is_target = (start.strftime('%Y-%m-%d') == '2020-10-09')
     if is_target:
+        print(f"    [覆盖分析] 基准首个交易日: {first_bench_date.strftime('%Y-%m-%d')}")
+        print(f"    [覆盖分析] 基准末个交易日: {last_bench_date.strftime('%Y-%m-%d')}")
         print(f"    [覆盖分析] 市场候选ETF总数: {len(all_etfs)}")
         print(f"    [覆盖分析] 被排除(中途上市): {len(excluded_mid)}只: {excluded_mid}")
         print(f"    [覆盖分析] 被排除(缺价格): {len(excluded_no_price)}只: {[t for t, _ in excluded_no_price]}")
@@ -585,7 +618,7 @@ def analyze_all_periods(periods, strategy_market_df, strategy_industry_df, bench
         available = get_available_strategy_etfs(strategy_market_df, start)
 
         cash_drag, _ = diagnose_cash_drag(nav_df, bench_df, start, end)
-        cov_gap, m_ticker, m_ret, p_ticker, p_ret = diagnose_coverage_gap(coverage_market_df, strategy_market_df, start, end)
+        cov_gap, m_ticker, m_ret, p_ticker, p_ret = diagnose_coverage_gap(coverage_market_df, strategy_market_df, bench_df, start, end)
         sel_gap, avg_pos, avg_unsel, _ = diagnose_selection_gap(strategy_market_df, nav_df, trades_df, start, end)
         w_gap, actual_r, equal_r = diagnose_weight_gap(nav_df, strategy_market_df, start, end)
         e_gap, exit_pnl, hold_pnl, stop_cnt = diagnose_exit_gap(strategy_market_df, nav_df, trades_df, start, end)
@@ -723,7 +756,7 @@ def main(ctx):
     target_available = get_available_strategy_etfs(strategy_market_df, target_start)
 
     t_cash, t_strategy_ret = diagnose_cash_drag(nav_df, bench_df, target_start, target_end)
-    t_cov, t_m_ticker, t_m_ret, t_p_ticker, t_p_ret = diagnose_coverage_gap(coverage_market_df, strategy_market_df, target_start, target_end)
+    t_cov, t_m_ticker, t_m_ret, t_p_ticker, t_p_ret = diagnose_coverage_gap(coverage_market_df, strategy_market_df, bench_df, target_start, target_end)
     t_sel, t_avg_pos, t_avg_unsel, _ = diagnose_selection_gap(strategy_market_df, nav_df, trades_df, target_start, target_end)
     t_w, t_actual, t_equal = diagnose_weight_gap(nav_df, strategy_market_df, target_start, target_end)
     t_e, t_exit_pnl, t_hold_pnl, t_stop_cnt = diagnose_exit_gap(strategy_market_df, nav_df, trades_df, target_start, target_end)

@@ -5,6 +5,152 @@
 
 ---
 
+## 2026-06-21（本次 - Phase 6.8 结构牛市适应性归因 v2.4 基准交易日对齐+完整性测试）
+
+**问题根因：**
+1. **has_complete_data 未与基准交易日对齐**：v2.3 的 `has_complete_data` 检查 ETF 自身窗口的 `>= start` 且 `<= end` 的数据，然后取 `.iloc[0]` 和 `.iloc[-1]`。这不是与基准交易日对齐，而是 ETF 自身窗口的第一条/最后一条记录。如果 ETF 在基准首个交易日没有数据（但之后有），自身窗口的第一条记录会晚于基准首个交易日，导致错误地让该 ETF 参与排名。
+2. **区间结束日非交易日问题**：v2.3 使用 `<= end` 的最后一个交易日来规避非交易日问题，但这仍然是 ETF 自身窗口的行为，不是基准交易日的对齐。
+3. **缺少正式测试**：v2.3 没有 pytest 测试覆盖 `has_complete_data` 的四种场景。
+
+**修正内容：**
+- **新增 `get_bench_trading_dates(bench_df, start, end)`**：从基准数据中找出区间内的首个和末个真实交易日，必须与基准交易日对齐。
+- **修改 `has_complete_data(market_df, ticker, first_bench_date, last_bench_date)`**：
+  - 接收基准的首个和末个真实交易日（而非 start/end）
+  - 检查 ETF 是否在这两个日期都有有效收盘价
+  - 检查首个数据日期不晚于基准首个交易日（非中途上市）
+  - 不能检查 ETF 自身窗口的第一条/最后一条记录
+- **修改 `diagnose_coverage_gap`**：接收 `bench_df`，调用 `get_bench_trading_dates` 获取基准交易日，然后传给 `has_complete_data`。
+- **策略池最佳也使用相同口径**：池内 ETF 同样通过 `has_complete_data` 检查，与基准交易日对齐。
+- **增加基准交易日输出**：目标区间显示基准首个/末个交易日。
+- **添加正式 pytest 测试**：`tests/test_phase6_8_coverage.py`，13 个用例覆盖：
+  - 正常区间 → 返回正确基准交易日
+  - 周末结束 → 返回最后一个周五
+  - 数据不足 → 返回 None
+  - 首尾完整 → True
+  - 中途上市 → False
+  - 缺基准起点价格 → False
+  - 缺基准终点价格 → False
+  - 起点价格为 NaN → False
+  - 终点价格为 NaN → False
+  - ETF 自身窗口与基准不同 → False
+  - ETF 首个数据早于基准 → True
+  - 中途上市即使涨幅最高 → 被排除
+  - 缺少终点价格 → 被排除
+
+**测试命令：**
+```bash
+# 运行主脚本
+python scripts/phase6_8_structural_bull_attribution.py
+
+# 运行 pytest 测试
+pytest tests/test_phase6_8_coverage.py -v
+```
+
+**测试输出（主脚本）：**
+```
+[1/8] 加载数据...
+    策略池ETF: 18只
+    数据库全部ETF: 41只
+[2/8] 运行B0.3回测...
+    回测区间: 2019-08-13 ~ 2024-12-31
+    交易记录: 642条
+    止损次数: 14次
+    [PASS] 交易记录=642，符合642
+    [PASS] 所有交易ticker都在策略池内
+    [PASS] 止损次数=14，符合14
+[3/8] 识别结构牛市区间...
+    找到 25 个结构牛市区间(有NAV数据, 累计收益>0)
+[4/8] 多区间验证...
+    训练期(2019-2022): 17个区间
+    验证期(2023-2024): 8个区间
+[5/8] 勾稽断言...
+    [OK] 所有勾稽断言通过
+[6/8] 目标区间详细分析...
+    [覆盖分析] 基准首个交易日: 2020-10-09
+    [覆盖分析] 基准末个交易日: 2021-02-26
+    [覆盖分析] 市场候选ETF总数: 41
+    [覆盖分析] 被排除(中途上市): 23只
+    [覆盖分析] 被排除(缺价格): 0只
+    [覆盖分析] 完整数据参与排名: 18只
+    [覆盖分析] 池内候选: 11只
+    [覆盖分析] 池内被排除: 0只
+    [覆盖分析] 池内完整参与: 11只
+    策略收益: -3.87%
+    基准收益: 14.01%
+    总超额: -17.88%
+    1.现金拖累: 7.13%
+    2.覆盖差距: 0.00% (市场最佳=512400.SH, 池内最佳=512400.SH)
+    3.选股差距: 0.07% (策略持仓=0.04%, 未选中中位数=-0.03%)
+    4.权重差距: 0.05% (等权=3.22%, 实际=3.17%)
+    5.退出差距: -1.56% (止损=-5.82%比持有=-7.38%少亏，保护组合)
+    CF1: 7.13%
+    当时可交易ETF: 11只(策略池)
+[7/8] 生成报告...
+```
+
+**测试输出（pytest）：**
+```
+tests/test_phase6_8_coverage.py::TestGetBenchTradingDates::test_normal_range PASSED
+tests/test_phase6_8_coverage.py::TestGetBenchTradingDates::test_weekend_end PASSED
+tests/test_phase6_8_coverage.py::TestGetBenchTradingDates::test_insufficient_data PASSED
+tests/test_phase6_8_coverage.py::TestHasCompleteData::test_complete_data PASSED
+tests/test_phase6_8_coverage.py::TestHasCompleteData::test_mid_listed PASSED
+tests/test_phase6_8_coverage.py::TestHasCompleteData::test_missing_start_price PASSED
+tests/test_phase6_8_coverage.py::TestHasCompleteData::test_missing_end_price PASSED
+tests/test_phase6_8_coverage.py::TestHasCompleteData::test_na_start_price PASSED
+tests/test_phase6_8_coverage.py::TestHasCompleteData::test_na_end_price PASSED
+tests/test_phase6_8_coverage.py::TestHasCompleteData::test_not_aligned_with_bench PASSED
+tests/test_phase6_8_coverage.py::TestHasCompleteData::test_etf_first_before_bench PASSED
+tests/test_phase6_8_coverage.py::TestCoverageIntegration::test_coverage_excludes_mid_listed PASSED
+tests/test_phase6_8_coverage.py::TestCoverageIntegration::test_coverage_excludes_missing_end PASSED
+============================== 13 passed in 0.64s ==============================
+```
+
+**新回测结果（2020-10-09 ~ 2021-02-28，B0.3基准）：**
+
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| 结构牛市区间 | 25个（训练期17个，验证期8个） | 累计收益>0% |
+| 目标区间策略收益 | -3.87% | 从2020-10-09起算，数据回归策略池18只 |
+| 目标区间基准收益 | 14.01% | 从2020-10-09起算 |
+| 目标区间总超额 | -17.88% | 策略-基准 |
+| 当时可交易ETF（策略池） | 11只 | 全部满足完整性口径（与基准交易日对齐） |
+| 数据库全部非SECTOR ETF | 41只 | 18只满足完整性口径，23只中途上市被排除 |
+| 基准首个交易日 | 2020-10-09 | 区间内第一个真实交易日 |
+| 基准末个交易日 | 2021-02-26 | 区间内最后一个真实交易日（2021-02-28为周日） |
+| 现金拖累 | 7.13% | virtual = actual + cash * bench |
+| 覆盖差距 | 0.00% | 池内已覆盖最领涨方向512400.SH（完整性口径18只中最佳） |
+| 选股差距 | 0.07% | 各调仓期持仓0.04% vs 未选中-0.03% |
+| 权重差距 | 0.05% | 逐日等权3.22% vs 实际3.17% |
+| 退出差距 | -1.56% | 止损-5.82%比持有-7.38%少亏，保护组合 |
+| CF1（现金->300） | 7.13% | virtual连乘后比较 |
+| CF3（持有vs止损） | -1.56% | 止损保护了组合 |
+
+**结论：**
+> 在目标区间（2020-10-09~2021-02-28）的-17.88%跑输中：
+> 1. 覆盖差距=0%：在完整性口径下（与基准交易日对齐，18只完整数据ETF中），池内已覆盖最领涨方向512400.SH（有色ETF，+44.21%）。数据库41只ETF中23只中途上市被排除，18只完整参与，最领涨也是512400.SH，策略池已覆盖。
+> 2. 选股差距0.07%：各调仓期策略持仓平均0.04%，与未选中中位数-0.03%接近。说明策略选股能力在该区间中性，调仓节奏是主要问题。
+> 3. 权重差距0.05%不显著：逐日等权与策略实际权重接近。
+> 4. 退出差距-1.56%：止损机制在该区间保护了组合（止损比持有少亏1.56%）。
+> 5. 现金拖累7.13%：空仓期现金错失基准上涨。
+> 当时可交易ETF策略池11只（全部满足完整性口径），数据库41只中18只满足完整性口径。策略池（ETF_UNIVERSE）中部分后期热门板块ETF尚未上市。
+
+**未跟踪文件说明：**
+> 工作区存在9个名称为报告文本碎片的未跟踪文件（如`0%（真正的牛市）`、`3%意味着行业间差异显著。`等）。
+> 来源：之前某次Git Bash命令执行失败时，bash把命令行参数（报告中的中文文本）误解为文件名而创建。
+> 未删除，不提交，已确认来源并记录。
+
+**改了哪些文件：**
+- 修改 `scripts/phase6_8_structural_bull_attribution.py` - v2.4（新增 `get_bench_trading_dates`，修改 `has_complete_data` 与基准交易日对齐，修改 `diagnose_coverage_gap` 接收 `bench_df`）
+- 新增 `tests/test_phase6_8_coverage.py` - pytest 测试（13个用例全部通过）
+- 更新 `reports/phase6_8_structural_bull_attribution.md` - 增加覆盖分析基准交易日对齐说明
+- 更新 `docs/CURRENT_STATE.md` - 更新Phase 6.8摘要
+- 更新 `docs/CHANGES.md` - 添加v2.4变更记录
+
+**Commit：** cd66c2e（v2.3） → 本次提交（v2.4）
+
+---
+
 ## 2026-06-21（本次 - Phase 6.8 结构牛市适应性归因 v2.3 覆盖分析完整性修正）
 
 **问题根因：**
