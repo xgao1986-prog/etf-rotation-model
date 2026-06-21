@@ -1,51 +1,68 @@
 # 当前工程现场
 
-**最后更新**：2026-06-21（Phase 8.1 完成：排名位置预测力诊断，结论分支情况B，继续Top 5等权，不进入Phase 8.2）
+**最后更新**：2026-06-21（Phase 8.1 v2 完成：排名位置预测力诊断方法论修正，结论情况C/证据不足，不进入仓位或凯利实验）
 **工作目录**：`D:\etf_rotation_model`
 
 ---
 
 ## 全部完成 ✅
 
-### Phase 8.1: 排名位置预测力诊断
+### Phase 8.1: 排名位置预测力诊断（v2 方法论修正版 — 结论C/证据不足）
 
 **目标：** 验证 B0.3 每期横截面排名是否能够预测后续收益，尤其回答 Rank 1-5 内部是否具有稳定区分度。
 
-**冻结基准：**
+**v1 问题（已修正）：**
+- 未来收益多算一天：从 T+2 开始而非 T+1
+- Spearman 混合所有日期计算，违反横截面独立性
+- Top5-Bottom5 跨日期混合，导致时代混淆
+- 未分三组报告，未使用 B0.3 实际调仓日
+- 差异 CI 方向错误，结论 v1 不应写为"情况B"
+
+**v2 冻结基准：**
 - 18 只 ETF 的 B0.3（momentum_factor_enabled=False, volatility_factor_enabled=False）
 - 排名范围仅 16 只行业 ETF，排除黄金和国债
 - 不修改策略、评分、交易规则或仓位
 - 研究区间：2019-08-13 ~ 2024-12-31（训练期 2019-2022，验证期 2023-2024）
 
-**核心结果：**
+**v2 统计方法：**
+- Rank IC 逐日计算：每个调仓日单独计算 16 只 ETF rank 与 forward return 的横截面 Spearman，得 IC 时间序列
+- 配对差异逐日计算：每调仓日计算 Top5-Bottom5、Rank1-Rank5、Rank1-5 斜率，得差值时间序列
+- Block bootstrap 置信区间：日期 block 重采样 1000 次，95% CI，避免跨日期混淆
+- 分开报告三组：A（全部 16 只）、B（满足 BUY 条件重排）、C（实际 Top5）
+
+**v2 核心结果（A组 — 全部16只）：**
 
 | 指标 | 5D | 10D | 20D |
 |------|----|-----|-----|
-| Rank 1 vs Rank 5 差 | +0.18% | +0.21% | -0.44% |
-| 训练期 Top5-Bottom5 | +0.39% | +1.16% | +1.10% |
-| 验证期 Top5-Bottom5 | +0.07% | +0.01% | -0.11% |
-| 方向一致性 | 一致 | 一致 | **不一致** |
+| Rank IC 均值 | -0.0084 | -0.0011 | 0.0254 |
+| Rank IC t 统计量 | -1.28 | -0.18 | 1.12 |
+| Top5-Bottom5 差 | +0.17% | +0.13% | -0.09% |
+| Top5-Bottom5 95% CI | [-0.14%, 0.45%] | [-0.28%, 0.51%] | [-0.58%, 0.42%] |
+| 训练期方向 | +0.15% | +0.06% | -0.35% |
+| 验证期方向 | +0.20% | +0.27% | +0.39% |
+| 方向一致性 | 是 | 是 | **否** |
 
-**Block Bootstrap 95% CI：**
-- 大多数排名的平均收益在统计上不显著（CI 包含 0）
-- 5D 仅 Rank 3 CI 不包含 0；10D 仅 Rank 3/8；20D 仅 Rank 8
+**v2 核心发现：**
+- Rank IC 均值接近 0，所有期限 t 统计量均 < 2，95% CI 均包含 0，不显著
+- Top5-Bottom5 差异在所有期限下 95% CI 均包含 0，不显著
+- Rank1-Rank5 差异在所有期限下 95% CI 均包含 0，不显著
+- Rank1-5 斜率在所有期限下 95% CI 均包含 0，不显著
+- 20D 训练期与验证期方向不一致（训练期-0.35% vs 验证期+0.39%）
+- B组（满足 BUY 条件排名）同样不显著
+- C组（实际入选 Top5）Top5-Bottom5 差值为 0（定义导致）
 
-**Spearman 相关（Rank vs 未来收益）：**
-- 5D: r=-0.0067, p=0.5736（无显著相关）
-- 10D: r=-0.0016, p=0.8910（无显著相关）
-- 20D: r=-0.0104, p=0.3847（无显著相关）
+**v2 结论：情况 C / 证据不足**
+> 在修正方法论后，所有统计检验均不显著。不进入仓位差异化或凯利实验。继续 Top 5 等权，不修改策略。
 
-**结论分支：情况B**
-> Top 5 优于其他排名，但 Rank 1-5 内部无稳定区分度。评分适合筛选 Top 5，但不适合决定内部权重。
+**v2 文件：**
+- `scripts/phase8_1_rank_position_diagnostics.py`（v2 方法论修正版）
+- `reports/phase8_1_rank_position_diagnostics.md`（v2 报告）
+- `reports/phase8_1_rank_ic.csv`（逐日 Rank IC）
+- `reports/phase8_1_rank_samples.csv`（每期样本）
+- `reports/phase8_1_rank_summary.csv`（汇总统计）
+- `reports/phase8_1_rank_diagnostics.png`（可视化图表）
 
-**建议**：继续 Top 5 等权，不测试 Rank 1 重仓。不进入 Phase 8.2。
-
-**文件**：
-- `scripts/phase8_1_rank_position_diagnostics.py`
-- `reports/phase8_1_rank_position_diagnostics.md`
-- `reports/phase8_1_rank_samples.csv`
-- `reports/phase8_1_rank_summary.csv`
-- `reports/phase8_1_rank_diagnostics.png`
+**v1 文件（已废弃）：** 原 `scripts/phase8_1_rank_position_diagnostics.py`（v1 方法论存在缺陷）已被 v2 覆盖
 
 ---
 
