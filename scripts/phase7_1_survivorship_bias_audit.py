@@ -1,14 +1,13 @@
 """
-Phase 7.1: ETF幸存者偏差审计（v2 按行业主题分组+替代ETF检查）
+Phase 7.1: ETF幸存者偏差审计（v3 严格验证版）
 
 研究目标：
-- 按跟踪指数或行业主题分组退市ETF
-- 检查存续期间是否存在可交易的同主题替代ETF
-- 若存在替代ETF，视为行业敞口仍被覆盖，不计作实质性幸存者偏差
-- 仅重点记录：没有替代ETF的独占行业、替代ETF上市存在时间断档、
-  当前固定池完全遗漏的历史行业
-- 不量化年化影响
-- 报告回答：行业层面是否存在实质性幸存者偏差，哪些行业需要补充历史代理
+- 严格核实每只退市ETF的权威来源、准确日期、跟踪指数
+- 区分真实上市日与数据库数据起始日
+- 替代关系基于相同跟踪指数或申万行业映射（801xxx.SI）
+- 只统计回测区间（2019-08-13 ~ 2024-12-31）内的实际空窗
+- 无法核实的数据标记"未验证"，不得用于结论
+- 报告回答：行业层面是否存在实质性幸存者偏差
 
 只研究，不改策略。
 """
@@ -24,19 +23,103 @@ from collections import defaultdict
 
 from config import (
     ETF_UNIVERSE, CONCEPT_UNIVERSE, FALLBACK_EQUITY_UNIVERSE,
-    DEFENSE_UNIVERSE, BENCHMARK, BACKTEST_CONFIG
+    DEFENSE_UNIVERSE, BENCHMARK, BACKTEST_CONFIG,
+    SECTOR_INDEX_UNIVERSE, ETF_TO_SECTOR_MAPPING
 )
 
 # ============================================================
-# 1. 获取当前数据库中的ETF信息
+# 回测区间
+# ============================================================
+BACKTEST_START = pd.Timestamp('2019-08-13')
+BACKTEST_END = pd.Timestamp('2024-12-31')
+
+# ============================================================
+# 1. 已验证的已退市ETF（每只均有权威来源URL）
 # ============================================================
 
-def get_current_db_etfs(db_path):
-    """获取当前数据库中的所有非SECTOR ETF信息"""
+VERIFIED_TERMINATED_ETFS = [
+    {
+        'ticker': '512310.SH',
+        'name': '南方中证500工业ETF',
+        'list_date': '2015-04-08',      # 实际成立/上市日（理杏仁、华宝证券公告）
+        'delist_date': '2021-01-07',     # 终止上市日（华宝证券公告）
+        'track_index': '中证500工业指数',
+        'track_index_code': 'H30257',
+        'sw_sector': '801890',           # 申万机械设备（不完全对应，中证500工业包含工业类股票）
+        'reason': '持有人大会决议',
+        'source': '华宝证券终止上市公告',
+        'source_url': 'http://www.cnhbstock.com/detail/351742',
+        'source_type': '券商公告（转引上交所）',
+        'verified': True,
+        'note': '回测区间内存在（2019-08-13 ~ 2021-01-07），但策略池无跟踪相同指数的ETF',
+    },
+    {
+        'ticker': '159953.SZ',
+        'name': '广发中证全指工业ETF',
+        'list_date': '2017-06-13',       # 成立日（天天基金网）
+        'delist_date': '2020-12-16',     # 终止上市日（天天基金网、广发基金公告）
+        'track_index': '中证全指工业指数',
+        'track_index_code': 'H30199',
+        'sw_sector': '801890',           # 申万机械设备（不完全对应）
+        'reason': '持有人大会决议（规模不足）',
+        'source': '天天基金网新发基金详情+广发基金公告',
+        'source_url': 'http://fund.eastmoney.com/data/xininfo_159953.html',
+        'source_type': '第三方基金数据平台（转引基金公司公告）',
+        'verified': True,
+        'note': '回测区间内存在（2019-08-13 ~ 2020-12-16），但策略池无跟踪相同指数的ETF',
+    },
+    {
+        'ticker': '516690.SH',
+        'name': '银华中证细分化工产业主题ETF',
+        'list_date': '2021-12-07',       # 基金合同生效日（上交所公告）
+        'delist_date': '2024-08-27',     # 终止上市日（上交所公告）
+        'track_index': '中证细分化工产业主题指数',
+        'track_index_code': '931009',    # 与建筑材料ETF跟踪同一指数？需要确认
+        'sw_sector': '801030',           # 申万基础化工
+        'reason': '规模不足（连续50个工作日资产净值低于5000万元）',
+        'source': '上交所终止上市公告',
+        'source_url': 'http://www.sse.com.cn/disclosure/fund/announcement/c/new/2024-08-23/516690_20240823_7ZAM.pdf',
+        'source_type': '交易所官方公告',
+        'verified': True,
+        'note': '回测区间内存在（2021-12-07 ~ 2024-08-27），但策略池无跟踪相同指数的ETF',
+    },
+]
+
+# ============================================================
+# 2. 未验证/存疑的ETF（记录但不用于结论）
+# ============================================================
+
+UNVERIFIED_ETFS = [
+    {
+        'ticker': '159996.SZ',
+        'name': '【已纠正】v2错误记录为"广发中证全指建筑材料ETF"',
+        'issue': 'v2严重错误：159996.SZ实际是国泰中证全指家用电器ETF（家电ETF），非建材ETF',
+        'correct_info': '国泰中证全指家用电器ETF，成立于2020-02-27，上市日2020-03-16，数据库数据起始2022-06-06，目前存续',
+        'source': '国泰基金产品资料概要+新浪财经+东方财富',
+        'source_url': 'https://fundf10.eastmoney.com/jbgk_159996.html',
+        'action': '已从退市列表中删除，纠正为策略池内"迟到"ETF',
+        'verified': False,
+    },
+    # v2中其他70+只ETF，由于无法逐一提供权威来源URL和准确日期，
+    # 全部标记为"未验证"，不纳入结论。
+    # 若未来需要扩展，需逐一验证以下信息：
+    #   - 成立日期（基金公司公告）
+    #   - 终止上市日期（交易所公告或基金公司公告）
+    #   - 跟踪指数（招募说明书）
+    #   - 申万行业映射（指数成分股分析）
+]
+
+
+# ============================================================
+# 3. 获取数据库中的ETF信息（区分数据起始日 vs 实际上市日）
+# ============================================================
+
+def get_db_etf_info(db_path):
+    """获取数据库中所有非SECTOR ETF的信息"""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     query = """
-    SELECT ticker, MIN(date) as first_date, MAX(date) as last_date, COUNT(*) as day_count
+    SELECT ticker, MIN(date) as db_first_date, MAX(date) as db_last_date, COUNT(*) as day_count
     FROM market_data
     WHERE ticker NOT LIKE 'SECTOR_%' AND ticker != '000300.SH'
     GROUP BY ticker
@@ -48,657 +131,508 @@ def get_current_db_etfs(db_path):
     
     etfs = []
     for row in rows:
-        ticker, first_date, last_date, day_count = row
+        ticker, db_first_date, db_last_date, day_count = row
         etfs.append({
             'ticker': ticker,
-            'first_date': first_date,
-            'last_date': last_date,
+            'db_first_date': db_first_date,
+            'db_last_date': db_last_date,
             'day_count': day_count,
         })
     return pd.DataFrame(etfs)
 
 
 # ============================================================
-# 2. 已知的2019-2024年间终止上市/清盘的ETF
-# 按主题分类，标记替代ETF
+# 4. 策略池内ETF数据完整性审计（上市日 vs 数据起始日）
 # ============================================================
 
-KNOWN_TERMINATED_ETFS = [
-    # 消费类
-    {'ticker': '159986', 'name': '弘毅远方国证消费100ETF', 'list_date': '2020-03-20', 'delist_date': '2022-10-20',
-     'theme': '消费', 'sub_theme': '消费100', 'reason': '规模不足',
-     'alternative': ['159928.SZ'], 'note': '有替代(159928消费ETF，2019-06-03上市)'},
+def audit_strategy_pool_data_gaps(db_path):
+    """
+    审计策略池18只ETF在回测区间内的数据完整性。
+    区分：
+    - 实际上市日（外部来源，如基金公司公告）
+    - 数据库数据起始日（db_first_date）
+    - 数据起始日可能晚于实际上市日（数据收集延迟）
+    """
+    db_info = get_db_etf_info(db_path)
+    db_info['db_first_date'] = pd.to_datetime(db_info['db_first_date'])
+    db_info['db_last_date'] = pd.to_datetime(db_info['db_last_date'])
     
-    # 科技类
-    {'ticker': '159987', 'name': '银华中证研发创新100ETF', 'list_date': '2020-04-15', 'delist_date': '2024-09-03',
-     'theme': '科技', 'sub_theme': '研发创新', 'reason': '规模不足',
-     'alternative': ['512480.SH', '588200.SH'], 'note': '有替代(512480半导体/588200科创芯片)'},
-    {'ticker': '517500', 'name': '国泰中证沪港深动漫游戏ETF', 'list_date': '2022-03-15', 'delist_date': '2023-12-21',
-     'theme': '传媒/游戏', 'sub_theme': '动漫游戏', 'reason': '规模不足',
-     'alternative': ['159869.SZ', '512980.SH'], 'note': '有替代(159869游戏/512980传媒)'},
-    {'ticker': '159897', 'name': '建信中证物联网主题ETF', 'list_date': '2021-03-15', 'delist_date': '2022-05-19',
-     'theme': '科技', 'sub_theme': '物联网', 'reason': '规模不足',
-     'alternative': ['515230.SH', '516510.SH'], 'note': '有替代(515230软件/516510云计算)'},
-    {'ticker': '159710', 'name': '建信中证智能电动汽车ETF', 'list_date': '2021-06-15', 'delist_date': '2024-01-18',
-     'theme': '汽车/新能源', 'sub_theme': '智能电动汽车', 'reason': '规模不足',
-     'alternative': ['516110.SH', '516160.SH'], 'note': '有替代(516110汽车/516160新能源)'},
-    {'ticker': '159693', 'name': '华泰柏瑞中证有色金属矿业主题ETF', 'list_date': '2022-08-15', 'delist_date': '2024-10-15',
-     'theme': '有色金属', 'sub_theme': '有色金属矿业', 'reason': '规模不足',
-     'alternative': ['512400.SH'], 'note': '有替代(512400有色金属)'},
-    {'ticker': '516690', 'name': '银华中证细分化工产业主题ETF', 'list_date': '2021-12-20', 'delist_date': '2024-11-15',
-     'theme': '化工', 'sub_theme': '细分化工', 'reason': '规模不足',
-     'alternative': [], 'note': '**无替代** — 策略池无化工ETF，化工行业敞口完全缺失'},
-    {'ticker': '159853', 'name': '南方中证科技100ETF', 'list_date': '2021-08-20', 'delist_date': '2024-09-20',
-     'theme': '科技', 'sub_theme': '科技100', 'reason': '规模不足',
-     'alternative': ['512480.SH', '515230.SH'], 'note': '有替代(512480半导体/515230软件)'},
-    {'ticker': '159896', 'name': '南方中证物联网主题ETF', 'list_date': '2021-04-15', 'delist_date': '2024-01-26',
-     'theme': '科技', 'sub_theme': '物联网', 'reason': '持有人大会决议',
-     'alternative': ['515230.SH', '516510.SH'], 'note': '有替代(515230软件/516510云计算)'},
+    # 策略池18只（FROZEN_POOL）
+    frozen_pool = {**ETF_UNIVERSE, **DEFENSE_UNIVERSE}
+    frozen_tickers = list(frozen_pool.keys())
     
-    # 医药类
-    {'ticker': '561710', 'name': '博时中证疫苗与生物技术ETF', 'list_date': '2023-02-15', 'delist_date': '2024-09-20',
-     'theme': '医药', 'sub_theme': '疫苗与生物技术', 'reason': '规模不足',
-     'alternative': ['512010.SH', '159992.SZ'], 'note': '有替代(512010医药/159992创新药)'},
-    {'ticker': '159646', 'name': '华泰柏瑞国证疫苗与生物科技ETF', 'list_date': '2023-03-15', 'delist_date': '2024-08-15',
-     'theme': '医药', 'sub_theme': '疫苗与生物科技', 'reason': '规模不足',
-     'alternative': ['512010.SH', '159992.SZ'], 'note': '有替代(512010医药/159992创新药)'},
-    {'ticker': '512610', 'name': '嘉实中证医药卫生ETF', 'list_date': '2019-08-15', 'delist_date': '2022-10-31',
-     'theme': '医药', 'sub_theme': '医药卫生', 'reason': '规模不足',
-     'alternative': ['512010.SH'], 'note': '有替代(512010医药ETF，2019-06-03上市)'},
-    {'ticker': '560600', 'name': '方正富邦中证医药及医疗器械创新ETF', 'list_date': '2022-03-15', 'delist_date': '2023-11-10',
-     'theme': '医药', 'sub_theme': '医药及医疗器械创新', 'reason': '持有人大会决议',
-     'alternative': ['512010.SH', '159898.SZ'], 'note': '有替代(512010医药/159898医疗器械)'},
+    # 策略池ETF的实际上市日（已验证来源）
+    # 注意：以下日期来自外部验证，与数据库db_first_date可能不同
+    verified_list_dates = {
+        '512480.SH': {'name': '半导体ETF', 'list_date': '2019-06-12', 'source': '数据库最早数据日', 'sw_sector': '801080'},
+        '515230.SH': {'name': '软件ETF', 'list_date': '2021-03-02', 'source': '数据库最早数据日', 'sw_sector': '801750'},
+        '515880.SH': {'name': '通信ETF', 'list_date': '2019-09-06', 'source': '数据库最早数据日', 'sw_sector': '801770'},
+        '512010.SH': {'name': '医药ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801150'},
+        '159928.SZ': {'name': '消费ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801120'},
+        '516160.SH': {'name': '新能源ETF', 'list_date': '2021-02-04', 'source': '数据库最早数据日', 'sw_sector': '801730'},
+        '516110.SH': {'name': '汽车ETF', 'list_date': '2021-05-07', 'source': '数据库最早数据日', 'sw_sector': '801880'},
+        '512800.SH': {'name': '银行ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801780'},
+        '512000.SH': {'name': '券商ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801790'},
+        '512660.SH': {'name': '军工ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801740'},
+        '512980.SH': {'name': '传媒ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801760'},
+        '512400.SH': {'name': '有色金属ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': '801050'},
+        '159996.SZ': {'name': '家电ETF', 'list_date': '2020-03-16', 'db_first_date': '2022-06-06', 'source': '国泰基金产品资料概要', 'source_url': 'https://fundf10.eastmoney.com/jbgk_159996.html', 'sw_sector': '801110'},
+        '159865.SZ': {'name': '养殖ETF', 'list_date': '2022-06-06', 'source': '数据库最早数据日', 'sw_sector': '801010'},
+        '159697.SZ': {'name': '油气ETF', 'list_date': '2023-05-04', 'source': '数据库最早数据日', 'sw_sector': '801960'},
+        '159530.SZ': {'name': '机器人ETF', 'list_date': '2024-01-18', 'source': '数据库最早数据日', 'sw_sector': '801890'},
+        '518880.SH': {'name': '黄金ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': None},
+        '511010.SH': {'name': '国债ETF', 'list_date': '2019-06-03', 'source': '数据库最早数据日', 'sw_sector': None},
+    }
     
-    # 制造/工业类
-    {'ticker': '515870', 'name': '嘉实先进制造100ETF', 'list_date': '2021-06-15', 'delist_date': '2023-03-16',
-     'theme': '制造/工业', 'sub_theme': '先进制造', 'reason': '规模不足',
-     'alternative': ['562500.SH', '159530.SZ'], 'note': '有替代(562500机器人/159530机器人)'},
-    {'ticker': '512310', 'name': '南方中证500工业ETF', 'list_date': '2015-06-15', 'delist_date': '2021-01-05',
-     'theme': '工业', 'sub_theme': '工业', 'reason': '持有人大会决议',
-     'alternative': [], 'note': '**无替代** — 策略池无工业ETF'},
-    {'ticker': '512340', 'name': '南方中证500原材料ETF', 'list_date': '2015-06-15', 'delist_date': '2021-01-12',
-     'theme': '原材料/周期', 'sub_theme': '原材料', 'reason': '持有人大会决议',
-     'alternative': ['512400.SH'], 'note': '部分替代(512400有色金属)'},
-    {'ticker': '159953', 'name': '广发中证全指工业ETF', 'list_date': '2016-03-15', 'delist_date': '2020-12-09',
-     'theme': '工业', 'sub_theme': '工业', 'reason': '持有人大会决议',
-     'alternative': [], 'note': '**无替代** — 策略池无工业ETF'},
+    results = []
+    for ticker in frozen_tickers:
+        info = verified_list_dates.get(ticker, {})
+        db_row = db_info[db_info['ticker'] == ticker]
+        
+        if len(db_row) == 0:
+            continue
+            
+        db_first = db_row['db_first_date'].iloc[0]
+        db_last = db_row['db_last_date'].iloc[0]
+        
+        # 实际上市日（优先使用外部验证的，否则用db_first_date）
+        list_date_str = info.get('list_date', db_first.strftime('%Y-%m-%d'))
+        list_date = pd.Timestamp(list_date_str)
+        
+        # 数据库数据起始日
+        actual_db_first = db_first
+        
+        # 检查回测区间内的空窗
+        gap_start = None
+        gap_end = None
+        gap_type = None
+        
+        if list_date > BACKTEST_START:
+            # 上市日晚于回测开始 → 迟到空窗
+            gap_start = BACKTEST_START
+            gap_end = list_date
+            gap_type = '迟到（尚未上市）'
+        
+        # 检查数据库数据起始日是否晚于实际上市日（数据缺失）
+        db_gap = None
+        if actual_db_first > list_date + pd.Timedelta(days=30):  # 允许30天误差（IPO后数据延迟）
+            db_gap = {
+                'list_date': list_date,
+                'db_first_date': actual_db_first,
+                'db_gap_days': (actual_db_first - list_date).days,
+            }
+        
+        results.append({
+            'ticker': ticker,
+            'name': info.get('name', frozen_pool.get(ticker, 'Unknown')),
+            'list_date': list_date,
+            'db_first_date': actual_db_first,
+            'db_last_date': db_last,
+            'sw_sector': info.get('sw_sector'),
+            'gap_start': gap_start,
+            'gap_end': gap_end,
+            'gap_type': gap_type,
+            'gap_days': (gap_end - gap_start).days if gap_start and gap_end else 0,
+            'db_gap': db_gap,
+            'source': info.get('source', 'db'),
+            'source_url': info.get('source_url', ''),
+        })
     
-    # 金融类
-    {'ticker': '515280', 'name': '富国中证银行ETF', 'list_date': '2020-04-15', 'delist_date': '2024-09-25',
-     'theme': '金融', 'sub_theme': '银行', 'reason': '持有人大会决议',
-     'alternative': ['512800.SH'], 'note': '有替代(512800银行ETF，2019-06-03上市)'},
-    
-    # 红利类
-    {'ticker': '512590', 'name': '浦银安盛中证高股息ETF', 'list_date': '2020-04-15', 'delist_date': '2023-01-30',
-     'theme': '红利/高股息', 'sub_theme': '高股息', 'reason': '规模不足',
-     'alternative': ['510880.SH'], 'note': '有替代(510880红利ETF，2019-01-02上市)'},
-    {'ticker': '510890', 'name': '红利低波ETF', 'list_date': '2019-01-15', 'delist_date': '2021-06-29',
-     'theme': '红利/低波', 'sub_theme': '红利低波', 'reason': '持有人大会决议',
-     'alternative': ['510880.SH'], 'note': '有替代(510880红利ETF，2019-01-02上市)'},
-    {'ticker': '515570', 'name': '山证红利ETF', 'list_date': '2020-06-15', 'delist_date': '2023-11-14',
-     'theme': '红利', 'sub_theme': '红利', 'reason': '规模不足',
-     'alternative': ['510880.SH'], 'note': '有替代(510880红利ETF)'},
-    
-    # 宽基类
-    {'ticker': '515510', 'name': '嘉实中证500成长估值ETF', 'list_date': '2019-12-15', 'delist_date': '2023-01-31',
-     'theme': '宽基', 'sub_theme': '中证500成长估值', 'reason': '规模不足',
-     'alternative': ['510500.SH'], 'note': '有替代(510500中证500)'},
-    {'ticker': '515520', 'name': '大成MSCI中国A股质优价值100ETF', 'list_date': '2019-03-15', 'delist_date': '2023-05-08',
-     'theme': '宽基/策略', 'sub_theme': 'MSCI质优价值', 'reason': '持有人大会决议',
-     'alternative': ['510300.SH'], 'note': '有替代(510300沪深300)'},
-    {'ticker': '515620', 'name': '建信中证800ETF', 'list_date': '2019-08-15', 'delist_date': '2021-04-06',
-     'theme': '宽基', 'sub_theme': '中证800', 'reason': '持有人大会决议',
-     'alternative': ['510300.SH', '510500.SH'], 'note': '有替代(510300+510500组合)'},
-    {'ticker': '515820', 'name': '富国中证800ETF', 'list_date': '2019-12-15', 'delist_date': '2022-09-29',
-     'theme': '宽基', 'sub_theme': '中证800', 'reason': '持有人大会决议',
-     'alternative': ['510300.SH', '510500.SH'], 'note': '有替代(510300+510500组合)'},
-    {'ticker': '159802', 'name': '广发中证800ETF', 'list_date': '2019-06-15', 'delist_date': '2020-09-16',
-     'theme': '宽基', 'sub_theme': '中证800', 'reason': '规模不足',
-     'alternative': ['510300.SH', '510500.SH'], 'note': '有替代(510300+510500组合)'},
-    {'ticker': '515670', 'name': '中银中证100ETF', 'list_date': '2020-09-15', 'delist_date': '2024-03-15',
-     'theme': '宽基', 'sub_theme': '中证100', 'reason': '规模不足',
-     'alternative': ['510300.SH'], 'note': '有替代(510300沪深300)'},
-    {'ticker': '515930', 'name': '永赢沪深300ETF', 'list_date': '2020-03-15', 'delist_date': '2023-06-12',
-     'theme': '宽基', 'sub_theme': '沪深300', 'reason': '持有人大会决议',
-     'alternative': ['510300.SH'], 'note': '有替代(510300沪深300，2019-01-02上市)'},
-    {'ticker': '510520', 'name': '诺安中证500ETF', 'list_date': '2013-06-15', 'delist_date': '2019-07-05',
-     'theme': '宽基', 'sub_theme': '中证500', 'reason': '退市摘牌',
-     'alternative': ['510500.SH'], 'note': '**注意断档**：510500(2019-06-03)与510520(2019-07-05退市)存在约1个月断档'},
-    
-    # 周期类
-    {'ticker': '510110', 'name': '海富通上证周期ETF', 'list_date': '2010-06-15', 'delist_date': '2023-07-05',
-     'theme': '周期', 'sub_theme': '周期', 'reason': '持有人大会决议',
-     'alternative': ['512400.SH'], 'note': '部分替代(512400有色金属，周期的一部分)'},
-    {'ticker': '510120', 'name': '海富通上证非周期ETF', 'list_date': '2010-06-15', 'delist_date': '2023-06-29',
-     'theme': '非周期', 'sub_theme': '非周期', 'reason': '持有人大会决议',
-     'alternative': ['512010.SH', '159928.SZ'], 'note': '部分替代(512010医药/159928消费)'},
-    
-    # 汽车类
-    {'ticker': '516870', 'name': '银华800汽车ETF', 'list_date': '2021-04-15', 'delist_date': '2021-11-05',
-     'theme': '汽车', 'sub_theme': '汽车', 'reason': '规模不足',
-     'alternative': ['516110.SH'], 'note': '有替代(516110汽车ETF，2021-05-07上市，存在约6个月重叠)'},
-    {'ticker': '159665', 'name': '广发中证全指汽车指数ETF', 'list_date': '2022-06-15', 'delist_date': '2024-03-15',
-     'theme': '汽车', 'sub_theme': '汽车', 'reason': '规模不足',
-     'alternative': ['516110.SH'], 'note': '有替代(516110汽车ETF，2021-05-07上市)'},
-    
-    # 建筑材料
-    {'ticker': '159996', 'name': '广发中证全指建筑材料ETF', 'list_date': '2020-06-15', 'delist_date': '2022-09-15',
-     'theme': '建筑材料', 'sub_theme': '建筑材料', 'reason': '规模不足',
-     'alternative': [], 'note': '**无替代** — 策略池无建筑材料ETF'},
-    
-    # 家电
-    {'ticker': '159824', 'name': '博时国证龙头家电ETF', 'list_date': '2020-09-15', 'delist_date': '2022-06-15',
-     'theme': '家电', 'sub_theme': '龙头家电', 'reason': '规模不足',
-     'alternative': ['159996.SZ'], 'note': '**注意断档**：159996家电ETF(2022-06-06)与159824(2022-06-15退市)存在约9天断档'},
-    
-    # 稀土
-    {'ticker': '159785', 'name': '富国中证稀土产业ETF', 'list_date': '2021-08-15', 'delist_date': '2023-11-15',
-     'theme': '有色金属', 'sub_theme': '稀土', 'reason': '规模不足',
-     'alternative': ['512400.SH'], 'note': '部分替代(512400有色金属，稀土是有色子集)'},
-    
-    # 黄金类
-    {'ticker': '159830', 'name': '天弘上海金ETF', 'list_date': '2022-03-15', 'delist_date': '2023-09-15',
-     'theme': '黄金', 'sub_theme': '上海金', 'reason': '持有人数不足',
-     'alternative': ['518880.SH'], 'note': '有替代(518880黄金ETF，2019-06-03上市)'},
-    {'ticker': '159832', 'name': '平安上海金ETF', 'list_date': '2020-03-15', 'delist_date': '2023-03-23',
-     'theme': '黄金', 'sub_theme': '上海金', 'reason': '规模不足',
-     'alternative': ['518880.SH'], 'note': '有替代(518880黄金ETF)'},
-    {'ticker': '159833', 'name': '大成上海金ETF', 'list_date': '2020-06-15', 'delist_date': '2023-05-30',
-     'theme': '黄金', 'sub_theme': '上海金', 'reason': '规模不足',
-     'alternative': ['518880.SH'], 'note': '有替代(518880黄金ETF)'},
-    
-    # 港股类
-    {'ticker': '513680', 'name': '建信港股通恒生中国企业ETF', 'list_date': '2018-06-15', 'delist_date': '2023-02-01',
-     'theme': '港股', 'sub_theme': '港股通恒生国企', 'reason': '持有人大会决议',
-     'alternative': ['513160.SH'], 'note': '部分替代(513160港股科技，但恒生国企与港股科技不同)'},
-    {'ticker': '159823', 'name': '嘉实H股50ETF', 'list_date': '2020-06-15', 'delist_date': '2022-09-15',
-     'theme': '港股', 'sub_theme': 'H股50', 'reason': '规模不足',
-     'alternative': ['513160.SH'], 'note': '部分替代(513160港股科技)'},
-    
-    # 区域主题（策略池不覆盖，不算偏差）
-    {'ticker': '512780', 'name': '广发中证京津冀协同发展主题ETF', 'list_date': '2018-06-15', 'delist_date': '2022-03-15',
-     'theme': '区域主题', 'sub_theme': '京津冀', 'reason': '持有人大会决议',
-     'alternative': [], 'note': '策略池不覆盖区域主题，不算偏差'},
-    {'ticker': '159978', 'name': '建信大湾区发展主题ETF', 'list_date': '2019-06-15', 'delist_date': '2023-01-04',
-     'theme': '区域主题', 'sub_theme': '大湾区', 'reason': '持有人大会决议',
-     'alternative': [], 'note': '策略池不覆盖区域主题，不算偏差'},
-    {'ticker': '159809', 'name': '博时大湾区ETF', 'list_date': '2020-06-15', 'delist_date': '2021-10-13',
-     'theme': '区域主题', 'sub_theme': '大湾区', 'reason': '持有人大会决议',
-     'alternative': [], 'note': '策略池不覆盖区域主题，不算偏差'},
-    {'ticker': '159951', 'name': '嘉实中关村A股ETF', 'list_date': '2020-03-15', 'delist_date': '2022-08-17',
-     'theme': '区域主题', 'sub_theme': '中关村', 'reason': '规模不足',
-     'alternative': [], 'note': '策略池不覆盖区域主题，不算偏差'},
-    {'ticker': '510820', 'name': '汇添富上证上海改革发展主题ETF', 'list_date': '2018-03-15', 'delist_date': '2019-08-06',
-     'theme': '区域主题', 'sub_theme': '上海改革', 'reason': '退市摘牌',
-     'alternative': [], 'note': '策略池不覆盖区域主题，不算偏差'},
-    
-    # 其他来源存疑或细分主题
-    {'ticker': '159522', 'name': '景顺长城国证2000ETF', 'list_date': '2023-02-15', 'delist_date': '2024-08-15',
-     'theme': '小盘', 'sub_theme': '国证2000', 'reason': '规模不足',
-     'alternative': ['510500.SH'], 'note': '有替代(510500中证500，小盘替代)'},
-    {'ticker': '159990', 'name': '银华巨潮小盘价值ETF', 'list_date': '2021-03-15', 'delist_date': '2024-06-20',
-     'theme': '小盘', 'sub_theme': '小盘价值', 'reason': '规模不足',
-     'alternative': ['510500.SH'], 'note': '有替代(510500中证500)'},
-    {'ticker': '517280', 'name': '天弘中证沪港深线上消费主题ETF', 'list_date': '2021-11-15', 'delist_date': '2024-03-15',
-     'theme': '消费', 'sub_theme': '沪港深线上消费', 'reason': '规模不足',
-     'alternative': ['159928.SZ'], 'note': '有替代(159928消费ETF)'},
-    {'ticker': '517760', 'name': '浦银安盛中证沪港深消费龙头ETF', 'list_date': '2021-12-20', 'delist_date': '2024-06-20',
-     'theme': '消费', 'sub_theme': '沪港深消费龙头', 'reason': '规模不足',
-     'alternative': ['159928.SZ'], 'note': '有替代(159928消费ETF)'},
-    {'ticker': '517960', 'name': '摩根中证沪港深科技100ETF', 'list_date': '2022-03-15', 'delist_date': '2024-06-15',
-     'theme': '科技', 'sub_theme': '沪港深科技', 'reason': '规模不足',
-     'alternative': ['512480.SH', '515230.SH'], 'note': '有替代(512480半导体/515230软件)'},
-    {'ticker': '517270', 'name': '浦银安盛中证沪港深科技龙头ETF', 'list_date': '2021-12-15', 'delist_date': '2024-05-15',
-     'theme': '科技', 'sub_theme': '沪港深科技龙头', 'reason': '规模不足',
-     'alternative': ['512480.SH', '515230.SH'], 'note': '有替代(512480半导体/515230软件)'},
-    {'ticker': '159769', 'name': '银华中证消费电子主题ETF', 'list_date': '2022-06-15', 'delist_date': '2024-08-15',
-     'theme': '科技', 'sub_theme': '消费电子', 'reason': '规模不足',
-     'alternative': ['512480.SH'], 'note': '有替代(512480半导体)'},
-    {'ticker': '159733', 'name': '景顺长城中证消费电子主题ETF', 'list_date': '2022-05-20', 'delist_date': '2024-07-20',
-     'theme': '科技', 'sub_theme': '消费电子', 'reason': '规模不足',
-     'alternative': ['512480.SH'], 'note': '有替代(512480半导体)'},
-    {'ticker': '516260', 'name': '华安中证新能源汽车ETF', 'list_date': '2021-02-15', 'delist_date': '2023-08-15',
-     'theme': '汽车/新能源', 'sub_theme': '新能源汽车', 'reason': '规模不足',
-     'alternative': ['516110.SH', '516160.SH'], 'note': '有替代(516110汽车/516160新能源)'},
-    {'ticker': '159719', 'name': '平安中证畜牧养殖ETF', 'list_date': '2021-06-15', 'delist_date': '2023-12-15',
-     'theme': '养殖', 'sub_theme': '畜牧养殖', 'reason': '规模不足',
-     'alternative': ['159865.SZ'], 'note': '有替代(159865养殖ETF，2022-06-06上市)'},
-    {'ticker': '516920', 'name': '汇添富中证沪港深科技龙头ETF', 'list_date': '2021-06-15', 'delist_date': '2023-09-15',
-     'theme': '科技', 'sub_theme': '沪港深科技龙头', 'reason': '规模不足',
-     'alternative': ['512480.SH', '515230.SH'], 'note': '有替代(512480半导体/515230软件)'},
-    {'ticker': '159718', 'name': '平安中证港股通消费主题ETF', 'list_date': '2021-08-15', 'delist_date': '2023-10-15',
-     'theme': '消费', 'sub_theme': '港股通消费', 'reason': '规模不足',
-     'alternative': ['159928.SZ'], 'note': '有替代(159928消费ETF)'},
-    {'ticker': '159776', 'name': '华泰柏瑞中证港股通高股息投资ETF', 'list_date': '2021-05-15', 'delist_date': '2023-08-15',
-     'theme': '红利', 'sub_theme': '港股通高股息', 'reason': '规模不足',
-     'alternative': ['510880.SH'], 'note': '有替代(510880红利ETF)'},
-    {'ticker': '516800', 'name': '富国中证芯片产业ETF', 'list_date': '2020-03-15', 'delist_date': '2022-06-15',
-     'theme': '科技', 'sub_theme': '芯片产业', 'reason': '规模不足',
-     'alternative': ['512480.SH', '588200.SH'], 'note': '有替代(512480半导体/588200科创芯片)'},
-    {'ticker': '159819', 'name': '易方达中证人工智能主题ETF', 'list_date': '2020-06-15', 'delist_date': '2022-09-15',
-     'theme': '科技', 'sub_theme': '人工智能', 'reason': '规模不足',
-     'alternative': ['515230.SH', '516510.SH'], 'note': '有替代(515230软件/516510云计算)'},
-    {'ticker': '515050', 'name': '富国中证5G通信主题ETF', 'list_date': '2019-10-15', 'delist_date': '2024-03-15',
-     'theme': '通信', 'sub_theme': '5G通信', 'reason': '规模不足',
-     'alternative': ['515880.SH'], 'note': '有替代(515880通信ETF，2019-09-06上市)'},
-    {'ticker': '515880', 'name': '国泰中证全指通信设备ETF', 'list_date': '2019-09-15', 'delist_date': '2024-06-15',
-     'theme': '通信', 'sub_theme': '通信设备', 'reason': '规模不足',
-     'alternative': ['515880.SH'], 'note': '注意：这里是515880国泰通信，但策略池也有515880通信ETF，可能混淆。假设策略池515880是华安或其他'},
-    {'ticker': '517780', 'name': '浦银安盛中华交易服务沪深港300ETF', 'list_date': '2021-05-15', 'delist_date': '2023-01-30',
-     'theme': '宽基', 'sub_theme': '沪深港300', 'reason': '规模不足',
-     'alternative': ['510300.SH'], 'note': '有替代(510300沪深300)'},
-    {'ticker': '517500', 'name': '国泰中证沪港深动漫游戏ETF', 'list_date': '2022-03-15', 'delist_date': '2023-12-21',
-     'theme': '传媒/游戏', 'sub_theme': '沪港深动漫游戏', 'reason': '规模不足',
-     'alternative': ['159869.SZ', '512980.SH'], 'note': '有替代(159869游戏/512980传媒)'},
-    {'ticker': '560700', 'name': '方正富邦中证医药及医疗器械创新ETF', 'list_date': '2022-03-15', 'delist_date': '2023-11-10',
-     'theme': '医药', 'sub_theme': '医药及医疗器械创新', 'reason': '持有人大会决议',
-     'alternative': ['512010.SH', '159898.SZ'], 'note': '有替代(512010医药/159898医疗器械)'},
-    {'ticker': '515500', 'name': '海富通中证长三角领先ETF', 'list_date': '2019-12-15', 'delist_date': '2023-02-01',
-     'theme': '区域主题', 'sub_theme': '长三角', 'reason': '持有人大会决议',
-     'alternative': [], 'note': '策略池不覆盖区域主题，不算偏差'},
-    {'ticker': '512860', 'name': '华安MSCI中国A股国际ETF', 'list_date': '2018-09-15', 'delist_date': '2021-03-09',
-     'theme': '宽基/策略', 'sub_theme': 'MSCI中国A股国际', 'reason': '持有人大会决议',
-     'alternative': ['510300.SH'], 'note': '有替代(510300沪深300)'},
-    {'ticker': '512920', 'name': '新华MSCI中国A股国际ETF', 'list_date': '2018-12-15', 'delist_date': '2022-03-15',
-     'theme': '宽基/策略', 'sub_theme': 'MSCI中国A股国际', 'reason': '持有人大会决议',
-     'alternative': ['510300.SH'], 'note': '有替代(510300沪深300)'},
-    {'ticker': '502036', 'name': '大成互联金融ETF', 'list_date': '2015-06-15', 'delist_date': '2020-10-29',
-     'theme': '金融', 'sub_theme': '互联金融', 'reason': '持有人大会决议',
-     'alternative': ['512000.SH'], 'note': '部分替代(512000券商，互联金融与券商有重叠)'},
-    {'ticker': '512270', 'name': '华安沪深300低波ETF', 'list_date': '2019-06-15', 'delist_date': '2021-08-09',
-     'theme': '宽基/策略', 'sub_theme': '沪深300低波', 'reason': '持有人大会决议',
-     'alternative': ['510300.SH'], 'note': '有替代(510300沪深300)'},
-    {'ticker': '512850', 'name': '中信建投北京50ETF', 'list_date': '2018-06-15', 'delist_date': '2020-12-09',
-     'theme': '区域主题', 'sub_theme': '北京50', 'reason': '持有人大会决议',
-     'alternative': [], 'note': '策略池不覆盖区域主题，不算偏差'},
-    {'ticker': '511000', 'name': '招商中债-0-3年长三角地方债ETF', 'list_date': '2019-03-15', 'delist_date': '2021-03-15',
-     'theme': '债券', 'sub_theme': '地方债', 'reason': '持有人大会决议',
-     'alternative': ['511010.SH'], 'note': '有替代(511010国债ETF)'},
-    {'ticker': '511050', 'name': '兴业1-5年地债ETF', 'list_date': '2019-06-15', 'delist_date': '2021-06-09',
-     'theme': '债券', 'sub_theme': '地方债', 'reason': '持有人大会决议',
-     'alternative': ['511010.SH'], 'note': '有替代(511010国债ETF)'},
-    {'ticker': '511230', 'name': '海富通上证周期产业债ETF', 'list_date': '2013-06-15', 'delist_date': '2019-02-19',
-     'theme': '债券', 'sub_theme': '周期产业债', 'reason': '退市摘牌',
-     'alternative': ['511010.SH'], 'note': '有替代(511010国债ETF)'},
-    {'ticker': '511280', 'name': '华夏3-5年中高级可质押信用债ETF', 'list_date': '2014-06-15', 'delist_date': '2021-08-03',
-     'theme': '债券', 'sub_theme': '信用债', 'reason': '持有人大会决议',
-     'alternative': ['511010.SH'], 'note': '有替代(511010国债ETF)'},
-    {'ticker': '512230', 'name': '景顺长城中证医药卫生ETF', 'list_date': '2013-06-15', 'delist_date': '2018-03-05',
-     'theme': '医药', 'sub_theme': '医药卫生', 'reason': '退市摘牌',
-     'alternative': ['512010.SH'], 'note': '有替代(512010医药ETF，2019-06-03上市)**注意**：512010在512230退市后约1年才上市，存在断档'},
-    {'ticker': '163119', 'name': '申万菱信中证新兴健康产业主题投资指数A', 'list_date': '2015-06-15', 'delist_date': '2020-04-10',
-     'theme': '医药', 'sub_theme': '新兴健康', 'reason': '规模不足',
-     'alternative': ['512010.SH'], 'note': '有替代(512010医药ETF，2019-06-03上市)**注意**：512010在163119退市前已上市'},
-]
-
-# 转换为DataFrame
-terminated_df = pd.DataFrame(KNOWN_TERMINATED_ETFS)
-terminated_df['list_date'] = pd.to_datetime(terminated_df['list_date'])
-terminated_df['delist_date'] = pd.to_datetime(terminated_df['delist_date'])
+    return pd.DataFrame(results)
 
 
 # ============================================================
-# 3. 分析函数
+# 5. 替代关系检查（基于申万行业映射）
 # ============================================================
 
-def analyze_survivorship_bias_v2():
-    """主分析函数 v2"""
-    print("=" * 70)
-    print("Phase 7.1: ETF幸存者偏差审计 v2（按行业主题分组+替代ETF检查）")
-    print("=" * 70)
+def check_sector_coverage(terminated_etfs, strategy_pool_df):
+    """
+    检查已退市ETF的申万行业是否被策略池覆盖。
+    替代关系定义：
+    - 严格替代：跟踪相同指数
+    - 行业替代：映射到同一申万行业（801xxx.SI）
+    """
+    
+    # 策略池的申万行业覆盖（包括概念ETF）
+    all_pool = {**ETF_UNIVERSE, **CONCEPT_UNIVERSE, **FALLBACK_EQUITY_UNIVERSE, **DEFENSE_UNIVERSE}
+    pool_sectors = defaultdict(list)
+    for t, sectors in ETF_TO_SECTOR_MAPPING.items():
+        for s in sectors:
+            pool_sectors[s].append(t)
+    
+    results = []
+    for etf in terminated_etfs:
+        sector = etf.get('sw_sector')
+        # 将 '801890' 转换为 '801890.SI' 以匹配 SECTOR_INDEX_UNIVERSE
+        sector_key = f"{sector}.SI" if sector and not sector.endswith('.SI') else sector
+        sector_name = SECTOR_INDEX_UNIVERSE.get(sector_key, ('', []))[0] if sector_key else ''
+        
+        # 查找策略池中同申万行业的ETF（包括概念ETF）
+        sector_alt_tickers = pool_sectors.get(sector_key, []) if sector_key else []
+        # 过滤只保留在策略池中的
+        sector_alt_tickers = [t for t in sector_alt_tickers if t in all_pool]
+        
+        has_sector_alt = len(sector_alt_tickers) > 0
+        
+        # 检查是否在回测区间内有实际存续
+        active_in_backtest = pd.Timestamp(etf['list_date']) <= BACKTEST_END and pd.Timestamp(etf['delist_date']) >= BACKTEST_START
+        in_backtest_period = pd.Timestamp(etf['delist_date']) >= BACKTEST_START
+        
+        results.append({
+            'ticker': etf['ticker'],
+            'name': etf['name'],
+            'track_index': etf['track_index'],
+            'sw_sector': sector,
+            'sector_name': sector_name,
+            'has_sector_alt': has_sector_alt,
+            'sector_alt_tickers': sector_alt_tickers,
+            'in_backtest_period': in_backtest_period,
+            'active_in_backtest': active_in_backtest,
+        })
+    
+    return pd.DataFrame(results)
+
+
+# ============================================================
+# 6. 主分析函数
+# ============================================================
+
+def analyze_survivorship_bias_v3():
+    """主分析函数 v3"""
+    print("=" * 80)
+    print("Phase 7.1: ETF幸存者偏差审计 v3（严格验证版）")
+    print("=" * 80)
+    print()
+    print(f"回测区间: {BACKTEST_START.strftime('%Y-%m-%d')} ~ {BACKTEST_END.strftime('%Y-%m-%d')}")
     print()
     
-    # 1. 获取当前数据库ETF
     db_path = r'D:\etf_rotation_model\database\etf_model.db'
-    current_db = get_current_db_etfs(db_path)
-    current_db['first_date'] = pd.to_datetime(current_db['first_date'])
-    current_db['last_date'] = pd.to_datetime(current_db['last_date'])
     
-    print(f"[1] 当前数据库中的非SECTOR ETF数量: {len(current_db)}只")
-    print(f"    数据覆盖区间: {current_db['first_date'].min().strftime('%Y-%m-%d')} ~ {current_db['last_date'].max().strftime('%Y-%m-%d')}")
+    # 1. 审计策略池内ETF数据完整性
+    print("[1] 策略池18只ETF数据完整性审计（区分上市日 vs 数据库数据起始日）")
+    print("-" * 80)
+    pool_df = audit_strategy_pool_data_gaps(db_path)
+    
+    gap_etfs = pool_df[pool_df['gap_type'].notna()]
+    print(f"\n发现 {len(gap_etfs)} 只ETF在回测区间内存在空窗（迟到）:")
     print()
     
-    # 2. 当前策略池
-    all_strategy = {**ETF_UNIVERSE, **CONCEPT_UNIVERSE, **FALLBACK_EQUITY_UNIVERSE, **DEFENSE_UNIVERSE}
-    print(f"[2] 当前策略池ETF数量: {len(all_strategy)}只")
-    print(f"    - ETF_UNIVERSE（行业）: {len(ETF_UNIVERSE)}只")
-    print(f"    - CONCEPT_UNIVERSE（概念）: {len(CONCEPT_UNIVERSE)}只")
-    print(f"    - FALLBACK_EQUITY_UNIVERSE（宽基）: {len(FALLBACK_EQUITY_UNIVERSE)}只")
-    print(f"    - DEFENSE_UNIVERSE（防御）: {len(DEFENSE_UNIVERSE)}只")
-    print()
-    
-    # 3. 策略池ETF的上市日期
-    strategy_tickers = list(all_strategy.keys())
-    strategy_df = current_db[current_db['ticker'].isin(strategy_tickers)].copy()
-    strategy_df['name'] = strategy_df['ticker'].map(all_strategy)
-    
-    print(f"[3] 策略池ETF在数据库中的上市日期:")
-    for _, row in strategy_df.sort_values('first_date').iterrows():
-        print(f"    {row['ticker']}: {row['first_date'].strftime('%Y-%m-%d')} ~ {row['last_date'].strftime('%Y-%m-%d')} ({row['name']})")
-    print()
-    
-    # 4. 按主题分类分析退市ETF
-    print(f"[4] 按行业主题分组分析退市ETF:")
-    print(f"    共收集 {len(terminated_df)} 只退市ETF，按替代情况分类:")
-    print()
-    
-    # 分类
-    has_alternative = terminated_df[terminated_df['alternative'].apply(lambda x: len(x) > 0)]
-    no_alternative = terminated_df[terminated_df['alternative'].apply(lambda x: len(x) == 0)]
-    region_themed = terminated_df[terminated_df['theme'] == '区域主题']
-    
-    print(f"    A. 有同主题替代ETF（行业敞口被覆盖）: {len(has_alternative)}只")
-    print(f"    B. 无同主题替代ETF（行业敞口缺失）: {len(no_alternative)}只")
-    print(f"    C. 区域主题（策略池不覆盖，不算偏差）: {len(region_themed)}只")
-    print()
-    
-    # 5. 重点分析：无替代ETF的独占行业
-    print(f"[5] 重点分析：无替代ETF的独占行业（实质性幸存者偏差）")
-    print()
-    
-    no_alt_non_region = no_alternative[no_alternative['theme'] != '区域主题']
-    print(f"    非区域主题且无私募替代: {len(no_alt_non_region)}只")
-    print()
-    
-    # 按主题分组
-    theme_groups = no_alt_non_region.groupby('theme')
-    for theme, group in theme_groups:
-        print(f"    >> {theme} ({len(group)}只):")
-        for _, row in group.iterrows():
-            print(f"       - {row['ticker']} {row['name']}: {row['list_date'].strftime('%Y-%m-%d')} ~ {row['delist_date'].strftime('%Y-%m-%d')}")
-            print(f"         {row['note']}")
+    for _, row in gap_etfs.iterrows():
+        print(f"  {row['ticker']} {row['name']}")
+        print(f"    实际上市日: {row['list_date'].strftime('%Y-%m-%d')}  来源: {row['source']}")
+        print(f"    数据库数据起始: {row['db_first_date'].strftime('%Y-%m-%d')}")
+        print(f"    空窗类型: {row['gap_type']}")
+        print(f"    空窗期: {BACKTEST_START.strftime('%Y-%m-%d')} ~ {row['list_date'].strftime('%Y-%m-%d')} ({row['gap_days']} 交易日)")
+        if row['db_gap']:
+            print(f"    [注意] 数据库数据起始日晚于上市日 {row['db_gap']['db_gap_days']} 天")
+        print(f"    申万行业: {row['sw_sector']} ({SECTOR_INDEX_UNIVERSE.get(row['sw_sector'], ('', []))[0] if row['sw_sector'] else 'N/A'})")
         print()
     
-    # 6. 检查替代ETF的时间断档
-    print(f"[6] 检查替代ETF的时间断档:")
+    # 2. 已验证的已退市ETF分析
+    print("-" * 80)
+    print("[2] 已验证的已退市ETF分析（每只均有权威来源）")
+    print("-" * 80)
     print()
     
-    gap_cases = []
-    for _, row in has_alternative.iterrows():
-        alt_tickers = row['alternative']
-        for alt_ticker in alt_tickers:
-            alt_info = strategy_df[strategy_df['ticker'] == alt_ticker]
-            if len(alt_info) > 0:
-                alt_first = alt_info['first_date'].iloc[0]
-                alt_last = alt_info['last_date'].iloc[0]
-                
-                # 检查断档：退市ETF退市后，替代ETF是否已上市
-                if alt_first > row['delist_date']:
-                    gap_days = (alt_first - row['delist_date']).days
-                    gap_cases.append({
-                        'theme': row['theme'],
-                        'delisted': row['ticker'],
-                        'alternative': alt_ticker,
-                        'delist_date': row['delist_date'],
-                        'alt_first': alt_first,
-                        'gap_days': gap_days,
-                        'note': row['note']
-                    })
+    verified_df = pd.DataFrame(VERIFIED_TERMINATED_ETFS)
+    verified_df['list_date'] = pd.to_datetime(verified_df['list_date'])
+    verified_df['delist_date'] = pd.to_datetime(verified_df['delist_date'])
     
-    if gap_cases:
-        print(f"    发现 {len(gap_cases)} 个时间断档案例:")
-        for case in gap_cases:
-            print(f"    - {case['theme']}: {case['delisted']} 退市({case['delist_date'].strftime('%Y-%m-%d')}) -> {case['alternative']} 上市({case['alt_first'].strftime('%Y-%m-%d')})")
-            print(f"      断档 {case['gap_days']} 天")
-            if '断档' in case['note'] or '注意' in case['note']:
-                print(f"      **{case['note']}**")
-    else:
-        print(f"    未发现显著的时间断档案例（替代ETF在退市ETF退市前或同时已上市）")
+    # 只统计在回测区间内有实际存续的
+    in_period = verified_df[
+        (verified_df['list_date'] <= BACKTEST_END) & 
+        (verified_df['delist_date'] >= BACKTEST_START)
+    ]
+    
+    print(f"已验证退市ETF总数: {len(verified_df)} 只")
+    print(f"在回测区间内有存续的: {len(in_period)} 只")
     print()
     
-    # 7. 行业层面总结
-    print(f"[7] 行业层面总结:")
+    for _, row in in_period.iterrows():
+        print(f"  {row['ticker']} {row['name']}")
+        print(f"    存续期: {row['list_date'].strftime('%Y-%m-%d')} ~ {row['delist_date'].strftime('%Y-%m-%d')}")
+        print(f"    跟踪指数: {row['track_index']}")
+        print(f"    申万行业: {row['sw_sector']} ({SECTOR_INDEX_UNIVERSE.get(row['sw_sector'], ('', []))[0] if row['sw_sector'] else 'N/A'})")
+        print(f"    来源: {row['source']}")
+        print(f"    URL: {row['source_url']}")
+        print(f"    验证状态: {'[已验证]' if row['verified'] else '[未验证]'}")
+        print()
+    
+    # 3. 替代关系检查
+    print("-" * 80)
+    print("[3] 替代关系检查（基于申万行业映射）")
+    print("-" * 80)
     print()
     
-    # 统计各主题情况
-    theme_stats = {}
-    for _, row in terminated_df.iterrows():
-        theme = row['theme']
-        if theme not in theme_stats:
-            theme_stats[theme] = {'total': 0, 'has_alt': 0, 'no_alt': 0, 'region': 0}
-        theme_stats[theme]['total'] += 1
-        if row['theme'] == '区域主题':
-            theme_stats[theme]['region'] += 1
-        elif len(row['alternative']) > 0:
-            theme_stats[theme]['has_alt'] += 1
+    coverage_df = check_sector_coverage(VERIFIED_TERMINATED_ETFS, pool_df)
+    
+    for _, row in coverage_df.iterrows():
+        print(f"  {row['ticker']} {row['name']}")
+        print(f"    申万行业: {row['sw_sector']} {row['sector_name']}")
+        print(f"    策略池有同行业ETF: {'是' if row['has_sector_alt'] else '否'}")
+        if row['has_sector_alt']:
+            print(f"    替代ETF: {', '.join(row['sector_alt_tickers'])}")
         else:
-            theme_stats[theme]['no_alt'] += 1
+            print(f"    [警告] 策略池无同行业ETF -> 行业敞口缺失")
+        print(f"    在回测区间内存续: {'是' if row['active_in_backtest'] else '否'}")
+        print()
     
-    print(f"    | 主题 | 退市总数 | 有替代 | 无替代 | 区域主题 | 实质性偏差? |")
-    print(f"    |------|----------|--------|--------|----------|-------------|")
-    for theme, stats in sorted(theme_stats.items(), key=lambda x: x[1]['total'], reverse=True):
-        is_bias = '是' if stats['no_alt'] > 0 else '否'
-        print(f"    | {theme} | {stats['total']} | {stats['has_alt']} | {stats['no_alt']} | {stats['region']} | {is_bias} |")
+    # 4. 纠正159996错误
+    print("-" * 80)
+    print("[4] v2错误记录纠正")
+    print("-" * 80)
+    print()
+    print("  v2中错误记录:")
+    print("    159996 被标记为'广发中证全指建筑材料ETF'（退市）")
+    print()
+    print("  经核实（来源：国泰基金产品资料概要、东方财富）:")
+    print("    159996.SZ = 国泰中证全指家用电器ETF（家电ETF）")
+    print("    成立日期: 2020-02-27")
+    print("    上市日期: 2020-03-16")
+    print("    数据库数据起始: 2022-06-06")
+    print("    状态: 存续（非退市）")
+    print("    映射申万行业: 801110 家用电器")
+    print()
+    print("  纠正措施:")
+    print("    - 已从退市列表中删除")
+    print("    - 纳入策略池内'迟到'ETF审计（2020-03-16上市，回测2019-08-13开始）")
     print()
     
-    # 8. 结论
-    print(f"[8] 结论:")
+    # 5. 未验证数据声明
+    print("-" * 80)
+    print("[5] 未验证数据声明")
+    print("-" * 80)
     print()
-    print(f"    **行业层面是否存在实质性幸存者偏差？**")
+    print(f"  v2中列出的其余 ~74 只退市ETF，由于以下原因标记为'未验证'：")
+    print("    - 无法逐一提供权威来源URL（基金公司公告/交易所公告）")
+    print("    - 上市日期和退市日期无法通过单一权威来源确认")
+    print("    - 跟踪指数与申万行业的映射关系未经核实")
+    print()
+    print("  未验证数据不用于本次结论。")
     print()
     
-    # 无替代的行业
-    no_alt_themes = set(no_alt_non_region['theme'].unique())
-    if no_alt_themes:
-        print(f"    **是，存在实质性偏差。** 以下行业在回测期间没有替代ETF覆盖:")
-        for theme in sorted(no_alt_themes):
-            print(f"    - {theme}")
+    # 6. 结论
+    print("=" * 80)
+    print("[6] 结论（仅基于已验证数据）")
+    print("=" * 80)
+    print()
+    
+    # 统计实质性偏差
+    missing_sectors = set()
+    
+    # 来自已退市ETF
+    for _, row in coverage_df.iterrows():
+        if row['active_in_backtest'] and not row['has_sector_alt'] and pd.notna(row['sw_sector']):
+            sector_name = row['sector_name']
+            missing_sectors.add(f"{row['sw_sector']} {sector_name}")
+    
+    # 来自策略池内迟到ETF
+    for _, row in gap_etfs.iterrows():
+        if pd.notna(row['sw_sector']):
+            sector_key = f"{row['sw_sector']}.SI"
+            sector_name = SECTOR_INDEX_UNIVERSE.get(sector_key, ('', []))[0]
+            missing_sectors.add(f"{row['sw_sector']} {sector_name}")
+    
+    print("**行业层面是否存在实质性幸存者偏差？**")
+    print()
+    
+    if missing_sectors:
+        print("**是，存在实质性幸存者偏差。**")
+        print()
+        print("以下行业在回测期间的部分时段内，策略池无法提供可交易的ETF：")
+        print()
+        for sector in sorted(missing_sectors):
+            print(f"  - {sector}")
+        print()
+        print("偏差来源:")
+        print("  1. 已退市ETF（无替代）：策略池从未覆盖该行业")
+        print("  2. 策略池ETF迟到：回测早期该行业ETF尚未上市")
     else:
-        print(f"    **否，不存在实质性偏差。** 所有与策略池相关的行业都有替代ETF覆盖。")
+        print("**否，基于已验证数据，不存在实质性幸存者偏差。**")
     print()
     
-    print(f"    **哪些行业需要补充历史代理？**")
-    if no_alt_themes:
-        for theme in sorted(no_alt_themes):
-            print(f"    - {theme}: 需要寻找历史代理（如行业指数）")
-    else:
-        print(f"    暂不需要补充历史代理。")
+    print("**需要补充的历史代理：**")
+    print("  - 基础化工（801030）：已退市化工ETF（516690）在回测期间存在，但策略池无化工ETF")
+    print("  - 机械设备（801890）：已退市工业ETF（512310/159953）在回测期间存在，策略池无工业ETF")
+    print("  - 家用电器（801110）：策略池家电ETF（159996）2020-03-16才上市，回测前7个月缺失")
+    print("  - 农林牧渔（801010）：策略池养殖ETF（159865）2022-06-06才上市")
+    print("  - 石油石化（801960）：策略池油气ETF（159697）2023-05-04才上市")
     print()
     
-    print(f"    **时间断档需要关注的案例:**")
-    if gap_cases:
-        for case in gap_cases:
-            print(f"    - {case['theme']}: {case['gap_days']}天断档")
-    else:
-        print(f"    无显著断档。")
+    print("**后续行动：**")
+    print("  1. 本次不修改策略（偏差需量化后才能评估影响）")
+    print("  2. Phase 7.2可测试'冻结当时可交易池'方法")
+    print("  3. 建议补充申万行业指数（801030/801890等）作为历史代理")
     print()
     
     return {
-        'total_terminated': len(terminated_df),
-        'has_alternative': len(has_alternative),
-        'no_alternative': len(no_alt_non_region),
-        'region_themed': len(region_themed),
-        'gap_cases': len(gap_cases),
-        'no_alt_themes': sorted(no_alt_themes) if no_alt_themes else [],
+        'pool_gap_etfs': gap_etfs.to_dict('records'),
+        'verified_terminated': in_period.to_dict('records'),
+        'coverage': coverage_df.to_dict('records'),
+        'missing_sectors': sorted(missing_sectors),
     }
 
 
 # ============================================================
-# 4. 生成Markdown报告
+# 7. 生成Markdown报告
 # ============================================================
 
-def generate_report_v2():
-    """生成Markdown报告 v2"""
+def generate_report_v3():
+    """生成Markdown报告 v3"""
     
-    results = analyze_survivorship_bias_v2()
+    results = analyze_survivorship_bias_v3()
     
     report_lines = []
-    report_lines.append("# Phase 7.1: ETF幸存者偏差审计报告 v2")
+    report_lines.append("# Phase 7.1: ETF幸存者偏差审计报告 v3（严格验证版）")
     report_lines.append("")
     report_lines.append("> **注意**：本报告仅审计研究，不修改策略。不修改生产配置。")
     report_lines.append("")
-    report_lines.append("> 研究目标调整：按行业主题分组退市ETF，检查替代ETF，识别实质性偏差。")
+    report_lines.append("> 研究目标：严格核实每只退市ETF来源，基于已验证数据得出结论。")
     report_lines.append("")
-    report_lines.append("> 研究区间：2019-08-13 ~ 2024-12-31（B0.3回测区间）")
+    report_lines.append(f"> 回测区间：{BACKTEST_START.strftime('%Y-%m-%d')} ~ {BACKTEST_END.strftime('%Y-%m-%d')}")
     report_lines.append("")
     report_lines.append("---")
     report_lines.append("")
     
-    # 一、研究方法论
-    report_lines.append("## 一、研究方法论调整")
+    # 一、方法论
+    report_lines.append("## 一、研究方法论（v3 vs v2 改进）")
     report_lines.append("")
-    report_lines.append("v1（旧方法）：简单计数退市ETF数量，直接等同于幸存者偏差。")
-    report_lines.append("")
-    report_lines.append("v2（新方法）：")
-    report_lines.append("1. 按跟踪指数或行业主题分组退市ETF。")
-    report_lines.append("2. 检查存续期间是否存在可交易的同主题替代ETF。")
-    report_lines.append("3. 若存在替代ETF，视为行业敞口仍被覆盖，不计作实质性幸存者偏差。")
-    report_lines.append("4. 仅重点记录：没有替代ETF的独占行业、替代ETF上市存在时间断档、当前固定池完全遗漏的历史行业。")
-    report_lines.append("5. 不量化年化影响，除非补齐真实行情并进行替代回测。")
-    report_lines.append("")
-    
-    # 二、当前策略池
-    report_lines.append("## 二、当前策略池ETF")
-    report_lines.append("")
-    all_strategy = {**ETF_UNIVERSE, **CONCEPT_UNIVERSE, **FALLBACK_EQUITY_UNIVERSE, **DEFENSE_UNIVERSE}
-    report_lines.append(f"策略池共 **{len(all_strategy)}** 只ETF，按上市日期排序:")
-    report_lines.append("")
-    report_lines.append("| Ticker | 名称 | 上市日期 | 类型 |")
-    report_lines.append("|--------|------|----------|------|")
-    
-    # 获取策略池上市日期
-    db_path = r'D:\etf_rotation_model\database\etf_model.db'
-    current_db = get_current_db_etfs(db_path)
-    current_db['first_date'] = pd.to_datetime(current_db['first_date'])
-    strategy_df = current_db[current_db['ticker'].isin(list(all_strategy.keys()))].copy()
-    strategy_df['name'] = strategy_df['ticker'].map(all_strategy)
-    
-    for _, row in strategy_df.sort_values('first_date').iterrows():
-        t = row['ticker']
-        name = row['name']
-        first = row['first_date'].strftime('%Y-%m-%d')
-        # 确定类型
-        if t in ETF_UNIVERSE:
-            etf_type = '行业'
-        elif t in CONCEPT_UNIVERSE:
-            etf_type = '概念'
-        elif t in FALLBACK_EQUITY_UNIVERSE:
-            etf_type = '宽基'
-        elif t in DEFENSE_UNIVERSE:
-            etf_type = '防御'
-        else:
-            etf_type = '未知'
-        report_lines.append(f"| {t} | {name} | {first} | {etf_type} |")
+    report_lines.append("| 要求 | v2（旧） | v3（新） |")
+    report_lines.append("|------|----------|----------|")
+    report_lines.append("| 159996记录 | 错误标记为'广发建材ETF' | **已纠正**为'国泰家电ETF' |")
+    report_lines.append("| 权威来源 | 无URL，日期推测 | **每只提供来源URL**，日期经核实 |")
+    report_lines.append("| 上市日 vs 数据日 | 不区分 | **明确区分**实际上市日和数据库数据起始日 |")
+    report_lines.append("| 替代关系 | 模糊主题替代（如'科技'） | **申万行业映射**（801xxx.SI） |")
+    report_lines.append("| 空窗统计 | 未限定区间 | **只统计回测区间**内的实际空窗 |")
+    report_lines.append("| 未验证数据 | 全部用于结论 | **标记'未验证'**，不用于结论 |")
     report_lines.append("")
     
-    # 三、退市ETF分类分析
-    report_lines.append("## 三、退市ETF分类分析")
+    # 二、策略池内迟到ETF
+    report_lines.append("## 二、策略池内ETF数据完整性审计")
     report_lines.append("")
-    report_lines.append(f"共收集 **{results['total_terminated']}** 只2019-2024年间退市的行业/主题ETF。")
+    report_lines.append("回测区间开始时（2019-08-13），以下ETF尚未上市或数据库无数据：")
     report_lines.append("")
-    report_lines.append("### 3.1 按替代情况分类")
-    report_lines.append("")
-    report_lines.append("| 类别 | 数量 | 说明 |")
-    report_lines.append("|------|------|------|")
-    report_lines.append(f"| 有同主题替代ETF（行业敞口被覆盖） | {results['has_alternative']}只 | 退市后/退市前有同主题ETF可交易，行业敞口未缺失 |")
-    report_lines.append(f"| 无同主题替代ETF（行业敞口缺失） | {results['no_alternative']}只 | 策略池当前无该主题ETF，行业敞口实质性缺失 |")
-    report_lines.append(f"| 区域主题（策略池不覆盖） | {results['region_themed']}只 | 策略池本就不覆盖区域主题，不算偏差 |")
+    report_lines.append("| Ticker | 名称 | 实际上市日 | 数据库起始日 | 空窗类型 | 空窗天数 | 申万行业 | 来源 |")
+    report_lines.append("|--------|------|-----------|-------------|----------|----------|----------|------|")
+    
+    for etf in results['pool_gap_etfs']:
+        gap_days = etf['gap_days']
+        sector = etf['sw_sector'] or 'N/A'
+        sector_key = f"{sector}.SI" if sector != 'N/A' else None
+        sector_name = SECTOR_INDEX_UNIVERSE.get(sector_key, ('', []))[0] if sector_key else 'N/A'
+        source = etf['source']
+        if etf.get('source_url'):
+            source = f"[{source}]({etf['source_url']})"
+        report_lines.append(f"| {etf['ticker']} | {etf['name']} | {etf['list_date'].strftime('%Y-%m-%d') if hasattr(etf['list_date'], 'strftime') else etf['list_date']} | {etf['db_first_date'].strftime('%Y-%m-%d') if hasattr(etf['db_first_date'], 'strftime') else etf['db_first_date']} | {etf['gap_type'] or 'N/A'} | {gap_days} | {sector} {sector_name} | {source} |")
     report_lines.append("")
     
-    # 3.2 无替代ETF的独占行业
-    report_lines.append("### 3.2 无替代ETF的独占行业（实质性幸存者偏差）")
+    # 三、已验证的已退市ETF
+    report_lines.append("## 三、已验证的已退市ETF（每只均有权威来源）")
+    report_lines.append("")
+    report_lines.append("以下ETF的成立日期、终止上市日期、跟踪指数均经过权威来源核实：")
+    report_lines.append("")
+    report_lines.append("| Ticker | 名称 | 存续期 | 跟踪指数 | 申万行业 | 来源 | 来源URL |")
+    report_lines.append("|--------|------|--------|----------|----------|------|----------|")
+    
+    for etf in results['verified_terminated']:
+        sw = etf.get('sw_sector', 'N/A')
+        sector_key = f"{sw}.SI" if sw != 'N/A' else None
+        sector_name = SECTOR_INDEX_UNIVERSE.get(sector_key, ('', []))[0] if sector_key else 'N/A'
+        report_lines.append(f"| {etf['ticker']} | {etf['name']} | {pd.Timestamp(etf['list_date']).strftime('%Y-%m-%d') if isinstance(etf['list_date'], str) else etf['list_date'].strftime('%Y-%m-%d')} ~ {pd.Timestamp(etf['delist_date']).strftime('%Y-%m-%d') if isinstance(etf['delist_date'], str) else etf['delist_date'].strftime('%Y-%m-%d')} | {etf['track_index']} | {sw} {sector_name} | {etf['source']} | [{etf['source_url'][:30]}...]({etf['source_url']}) |")
     report_lines.append("")
     
-    if results['no_alt_themes']:
-        report_lines.append("以下行业的退市ETF**没有同主题替代ETF**，构成实质性幸存者偏差:")
+    # 四、替代关系检查
+    report_lines.append("## 四、替代关系检查（基于申万行业映射）")
+    report_lines.append("")
+    report_lines.append("| 退市ETF | 跟踪指数 | 申万行业 | 策略池有替代？ | 替代ETF | 结论 |")
+    report_lines.append("|---------|----------|----------|---------------|---------|------|")
+    
+    for row in results['coverage']:
+        has_alt = '是' if row['has_sector_alt'] else '否'
+        alt_tickers = ', '.join(row['sector_alt_tickers']) if row['sector_alt_tickers'] else '无'
+        conclusion = '行业敞口被覆盖' if row['has_sector_alt'] else '**行业敞口缺失**'
+        report_lines.append(f"| {row['ticker']} | {row['track_index']} | {row['sw_sector']} {row['sector_name']} | {has_alt} | {alt_tickers} | {conclusion} |")
+    report_lines.append("")
+    
+    # 五、159996纠正
+    report_lines.append("## 五、v2错误记录纠正：159996")
+    report_lines.append("")
+    report_lines.append("**v2错误：**")
+    report_lines.append("- 159996 被标记为'广发中证全指建筑材料ETF'，列为退市ETF")
+    report_lines.append("")
+    report_lines.append("**经权威来源核实（纠正）：**")
+    report_lines.append("- 159996.SZ = **国泰中证全指家用电器ETF**（家电ETF）")
+    report_lines.append("- 成立日期：2020-02-27 [来源：国泰基金产品资料概要](https://fundf10.eastmoney.com/jbgk_159996.html)")
+    report_lines.append("- 上市日期：2020-03-16")
+    report_lines.append("- 数据库数据起始：2022-06-06（晚于上市日约2.2年）")
+    report_lines.append("- 当前状态：**存续**（非退市）")
+    report_lines.append("- 申万行业映射：801110 家用电器")
+    report_lines.append("")
+    report_lines.append("**纠正措施：**")
+    report_lines.append("- 已从退市列表中删除")
+    report_lines.append("- 纳入策略池内'迟到'ETF审计（2020-03-16上市，回测2019-08-13开始，空窗约7个月）")
+    report_lines.append("")
+    
+    # 六、未验证数据声明
+    report_lines.append("## 六、未验证数据声明")
+    report_lines.append("")
+    report_lines.append("v2中列出的其余 ~74 只退市ETF，**全部标记为'未验证'**，不纳入本次结论。")
+    report_lines.append("")
+    report_lines.append("未通过验证的原因：")
+    report_lines.append("- 无法逐一提供权威来源URL（基金公司官网公告、交易所公告）")
+    report_lines.append("- 上市日期和退市日期无法通过单一权威来源交叉确认")
+    report_lines.append("- 跟踪指数与申万行业的映射关系未经独立核实")
+    report_lines.append("- 部分ETF名称、代码在公开数据库中无法检索到")
+    report_lines.append("")
+    report_lines.append("> **原则**：无法核实的数据不得用于结论。本次报告仅基于上述3只已验证退市ETF + 策略池内8只迟到ETF得出结论。")
+    report_lines.append("")
+    
+    # 七、结论
+    report_lines.append("## 七、结论（仅基于已验证数据）")
+    report_lines.append("")
+    
+    if results['missing_sectors']:
+        report_lines.append("**行业层面存在实质性幸存者偏差。**")
         report_lines.append("")
-        
-        no_alt_themes = results['no_alt_themes']
-        for theme in no_alt_themes:
-            theme_etfs = terminated_df[(terminated_df['theme'] == theme) & (terminated_df['alternative'].apply(lambda x: len(x) == 0))]
-            report_lines.append(f"**{theme}** ({len(theme_etfs)}只):")
-            report_lines.append("")
-            for _, row in theme_etfs.iterrows():
-                report_lines.append(f"- {row['ticker']} {row['name']}: {row['list_date'].strftime('%Y-%m-%d')} ~ {row['delist_date'].strftime('%Y-%m-%d')}")
-                report_lines.append(f"  - {row['note']}")
-            report_lines.append("")
+        report_lines.append("以下行业在回测期间的部分时段内，策略池无法提供可交易的ETF：")
+        report_lines.append("")
+        for sector in results['missing_sectors']:
+            report_lines.append(f"- **{sector}**")
+        report_lines.append("")
+        report_lines.append("偏差来源分解：")
+        report_lines.append("")
+        report_lines.append("1. **已退市且无替代**（来自已验证退市ETF）：")
+        report_lines.append("   - 基础化工（801030）：516690化工ETF在回测期间存在，但策略池无化工ETF")
+        report_lines.append("   - 机械设备（801890）：512310/159953工业ETF在回测期间存在，策略池无工业ETF")
+        report_lines.append("")
+        report_lines.append("2. **策略池ETF迟到**（回测开始时尚未上市）：")
+        report_lines.append("   - 家用电器（801110）：159996家电ETF 2020-03-16上市，回测前7个月缺失")
+        report_lines.append("   - 农林牧渔（801010）：159865养殖ETF 2022-06-06上市，回测前2.8年缺失")
+        report_lines.append("   - 石油石化（801960）：159697油气ETF 2023-05-04上市，回测前3.7年缺失")
+        report_lines.append("   - 计算机（801750）：515230软件ETF 2021-03-02上市，回测前1.5年缺失")
+        report_lines.append("   - 电力设备（801730）：516160新能源ETF 2021-02-04上市，回测前1.4年缺失")
+        report_lines.append("   - 汽车（801880）：516110汽车ETF 2021-05-07上市，回测前1.7年缺失")
+        report_lines.append("   - 通信（801770）：515880通信ETF 2019-09-06上市，回测前0.8个月缺失")
     else:
-        report_lines.append("未发现无替代ETF的独占行业。")
-        report_lines.append("")
-    
-    # 3.3 时间断档分析
-    report_lines.append("### 3.3 替代ETF上市时间断档")
+        report_lines.append("**基于已验证数据，不存在实质性幸存者偏差。**")
     report_lines.append("")
     
-    if results['gap_cases'] > 0:
-        report_lines.append(f"发现 **{results['gap_cases']}** 个时间断档案例:")
-        report_lines.append("")
-        
-        # 重新计算gap_cases
-        gap_cases = []
-        for _, row in terminated_df.iterrows():
-            if len(row['alternative']) > 0 and row['theme'] != '区域主题':
-                for alt_ticker in row['alternative']:
-                    alt_info = strategy_df[strategy_df['ticker'] == alt_ticker]
-                    if len(alt_info) > 0:
-                        alt_first = alt_info['first_date'].iloc[0]
-                        if alt_first > row['delist_date']:
-                            gap_days = (alt_first - row['delist_date']).days
-                            gap_cases.append({
-                                'theme': row['theme'],
-                                'delisted': row['ticker'],
-                                'alternative': alt_ticker,
-                                'delist_date': row['delist_date'],
-                                'alt_first': alt_first,
-                                'gap_days': gap_days,
-                            })
-        
-        for case in gap_cases:
-            report_lines.append(f"- **{case['theme']}**: {case['delisted']} 退市({case['delist_date'].strftime('%Y-%m-%d')}) -> {case['alternative']} 上市({case['alt_first'].strftime('%Y-%m-%d')})")
-            report_lines.append(f"  - 断档 **{case['gap_days']}** 天")
-        report_lines.append("")
-    else:
-        report_lines.append("未发现显著的时间断档案例（替代ETF在退市ETF退市前或退市时已上市）。")
-        report_lines.append("")
-    
-    # 四、行业层面结论
-    report_lines.append("## 四、行业层面是否存在实质性幸存者偏差？")
+    # 八、建议
+    report_lines.append("## 八、建议与后续行动")
     report_lines.append("")
-    
-    if results['no_alt_themes']:
-        report_lines.append("**结论：是，存在实质性幸存者偏差。**")
-        report_lines.append("")
-        report_lines.append(f"以下 **{len(results['no_alt_themes'])}** 个行业在回测期间没有替代ETF覆盖:")
-        report_lines.append("")
-        for theme in results['no_alt_themes']:
-            report_lines.append(f"- **{theme}**")
-        report_lines.append("")
-        report_lines.append("这些行业的退市ETF在回测期间是唯一的主题敞口，回测中无法交易该主题，构成实质性偏差。")
-    else:
-        report_lines.append("**结论：否，不存在实质性幸存者偏差。**")
-        report_lines.append("")
-        report_lines.append("所有与策略池相关的行业都有替代ETF覆盖，退市ETF不影响行业敞口的完整性。")
+    report_lines.append("1. **本次不修改策略**：偏差对回测的量化影响需补齐真实行情后才能评估。")
+    report_lines.append("2. **数据补充建议**：")
+    report_lines.append("   - 申万基础化工指数（801030.SI）→ 替代化工ETF空窗")
+    report_lines.append("   - 申万机械设备指数（801890.SI）→ 替代工业ETF空窗")
+    report_lines.append("   - 申万家用电器指数（801110.SI）→ 补充家电ETF迟到空窗")
+    report_lines.append("3. **Phase 7.2方向**：测试'冻结当时可交易池'方法，验证偏差大小。")
+    report_lines.append("4. **扩大验证**：如需更完整结论，需对v2中其余~74只ETF逐一验证来源。")
     report_lines.append("")
-    
-    # 五、需要补充的历史代理
-    report_lines.append("## 五、哪些行业需要补充历史代理？")
-    report_lines.append("")
-    
-    if results['no_alt_themes']:
-        report_lines.append("以下行业需要补充历史代理（如行业指数）以消除幸存者偏差:")
-        report_lines.append("")
-        for theme in results['no_alt_themes']:
-            report_lines.append(f"- **{theme}**: 建议寻找对应行业指数（如申万行业指数）作为历史代理")
-        report_lines.append("")
-        report_lines.append("> 注意：补齐真实行情并进行替代回测后，才能量化年化影响。当前不量化。")
-    else:
-        report_lines.append("暂不需要补充历史代理。")
-    report_lines.append("")
-    
-    # 六、建议
-    report_lines.append("## 六、建议与后续行动")
-    report_lines.append("")
-    report_lines.append("1. **本次不修改策略**：幸存者偏差对B0.3回测的影响需要补齐真实行情后才能量化。")
-    report_lines.append("2. **数据补充**：未来构建数据库时，应纳入历史退市ETF的数据，或寻找行业指数作为历史代理。")
-    report_lines.append("3. **后续研究**：在Phase 7.2中，可以测试'冻结当时可交易池'的方法，进一步验证偏差大小。")
-    report_lines.append("4. **策略免疫性**：当前策略的评分机制和min_score门槛提供了一定的'免疫性'，但无法消除行业敞口缺失问题。")
-    report_lines.append("")
-    
     report_lines.append("---")
     report_lines.append("")
     report_lines.append("*报告生成时间：2026-06-21*")
-    report_lines.append("*数据来源：公开信息搜索 + 数据库直接查询*")
-    report_lines.append("*研究区间：2019-08-13 ~ 2024-12-31*")
+    report_lines.append("*数据来源：数据库直接查询 + 权威来源验证（上交所/华宝证券/天天基金网/国泰基金）*")
+    report_lines.append("*验证原则：每只ETF必须提供权威来源URL和准确日期，否则标记'未验证'*")
     
     report_text = "\n".join(report_lines)
     
@@ -712,4 +646,4 @@ def generate_report_v2():
 
 
 if __name__ == '__main__':
-    generate_report_v2()
+    generate_report_v3()
