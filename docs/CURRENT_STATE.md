@@ -1,10 +1,10 @@
 # 当前工程现场
 
-**最后更新**：2026-06-22（修正版v3）  
+**最后更新**：2026-06-23（Step 3: 信号失效退出有效性归因）  
 **工作目录**：`D:\etf_rotation_model`  
 **当前分支**：`feature/v1.3-regime-research`  
 **当前版本**：v1.2.3
-**当前研究提交**：`26e5fa2`（v1.3 Step 2修正版v3: shares列修正、异常文件清理、文档同步）  
+**当前研究提交**：`85c3250`（v1.3 Step 3: 信号失效退出有效性归因）  
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78  
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）  
 **数据截止**：2026-06-18  
@@ -47,8 +47,15 @@
   - 44.7%/31.0%：旧报告错误值，来源不可复现。不能归因于pct_change收益算法。
   - 交付物：scripts/v1_3_step2_b0_4_regime_diagnosis.py（修正版v3）、reports/v1_3_step2_regime_diagnosis.md（修正版v3）、reports/v1_3_step2_regime_stats.csv（修正版v3）。
   - 不修改 B0.4 策略、参数或冻结基线。
-- **WorkBuddy 复审状态**：用户反馈旧数据"too good to be true"，已修正：① 收益计算方法（完整序列先计算bench_ret再筛选）；② 超额收益公式（prod比率法）；③ 交易勾稽（642+162+0=804）；④ 仓位来源说明（44.7%/31.0%来源不可复现，不归因于pct_change）；⑤ 交易明细shares列修正（quantity→shares，数量不再全部为0）；⑥ 清理14个意外生成的空文件。修正版v3已推送，等待终审。
-- **下一阶段唯一任务**：完成 Step 2 终审后再决定研究方向。不进入任何方向实验，不修改 B0.4 交易逻辑。
+- **v1.3 Step 3: 信号失效退出有效性归因 已完成**：
+  - 分析 341 笔 BUY_CONDITION_FAILED 退出事件，339 笔可分析（2 笔因卖出日期后无未来交易日数据，已标记为数据不足）。
+  - 分类结果（研究期 → 验证期）：有效避损 34.1% → 33.3%，误杀卖飞 11.2% → 24.0%，震荡往返 42.4% → 26.0%，中性 12.4% → 16.7%。
+  - 方向一致性：震荡往返和误杀卖飞两期均>15%，验证期误杀卖飞比例上升（11.2%→24.0%）。
+  - 重新买回：研究期 100% 重新买回，平均间隔 39.4 个交易日，平均价差收益 0.37%；验证期 99% 重新买回，平均间隔 64.9 个交易日，平均价差收益 0.15%。
+  - 决策建议：研究期和验证期均显示较高震荡往返比例，建议下一步设计 holding stability 实验。
+  - 交付物：scripts/v1_3_step3_exit_effectiveness.py、reports/v1_3_step3_exit_effectiveness.md、reports/v1_3_step3_exit_events.csv、reports/v1_3_step3_exit_summary.csv。
+  - 不修改 B0.4 策略、参数或冻结基线。
+- **下一阶段唯一任务**：Step 3 已完成，等待用户决定下一步研究方向（holding stability 实验或其他）。不修改 B0.4 交易逻辑。
 
 ## 2. B0.4 冻结口径
 
@@ -151,9 +158,9 @@
 当前分支已同步远端，但工作区不是干净状态：
 
 - 已修改：`docs/CURRENT_STATE.md`
-  - 本次 v1.3 Step 1 / Step 2 交接摘要更新，尚未提交。
+  - 本次 v1.3 Step 3 交接摘要更新，尚未提交。
 - 已修改：`docs/CHANGES.md`
-  - v1.3 Step 1 / Step 2 记录，尚未提交。
+  - v1.3 Step 3 记录，尚未提交。
 - 已修改：`src/backtest.py`
   - nav_records 增加 `industry_value` / `defense_value`（不改变交易逻辑）。
 - 已修改：`reports/ab_test_data_fill_impact.md`
@@ -166,9 +173,10 @@
 - 新增：`reports/v1_3_step1_replacement_attribution.md`
 - 新增：`reports/v1_3_step1_replacement_events.csv`
 - 新增：`reports/v1_3_step1_replacement_summary.csv`
-- 新增：`scripts/v1_3_step2_b0_4_regime_diagnosis.py`
-- 新增：`reports/v1_3_step2_regime_diagnosis.md`
-- 新增：`reports/v1_3_step2_regime_stats.csv`
+- 新增：`scripts/v1_3_step3_exit_effectiveness.py`
+- 新增：`reports/v1_3_step3_exit_effectiveness.md`
+- 新增：`reports/v1_3_step3_exit_events.csv`
+- 新增：`reports/v1_3_step3_exit_summary.csv`
 
 这些文件均视为用户已有研究材料。不得删除、移动、覆盖、暂存或提交，除非当前任务明确要求。
 
@@ -186,7 +194,12 @@
 
 ## 7. 下一步唯一任务
 
-Step 2 终审完成后，根据终审结论决定下一研究方向；当前不进入任何 A/B/C 实验。
+Step 3 已完成。等待用户决定下一步研究方向：
+- 选项 A：设计 holding stability 实验（减少震荡往返导致的频繁换仓）。
+- 选项 B：进入其他单变量实验。
+- 选项 C：不进入实验，继续观察。
+
+当前不修改 B0.4 交易逻辑、策略或冻结基线。
 
 ---
 
