@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-21  
+**最后更新**：2026-06-22  
 **工作目录**：`D:\etf_rotation_model`  
 **当前分支**：`feature/v1.2.1-regime-adaptive`  
 **当前版本**：v1.2.3  
@@ -22,12 +22,15 @@
 - **B0.4 单变量滑点敏感性测试 v2 已完成**：
   - 0bp 完美复现 B0.4（NAV=2,761,288.07，交易804笔）。
   - v2 修正规划阶段使用滑点价（`sell_prices`/`buy_prices`），所有 BUY 订单可执行，无静默跳过。
-  - 3bp 滑点使 NAV 下降约 7.0%（2,761,288 → 2,567,821），年化从 16.68% → 15.40%。
-  - 5bp 滑点使 NAV 下降约 9.9%（2,761,288 → 2,488,278），年化从 16.68% → 14.85%。
-  - 10bp 滑点使 NAV 下降约 16.6%（2,761,288 → 2,301,964），年化从 16.68% → 13.50%。
-  - 夏普单调递减：0.8816 → 0.8162 → 0.7870 → 0.7154，无伪改善。
-  - 交易次数几乎不变（804 vs 805），差异归因于整手取整而非现金不足。
-  - 8 项自动测试全部通过（0bp 一致性、BUY 可执行、价格方向、NAV 单调递减、STOP_LOSS 单独统计、年化引擎值、现金/NAV 恒等式）。
+  - 3/5/10bp 夏普单调递减，无伪改善。
+  - 8 项自动测试全部通过。
+- **v1.3 Step 1: 换仓成本与有效性归因 已完成**：
+  - B0.4 的 `plan_rebalance_v2_5` **不实现**基于排名的替换逻辑。
+  - 配置中 `replacement_score_gap=8` 存在，但**调仓引擎未引用该参数**。
+  - 所有 "调出候选列表" 卖出（341笔，占84.2%）都是由于信号失效（跌破均线、total_score不足），而非排名竞争。
+  - 纯排名替换事件：0 笔（研究期0 + 验证期0）。
+  - 不满足进入 Step 2（测试 replacement_score_gap）的任何条件。
+  - 不创建 replacement_score_gap 规则，不修改 B0.4。
 - **下一阶段**：等待确定下一个单变量实验。
 
 ---
@@ -133,11 +136,17 @@
 当前分支已同步远端，但工作区不是干净状态：
 
 - 已修改：`docs/CURRENT_STATE.md`
-  - 本次交接摘要更新，尚未提交。
+  - 本次 v1.3 Step 1 交接摘要更新，尚未提交。
+- 已修改：`docs/CHANGES.md`
+  - v1.3 Step 1 记录，尚未提交。
 - 已修改：`reports/ab_test_data_fill_impact.md`
   - 仅文件末尾换行差异；不要在无关任务中处理。
 - 未跟踪：`reports/etf_rotation_public_resources_research.md`
 - 未跟踪：`scripts/phase7_1_survivorship_bias_audit_v2.py`
+- 新增：`scripts/v1_3_step1_replacement_attribution.py`
+- 新增：`reports/v1_3_step1_replacement_attribution.md`
+- 新增：`reports/v1_3_step1_replacement_events.csv`
+- 新增：`reports/v1_3_step1_replacement_summary.csv`
 
 这些文件均视为用户已有研究材料。不得删除、移动、覆盖、暂存或提交，除非当前任务明确要求。
 
@@ -185,4 +194,4 @@
 3. `docs/DECISIONS.md`
 4. `git status --short --branch`
 
-恢复后只继续“B0.4单变量滑点敏感性测试”，不要重新展开历史研究。
+恢复后只继续“v1.3 Step 1 完成，等待确定下一个单变量实验”，不要重新展开历史研究。
