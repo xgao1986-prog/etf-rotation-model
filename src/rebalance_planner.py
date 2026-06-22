@@ -75,6 +75,7 @@ def plan_rebalance_v2_5(
     lot_size: int = 100,
     sell_prices: Optional[Dict[str, float]] = None,  # 卖出价（滑点后的），默认=prices
     buy_prices: Optional[Dict[str, float]] = None,   # 买入价（滑点后的），默认=prices
+    defense_enabled: bool = True,  # 防御资产总开关（v1.1修复）
 ) -> Tuple[List[Dict], Dict]:
     """
     v2.5 纯函数：顺序独立，防御让路，总仓位受控，缺价不强制归零
@@ -146,19 +147,23 @@ def plan_rebalance_v2_5(
         t for t in working_positions
         if t in industry_tickers and t in tradable_industry_tickers
     ]
-    # 保留的防御持仓
+    # 保留的防御持仓（仅在防御模块启用时保留）
     retained_defense = [
         t for t in working_positions
-        if t in defense_tickers and t in tradable_defense_tickers
+        if t in defense_tickers and t in tradable_defense_tickers and defense_enabled
     ]
 
-    # 需要卖出的持仓：不在"可交易"候选列表中的
+    # 需要卖出的持仓：不在"可交易"候选列表中的，或防御模块关闭时所有防御资产
     sell_tickers = []
     for t in list(working_positions.keys()):
         if t in industry_tickers and t not in tradable_industry_tickers:
             sell_tickers.append(t)
-        elif t in defense_tickers and t not in tradable_defense_tickers:
-            sell_tickers.append(t)
+        elif t in defense_tickers:
+            if not defense_enabled:
+                # 防御模块关闭，强制卖出所有防御资产
+                sell_tickers.append(t)
+            elif t not in tradable_defense_tickers:
+                sell_tickers.append(t)
 
     # ========== Step 3: 执行卖出（不在候选的持仓） ==========
     for t in sell_tickers:
@@ -432,10 +437,14 @@ def plan_rebalance_v2_5(
 
     remaining_budget = max(0, max_total_position - current_total_pct)
 
-    current_defense_count = sum(1 for t in working_positions if t in defense_tickers)
-    remaining_slots = max_total_holdings - len(working_positions)
-    defense_slots = min(remaining_slots, max_defense_holdings - current_defense_count)
-    new_defense = [t for t in tradable_defense_tickers if t not in working_positions][:defense_slots]
+    if not defense_enabled:
+        # 防御模块未启用，跳过防御填充
+        new_defense = []
+    else:
+        current_defense_count = sum(1 for t in working_positions if t in defense_tickers)
+        remaining_slots = max_total_holdings - len(working_positions)
+        defense_slots = min(remaining_slots, max_defense_holdings - current_defense_count)
+        new_defense = [t for t in tradable_defense_tickers if t not in working_positions][:defense_slots]
 
     if new_defense and working_cash > 0 and remaining_budget > 0:
         # 防御预算 = min(剩余现金, 剩余风险预算)

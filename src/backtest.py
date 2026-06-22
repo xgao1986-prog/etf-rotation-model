@@ -464,6 +464,8 @@ class BacktestEngine:
                 continue
             
             if ticker in _defense_tickers:
+                if not self.cfg.get('defense_enabled', True):
+                    continue  # 防御模块关闭，跳过防御资产候选
                 raw_defense_candidates.append((ticker, score))
             elif ticker in _core_tickers or ticker in _fallback_tickers:
                 raw_industry_candidates.append((ticker, score))
@@ -515,6 +517,7 @@ class BacktestEngine:
             lot_size=100,
             sell_prices=sell_prices,  # 滑点后的卖出价
             buy_prices=buy_prices,    # 滑点后的买入价
+            defense_enabled=self.cfg.get('defense_enabled', True),  # 防御资产总开关（v1.1修复）
         )
         
         # 6. 执行订单（先卖出，后买入）

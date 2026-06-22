@@ -196,6 +196,10 @@ def build_sidebar_config():
         use_timing = st.checkbox("启用大盘择时", False)  # 默认关闭，回测数据显示关闭后收益更高
         
         st.divider()
+        st.caption("宽基补仓")
+        fallback_equity_enabled = st.checkbox("启用宽基补仓（沪深300/中证500/创业板/科创50）", False, help="行业ETF选不满时，用宽基ETF填充剩余仓位。回测显示当前参数下可能为负贡献。")
+        
+        st.divider()
         st.caption("调仓规则")
         
         # 调仓频率
@@ -213,8 +217,8 @@ def build_sidebar_config():
     with st.sidebar.expander("⚡ v1.1实验因子", expanded=False):
         st.caption("冷静期、动态止盈、防御模块（默认关闭）")
         
-        # 板块动量增强
-        sector_boost = st.checkbox("启用板块动量增强", False)
+        # 板块动量增强（v1.2 预留，当前回测引擎未实现）
+        sector_boost = st.checkbox("启用板块动量增强", False, help="v1.2 预留功能，当前回测引擎暂未实现该因子，勾选不影响结果")
         
         # 冷静期
         st.divider()
@@ -276,6 +280,7 @@ def build_sidebar_config():
     cfg["stop_loss_mode"] = stop_loss_mode
     cfg["atr_stop_multiplier"] = atr_multiplier
     cfg["market_timing"] = use_timing
+    cfg["fallback_equity_enabled"] = fallback_equity_enabled
     cfg["momentum_factor_enabled"] = enable_momentum_vol
     cfg["volatility_factor_enabled"] = enable_momentum_vol
     
@@ -450,15 +455,26 @@ def cfg_signature(cfg):
         round(cfg["max_position_per_etf"], 6),
         round(cfg["stop_loss"], 6),
         cfg.get("stop_loss_mode", "fixed"),
+        cfg.get("atr_stop_multiplier", 2.0),
         cfg["market_timing"],
         cfg.get("cooling_period", 0),
+        cfg.get("cooling_score_boost", 0),
         cfg.get("rebalance_freq", "weekly"),
         cfg.get("rebalance_weekday", 3),
         cfg.get("trailing_stop_mode", "none"),
+        round(cfg.get("trailing_stop", -0.1), 6) if "trailing_stop" in cfg else None,
+        cfg.get("tier_1_pnl", 0.05),
+        cfg.get("tier_1_drawdown", -0.05),
+        cfg.get("tier_2_pnl", 0.15),
+        cfg.get("tier_2_drawdown", -0.08),
+        cfg.get("tier_3_pnl", 0.30),
+        cfg.get("tier_3_drawdown", -0.12),
         cfg.get("defense_enabled", True),
+        cfg.get("fallback_equity_enabled", False),
         cfg.get("sector_boost_enabled", False),
         cfg.get("momentum_factor_enabled", True),
         cfg.get("volatility_factor_enabled", True),
+        round(cfg.get("initial_capital", 1_000_000), 6),
     )
     return weights + params
 
