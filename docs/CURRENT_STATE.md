@@ -1,13 +1,13 @@
 # 当前工程现场
 
-**最后更新**：2026-06-23（Step 4: 80/20组合结构机制拆解）  
-**工作目录**：`D:\etf_rotation_model`  
-**当前分支**：`feature/v1.3-regime-research`  
+**最后更新**：2026-06-23（Step 4修正: 验收逻辑降级）
+**工作目录**：`D:\etf_rotation_model`
+**当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
-**当前研究提交**：`7e79d9d`（v1.3 Step 4: 80/20组合结构机制拆解）  
-**发布锚点**：v1.2.3-b0.4 → 5e8eb78  
-**正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）  
-**数据截止**：2026-06-18  
+**当前研究提交**：`8201e5a`（v1.3 Step 4补充: 滑点压力测试与市场逻辑归因）
+**发布锚点**：v1.2.3-b0.4 → 5e8eb78
+**正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）
+**数据截止**：2026-06-18
 
 > 当前 HEAD 以 `git status` 为准。旧分支 `feature/v1.2.1-regime-adaptive` 保留，不删除、不重置、不强推。标签 `v1.2.3-b0.4` 保持不动。
 
@@ -61,18 +61,27 @@
   - 决策建议：震荡往返比例两期均>15%，是支持 holding stability 实验的主要证据；误杀卖飞不能作为独立证据。
   - 交付物：scripts/v1_3_step3_exit_effectiveness.py（v3）、reports/v1_3_step3_exit_effectiveness.md（v3）、reports/v1_3_step3_exit_events.csv（v3）、reports/v1_3_step3_exit_summary.csv（v3）。
   - 不修改 B0.4 策略、参数或冻结基线。
-- **v1.3 Step 4: 80/20组合结构机制拆解 已完成**：
-  - 在不修改引擎核心逻辑的前提下，仅通过配置参数运行4个组合结构方案（B0.4/A/B/C）。
-  - B0.4 基线精确复现：NAV=2,761,288.07，交易804笔 ✓。
-  - 方案A（4行业+无防御）：总收益152.97%，CAGR 15.14%，夏普0.89，最大回撤-16.66%，现金占比49.1%。
-  - 方案B（4行业+1防御）：总收益180.91%，CAGR 16.99%，夏普0.98，最大回撤-16.38%，为4方案中夏普最高、回撤最小。
-  - 方案C（5行业×16%）：总收益118.34%，CAGR 12.59%，夏普0.81，最大回撤-16.27%，现金占比53.18%。
-  - 滑点压力测试：0/3/5/10bp 四个方案均单调递减，无异常。
-  - 第5槽位占用：B0.4 cash=900天/industry=601天/bond=92天/gold=25天；B bond=310天/gold=271天；C cash=1058天/industry=601天。
-  - 黄金/国债贡献：B0.4 黄金+4.96%、国债+2.39%；B 黄金+8.30%、国债+2.53%。
-  - 交付物：scripts/v1_3_step4_portfolio_structure_ab.py、reports/v1_3_step4_portfolio_structure_ab.md、reports/v1_3_step4_portfolio_metrics.csv、reports/v1_3_step4_portfolio_daily_attribution.csv。
-  - 不修改 B0.4 策略、参数或冻结基线。
-- **下一阶段唯一任务**：Step 4 已完成，等待用户决定下一步研究方向。不修改 B0.4 交易逻辑。
+- **v1.3 Step 4: 80/20组合结构机制拆解 已完成（修正版，验收逻辑降级）**：
+  - **分析期限定**：所有方案选择结论仅使用2019-2024年数据。2025-2026样本外数据只列出展示，不参与方案选择或结论支持。
+  - **B0.4基线复现**：NAV=2,761,288.07，交易804笔，精确复现 ✓。
+  - **分析期核心指标**：
+    - B0.4：总收益71.32%，夏普0.59，最大回撤-17.75%
+    - B（4行业+1防御）：总收益68.15%（**低于**B0.4），夏普0.64（**高于**B0.4），最大回撤-16.38%（**优于**B0.4）
+    - A（4行业+现金）：总收益60.64%，夏普0.58，最大回撤-16.66%
+    - C（5行业×16%）：总收益48.42%，夏普0.52，最大回撤-16.27%
+  - **关键发现**：B改善了夏普和回撤，但**没有改善分析期总收益**（68.15% < 71.32%）。验证期B总收益25.06% < B0.4的27.67%。
+  - **防御贡献修正（分析期）**：B黄金约2.39%，国债约2.46%，防御合计约4.86%。B0.4防御合计约5.70%。**B的防御贡献不高于B0.4**。
+  - **市场逻辑**：B相对A在研究期、验证期均更好，支持"防御资产优于闲置现金"。B相对B0.4改善了夏普和回撤，但不是提高分析期收益。改善可能来自行业风险降低、现金/防御组合及换手下降的共同作用，**不能证明来自更高防御贡献**。
+  - **预注册验收标准**：
+    - ✅ 通过：研究期/验证期夏普方向一致、验证期回撤改善、滑点压力测试通过、震荡/弱市改善符合逻辑、强牛机会成本可接受、数据勾稽完整
+    - ❌ **未通过**："2023、2024不能仅靠单一年份支撑"——2024年B落后B0.4，验证期收益未持续领先
+    - ⚠️ 存疑：防御贡献是否为主要改善来源——分析期B防御合计约4.86% < B0.4约5.70%
+  - **结论降级**：方案B是**有经济逻辑的后续稳健性候选**，但不能升级基线或认定为候选增强。B在夏普和回撤上有改善，但分析期总收益未超过B0.4，且验证期收益未持续领先。
+  - **交付物**：scripts/v1_3_step4_portfolio_structure_ab.py、reports/v1_3_step4_portfolio_structure_ab.md（修正版）、reports/v1_3_step4_portfolio_metrics.csv、reports/v1_3_step4_portfolio_daily_attribution.csv、reports/v1_3_step4_slippage_test.md、scripts/v1_3_step4_slippage_test.py。
+  - **不修改 B0.4 策略、参数或冻结基线。不进入任何参数调优或增强实施。**
+- **下一阶段唯一任务**：Step 4 修正已完成。方案B未通过全部预注册验收标准，不升级基线，不进入增强实施。等待用户决定下一步研究方向。
+
+---
 
 ## 2. B0.4 冻结口径
 
@@ -93,9 +102,9 @@
 
 - 信息日期：前一有效交易日收盘数据。
 - 成交记录日期：下一有效交易日。
-- 普通信号以次日开盘价执行；等价表述为“T日收盘信号，T+1开盘交易”。
+- 普通信号以次日开盘价执行；等价表述为"T日收盘信号，T+1开盘交易"。
 - 关键指标使用 `shift(1)`，已通过同日数据扰动测试。
-- 止损采用“开盘检查并按开盘成交”的预置止损单假设。
+- 止损采用"开盘检查并按开盘成交"的预置止损单假设。
 
 ### 冻结指标
 
@@ -175,29 +184,22 @@
 当前分支已同步远端，但工作区不是干净状态：
 
 - 已修改：`docs/CURRENT_STATE.md`
-  - 本次 v1.3 Step 4 交接摘要更新，尚未提交。
+  - 本次 Step 4 修正版更新，尚未提交。
 - 已修改：`docs/CHANGES.md`
-  - v1.3 Step 4 记录，尚未提交。
+  - Step 4 修正版记录，尚未提交。
 - 已修改：`src/backtest.py`
   - nav_records 增加 `industry_value` / `defense_value`（不改变交易逻辑）。
 - 已修改：`reports/ab_test_data_fill_impact.md`
   - 仅文件末尾换行差异；不要在无关任务中处理。
 - 未跟踪：`reports/etf_rotation_public_resources_research.md`
 - 未跟踪：`scripts/phase7_1_survivorship_bias_audit_v2.py`
-- 新增：`src/market_regime.py`
-  - 市场状态检测模块（从 D:/ 同步到 workspace）。
-- 新增：`scripts/v1_3_step1_replacement_attribution.py`
-- 新增：`reports/v1_3_step1_replacement_attribution.md`
-- 新增：`reports/v1_3_step1_replacement_events.csv`
-- 新增：`reports/v1_3_step1_replacement_summary.csv`
-- 新增：`scripts/v1_3_step3_exit_effectiveness.py`
-- 新增：`reports/v1_3_step3_exit_effectiveness.md`
-- 新增：`reports/v1_3_step3_exit_events.csv`
-- 新增：`reports/v1_3_step3_exit_summary.csv`
 - 新增：`scripts/v1_3_step4_portfolio_structure_ab.py`
 - 新增：`reports/v1_3_step4_portfolio_structure_ab.md`
 - 新增：`reports/v1_3_step4_portfolio_metrics.csv`
 - 新增：`reports/v1_3_step4_portfolio_daily_attribution.csv`
+- 新增：`scripts/v1_3_step4_slippage_test.py`
+- 新增：`reports/v1_3_step4_slippage_test.md`
+- 新增：`reports/v1_3_step4_slippage_test.csv`
 
 这些文件均视为用户已有研究材料。不得删除、移动、覆盖、暂存或提交，除非当前任务明确要求。
 
@@ -215,12 +217,7 @@
 
 ## 7. 下一步唯一任务
 
-Step 4 已完成。等待用户决定下一步研究方向：
-- 选项 A：基于 Step 4 结论，进一步优化组合结构（如测试方案B的变体）。
-- 选项 B：进入其他单变量实验（如 holding stability、滑点参数优化等）。
-- 选项 C：不进入实验，继续观察。
-
-当前不修改 B0.4 交易逻辑、策略或冻结基线。
+Step 4 修正已完成。方案B未通过全部预注册验收标准，不升级基线，不进入增强实施。等待用户决定下一步研究方向。
 
 ---
 
@@ -250,4 +247,4 @@ Step 4 已完成。等待用户决定下一步研究方向：
 3. `docs/DECISIONS.md`
 4. `git status --short --branch`
 
-恢复后只继续“v1.3 Step 1 完成，等待确定下一个单变量实验”，不要重新展开历史研究。
+恢复后只继续"v1.3 Step 4 修正完成，等待用户决定下一步研究方向"，不要重新展开历史研究。
