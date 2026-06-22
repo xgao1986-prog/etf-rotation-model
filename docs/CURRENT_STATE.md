@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-23（Step 4修正: 验收逻辑降级）
+**最后更新**：2026-06-24（Step 5: 动态组合广度与集中度可行性诊断）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -80,6 +80,27 @@
   - **交付物**：scripts/v1_3_step4_portfolio_structure_ab.py、reports/v1_3_step4_portfolio_structure_ab.md（修正版）、reports/v1_3_step4_portfolio_metrics.csv、reports/v1_3_step4_portfolio_daily_attribution.csv、reports/v1_3_step4_slippage_test.md、scripts/v1_3_step4_slippage_test.py。
   - **不修改 B0.4 策略、参数或冻结基线。不进入任何参数调优或增强实施。**
 - **下一阶段唯一任务**：Step 4 修正已完成。方案B未通过全部预注册验收标准，不升级基线，不进入增强实施。等待用户决定下一步研究方向。
+- **v1.3 Step 5: 动态组合广度与集中度可行性诊断 已完成（observer-only）**：
+  - **只做observer诊断**：不修改交易规则、不制定动态参数、不回测动态仓位策略。不修改B0.4、生产策略、ETF池、数据库或调仓引擎。
+  - **数据收集**：271个调仓日，每个调仓日记录所有16只行业ETF的total_score、signal_type、排名、候选数量、质量分位、市场状态。
+  - **第5名价值分析**：
+    - 完整20日观察样本81笔，平均20日收益+1.54%，胜率58.0%，相对Top4超额+0.81%。
+    - 按候选数量分组：无单调趋势（n=5:-0.31%, n=6:-1.31%, n=7:4.51%, n=8:7.90%），样本量不足。
+    - 按质量分组：high组+3.24%(29笔), medium组-2.55%(8笔), low组+1.17%(44笔)。medium组样本量不足。
+    - 按分差分组：分差<2时+2.39%(34笔), 2-5时+0.87%(19笔), >=5时+0.78%(28笔)。分差小表现略好，但幅度不大。
+  - **3-4只候选集中价值反事实**：
+    - 3只候选：实际-0.29%，100%预算反事实-0.48%，风险放大。
+    - 4只候选：实际+1.57%，100%预算反事实+1.97%，风险从-7.96%放大到-9.95%。
+  - **研究期/验证期方向**：研究期0.98% vs 验证期1.22%，方向一致（均为正），但验证期仅18笔，统计功效有限。
+  - **预注册决策规则**：
+    - 研究期/验证期方向一致：⚠️ 部分满足（方向均为正，但验证期样本小）
+    - 第5名价值可由候选广度/质量/相关性解释：❌ 未满足（关系不稳定，样本量不足）
+    - 连续变量与分组结果方向一致：⚠️ 存疑（部分一致，但样本量不足）
+    - 集中度收益改善足以补偿波动/最大损失：❌ 未满足（反事实未经实际交易验证）
+    - 2025-2026不参与规则选择：✅ 满足
+  - **结论**：**当前证据不足，继续使用固定B0.4结构**。不存在可解释、可预注册的动态宽度信号。建议继续观察，不在当前数据集上制定动态规则。
+  - **交付物**：scripts/v1_3_step5_dynamic_breadth_diagnosis.py、reports/v1_3_step5_dynamic_breadth_diagnosis.md、reports/v1_3_step5_rebalance_events.csv、reports/v1_3_step5_fifth_candidate_events.csv、reports/v1_3_step5_concentration_counterfactual.csv、reports/v1_3_step5_summary.csv。
+  - **不修改 B0.4 策略、参数或冻结基线。不进入任何参数调优或增强实施。**
 
 ---
 
@@ -184,9 +205,9 @@
 当前分支已同步远端，但工作区不是干净状态：
 
 - 已修改：`docs/CURRENT_STATE.md`
-  - 本次 Step 4 修正版更新，尚未提交。
+  - 本次 Step 5 更新，尚未提交。
 - 已修改：`docs/CHANGES.md`
-  - Step 4 修正版记录，尚未提交。
+  - Step 5 记录，尚未提交。
 - 已修改：`src/backtest.py`
   - nav_records 增加 `industry_value` / `defense_value`（不改变交易逻辑）。
 - 已修改：`reports/ab_test_data_fill_impact.md`
@@ -200,6 +221,13 @@
 - 新增：`scripts/v1_3_step4_slippage_test.py`
 - 新增：`reports/v1_3_step4_slippage_test.md`
 - 新增：`reports/v1_3_step4_slippage_test.csv`
+
+- 新增：`scripts/v1_3_step5_dynamic_breadth_diagnosis.py`
+- 新增：`reports/v1_3_step5_dynamic_breadth_diagnosis.md`
+- 新增：`reports/v1_3_step5_rebalance_events.csv`
+- 新增：`reports/v1_3_step5_fifth_candidate_events.csv`
+- 新增：`reports/v1_3_step5_concentration_counterfactual.csv`
+- 新增：`reports/v1_3_step5_summary.csv`
 
 这些文件均视为用户已有研究材料。不得删除、移动、覆盖、暂存或提交，除非当前任务明确要求。
 
@@ -217,7 +245,7 @@
 
 ## 7. 下一步唯一任务
 
-Step 4 修正已完成。方案B未通过全部预注册验收标准，不升级基线，不进入增强实施。等待用户决定下一步研究方向。
+Step 5 已完成。动态组合广度observer诊断结论：**当前证据不足，继续使用固定B0.4结构**。不存在可解释、可预注册的动态宽度信号。等待用户决定下一步研究方向。
 
 ---
 
