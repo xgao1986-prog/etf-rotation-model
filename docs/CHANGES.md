@@ -45,6 +45,30 @@
 
 ---
 
+## 2026-06-22（本次 - 分支迁移：v1.3研究归属修正）
+
+**目标：** 修正 v1.3 研究分支归属。不修改策略代码、不修改研究结论、不删除旧分支、不移动标签。
+
+**操作：**
+- 从 `e206f47`（v1.3 Step 2 提交）创建新分支 `feature/v1.3-regime-research`。
+- 新分支推送至 `origin/feature/v1.3-regime-research`。
+- 旧分支 `feature/v1.2.1-regime-adaptive` 保留，不删除、不重置、不强推。
+- 标签 `v1.2.3-b0.4`（→ 5e8eb78）保持不动，不移动或重建。
+- 更新 `docs/CURRENT_STATE.md`：当前分支改为 `feature/v1.3-regime-research`，注明当前研究提交 `e206f47`。
+- 更新 `docs/CHANGES.md`：记录本次分支迁移。
+
+**未修改：**
+- 策略参数、交易逻辑、冻结基线（B0.4 NAV=2,761,288.07 未变）。
+- v1.3 Step 1 和 Step 2 的全部研究代码和报告。
+- 旧分支历史记录。
+- 所有未跟踪文件和无关修改（不删除、不暂存、不提交）。
+
+**改了哪些文件：**
+- `docs/CURRENT_STATE.md` — 更新当前分支为 `feature/v1.3-regime-research`，添加当前研究提交 `e206f47`
+- `docs/CHANGES.md` — 添加本条目
+
+---
+
 ## 2026-06-22（本次 - v1.3 Step 1 P1修复：PURE_RANKING分类与事件分析不一致）
 
 **目标：** 修复WorkBuddy P1：分类汇总出现1笔PURE_RANKING，但事件分析为0笔。

@@ -2,13 +2,14 @@
 
 **最后更新**：2026-06-22  
 **工作目录**：`D:\etf_rotation_model`  
-**当前分支**：`feature/v1.2.1-regime-adaptive`  
-**当前版本**：v1.2.3  
+**当前分支**：`feature/v1.3-regime-research`  
+**当前版本**：v1.2.3
+**当前研究提交**：`e206f47`（v1.3 Step 2: B0.4 market regime incremental value diagnosis）  
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78  
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）  
 **数据截止**：2026-06-18  
 
-> 当前 HEAD 以 `git status` 为准。
+> 当前 HEAD 以 `git status` 为准。旧分支 `feature/v1.2.1-regime-adaptive` 保留，不删除、不重置、不强推。标签 `v1.2.3-b0.4` 保持不动。
 
 ---
 
