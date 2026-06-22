@@ -33,7 +33,15 @@
   - 交易分类勾稽：341 + 46 + 17 + 1 = 405 = 卖出合计 ✓；纯排名替换0 = 事件CSV行数 ✓。
   - 不满足进入 Step 2（测试 replacement_score_gap）的任何条件。
   - 不创建 replacement_score_gap 规则，不修改 B0.4。
-- **下一阶段**：等待确定下一个单变量实验。
+- **v1.3 Step 2: B0.4 市场状态增量价值诊断 已完成**：
+  - 自然择时已生效：强牛行业仓位 44.7% > 熊市 31.0%，差异 13.7 个百分点。
+  - 弱市超额为正：熊市 +6.9%，震荡期 +28.6%，现有防御规则已提供有效保护。
+  - 状态分布：熊市 50.0%（701天）、弱牛 18.1%（236天）、震荡 16.4%（214天）、强牛 11.8%（154天）。
+  - 状态切换 60 次，平均置信度 0.768。
+  - 推荐方向：**B（状态敏感仓位）** — 在现有信号基础上做显式仓位映射，而非改参数（A）或过滤信号（C）。
+  - 交付物：`scripts/v1_3_step2_b0_4_regime_diagnosis.py`、`reports/v1_3_step2_regime_diagnosis.md`、`reports/v1_3_step2_regime_stats.csv`。
+  - 不修改 B0.4 策略、参数或冻结基线。
+- **下一阶段**：等待确认是否进入方向 B 实验设计（状态→仓位映射规则）。
 
 ---
 
@@ -138,17 +146,24 @@
 当前分支已同步远端，但工作区不是干净状态：
 
 - 已修改：`docs/CURRENT_STATE.md`
-  - 本次 v1.3 Step 1 交接摘要更新，尚未提交。
+  - 本次 v1.3 Step 1 / Step 2 交接摘要更新，尚未提交。
 - 已修改：`docs/CHANGES.md`
-  - v1.3 Step 1 记录，尚未提交。
+  - v1.3 Step 1 / Step 2 记录，尚未提交。
+- 已修改：`src/backtest.py`
+  - nav_records 增加 `industry_value` / `defense_value`（不改变交易逻辑）。
 - 已修改：`reports/ab_test_data_fill_impact.md`
   - 仅文件末尾换行差异；不要在无关任务中处理。
 - 未跟踪：`reports/etf_rotation_public_resources_research.md`
 - 未跟踪：`scripts/phase7_1_survivorship_bias_audit_v2.py`
+- 新增：`src/market_regime.py`
+  - 市场状态检测模块（从 D:/ 同步到 workspace）。
 - 新增：`scripts/v1_3_step1_replacement_attribution.py`
 - 新增：`reports/v1_3_step1_replacement_attribution.md`
 - 新增：`reports/v1_3_step1_replacement_events.csv`
 - 新增：`reports/v1_3_step1_replacement_summary.csv`
+- 新增：`scripts/v1_3_step2_b0_4_regime_diagnosis.py`
+- 新增：`reports/v1_3_step2_regime_diagnosis.md`
+- 新增：`reports/v1_3_step2_regime_stats.csv`
 
 这些文件均视为用户已有研究材料。不得删除、移动、覆盖、暂存或提交，除非当前任务明确要求。
 
@@ -166,7 +181,7 @@
 
 ## 7. 下一步唯一任务
 
-等待确定下一个单变量实验。所有新实验必须以 B0.4（0bp）为对照，一次只改变一个变量。
+等待确认是否进入方向 B 实验设计（状态→仓位映射规则）。所有新实验必须以 B0.4（0bp）为对照，一次只改变一个变量。
 
 ---
 
