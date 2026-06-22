@@ -105,6 +105,7 @@ def compute_post_exit_performance(bcf_df, market_df, trades_df, scores_df):
     - 未来收益从卖出日期后的第一个交易日开始
     - 有效交易日（非自然日）
     - 禁止未来函数
+    - 时间分区边界：研究期截止2022-12-31，验证期截止2024-12-31，样本外截止2026-06-18
     """
     market_df = market_df.copy().sort_values(['ticker', 'date'])
     market_df['date'] = pd.to_datetime(market_df['date']).dt.date
@@ -112,6 +113,21 @@ def compute_post_exit_performance(bcf_df, market_df, trades_df, scores_df):
     trades_df['date'] = pd.to_datetime(trades_df['date']).dt.date
     scores_df = scores_df.copy()
     scores_df['date'] = pd.to_datetime(scores_df['date']).dt.date
+
+    # 时间分区边界
+    PERIOD_BOUNDS = {
+        '研究期': pd.Timestamp('2022-12-31').date(),
+        '验证期': pd.Timestamp('2024-12-31').date(),
+        '样本外': pd.Timestamp('2026-06-18').date(),
+    }
+
+    def get_period_end(sell_date):
+        if sell_date.year <= 2022:
+            return '研究期', PERIOD_BOUNDS['研究期']
+        elif sell_date.year <= 2024:
+            return '验证期', PERIOD_BOUNDS['验证期']
+        else:
+            return '样本外', PERIOD_BOUNDS['样本外']
 
     # 预计算：每只ETF的所有BUY交易，用于查找重新买回
     ticker_buys_map = {}
@@ -131,14 +147,18 @@ def compute_post_exit_performance(bcf_df, market_df, trades_df, scores_df):
         amount = row['amount']
         sell_commission = row['commission']
 
-        # 获取该ETF的交易日序列
+        # 获取period和边界
+        period_name, period_end = get_period_end(sell_date)
+
+        # 获取该ETF的交易日序列，并限制在分区边界内
         tdf = market_df[market_df['ticker'] == ticker].sort_values('date').reset_index(drop=True)
+        tdf = tdf[tdf['date'] <= period_end].reset_index(drop=True)
         if tdf.empty:
             # 无市场数据，记录NO_FUTURE
             results.append(_make_result_record(
                 sell_date, ticker, sell_price, shares, amount, sell_commission, pnl_pct, reason,
                 observation_status='NO_FUTURE', available_future_days=0,
-                n_future=0, start_idx=-1
+                n_future=0, start_idx=-1, period_end=period_end
             ))
             continue
 
@@ -150,7 +170,7 @@ def compute_post_exit_performance(bcf_df, market_df, trades_df, scores_df):
                 results.append(_make_result_record(
                     sell_date, ticker, sell_price, shares, amount, sell_commission, pnl_pct, reason,
                     observation_status='NO_FUTURE', available_future_days=0,
-                    n_future=0, start_idx=-1
+                    n_future=0, start_idx=-1, period_end=period_end
                 ))
                 continue
             start_idx = future_dates.index[0]
@@ -161,21 +181,35 @@ def compute_post_exit_performance(bcf_df, market_df, trades_df, scores_df):
             results.append(_make_result_record(
                 sell_date, ticker, sell_price, shares, amount, sell_commission, pnl_pct, reason,
                 observation_status='NO_FUTURE', available_future_days=0,
-                n_future=0, start_idx=-1
+                n_future=0, start_idx=-1, period_end=period_end
             ))
             continue
 
-        # 未来交易日序列
+        # 未来交易日序列（已限制在分区边界内）
         future_tdf = tdf.iloc[start_idx:].copy()
         n_future = len(future_tdf)
 
         # 确定观察状态
-        if n_future >= 20:
-            observation_status = 'COMPLETE_20D'
-            available_future_days = n_future
-        else:
-            observation_status = 'CENSORED_20D'
-            available_future_days = n_future
+        if period_name in ['研究期', '验证期']:
+            if n_future >= 20:
+                observation_status = 'COMPLETE_20D'
+                available_future_days = n_future
+            elif n_future > 0:
+                observation_status = 'CENSORED_PERIOD_END'
+                available_future_days = n_future
+            else:
+                observation_status = 'NO_FUTURE'
+                available_future_days = 0
+        else:  # 样本外
+            if n_future >= 20:
+                observation_status = 'COMPLETE_20D'
+                available_future_days = n_future
+            elif n_future > 0:
+                observation_status = 'CENSORED_DATA_END'
+                available_future_days = n_future
+            else:
+                observation_status = 'NO_FUTURE'
+                available_future_days = 0
 
         # 计算各窗口收益（只有完整20日窗口才计算20日指标）
         ret_5d = np.nan
@@ -207,7 +241,7 @@ def compute_post_exit_performance(bcf_df, market_df, trades_df, scores_df):
             max_rise_all = max_price_all / sell_price - 1
             max_fall_all = min_price_all / sell_price - 1
 
-        # 查找重新买回（同一ETF的后续首次BUY）
+        # 查找重新买回（同一ETF的后续首次BUY，限制在分区边界内）
         rebought_any = False
         rebought_20d = False
         rebuy_date = None
@@ -218,6 +252,8 @@ def compute_post_exit_performance(bcf_df, market_df, trades_df, scores_df):
         rebuy_commission = np.nan
 
         buys = ticker_buys_map.get(ticker, pd.DataFrame())
+        # 限制在分区边界内
+        buys = buys[buys['date'] <= period_end]
         future_buys = buys[buys['date'] > sell_date]
         if not future_buys.empty:
             rebuy_row = future_buys.iloc[0]
@@ -225,7 +261,7 @@ def compute_post_exit_performance(bcf_df, market_df, trades_df, scores_df):
             rebuy_date = rebuy_row['date']
             rebuy_price = rebuy_row['price']
             rebuy_commission = rebuy_row['commission']
-            # 计算间隔交易日数
+            # 计算间隔交易日数（从卖出日期的下一个交易日到买回日期的交易日）
             rebuy_idx = tdf[tdf['date'] == rebuy_date].index
             if len(rebuy_idx) > 0:
                 days_to_rebuy = rebuy_idx[0] - start_idx + 1
@@ -275,6 +311,7 @@ def compute_post_exit_performance(bcf_df, market_df, trades_df, scores_df):
             'observation_status': observation_status,
             'available_future_days': available_future_days,
             'n_future': n_future,
+            'period_end': period_end,
             'rebuy_date': rebuy_date,
             'rebuy_price': rebuy_price,
             'days_to_rebuy': days_to_rebuy,
@@ -294,7 +331,7 @@ def compute_post_exit_performance(bcf_df, market_df, trades_df, scores_df):
 
 
 def _make_result_record(sell_date, ticker, sell_price, shares, amount, sell_commission, pnl_pct, reason,
-                        observation_status, available_future_days, n_future, start_idx):
+                        observation_status, available_future_days, n_future, start_idx, period_end=None):
     """为无未来数据的样本生成空记录"""
     return {
         'sell_date': sell_date,
@@ -315,6 +352,7 @@ def _make_result_record(sell_date, ticker, sell_price, shares, amount, sell_comm
         'observation_status': observation_status,
         'available_future_days': available_future_days,
         'n_future': n_future,
+        'period_end': period_end,
         'rebuy_date': '未买回',
         'rebuy_price': np.nan,
         'days_to_rebuy': np.nan,
@@ -337,7 +375,7 @@ def classify_exits(df):
 
     约束：
     - 只有 COMPLETE_20D 样本才能参与20日相关分类
-    - 数据不足样本（CENSORED_20D / NO_FUTURE）主分类设为"数据不足"
+    - 数据不足样本（CENSORED_PERIOD_END / CENSORED_DATA_END / NO_FUTURE）主分类设为"数据不足"
     - 20日最大涨跌/收益/误杀/避损不得使用残缺窗口
 
     优先级：震荡往返 > 误杀卖飞 > 有效避损 > 中性
@@ -466,7 +504,8 @@ def generate_summary(df, output_dir):
 
         n = len(period_df)
         n_complete = (period_df['observation_status'] == 'COMPLETE_20D').sum()
-        n_censored = (period_df['observation_status'] == 'CENSORED_20D').sum()
+        n_censored_period = (period_df['observation_status'] == 'CENSORED_PERIOD_END').sum()
+        n_censored_data = (period_df['observation_status'] == 'CENSORED_DATA_END').sum()
         n_no_future = (period_df['observation_status'] == 'NO_FUTURE').sum()
 
         # 完整20日样本的主分类
@@ -499,7 +538,8 @@ def generate_summary(df, output_dir):
             '子维度': period_name,
             '总样本数': n,
             '完整20日': n_complete,
-            '截尾不足': n_censored,
+            '分区边界截尾': n_censored_period,
+            '数据截止截尾': n_censored_data,
             '无未来数据': n_no_future,
             '震荡往返': rt,
             '误杀卖飞': fk,
@@ -548,7 +588,8 @@ def generate_summary(df, output_dir):
             '子维度': str(year),
             '总样本数': n,
             '完整20日': n_complete,
-            '截尾不足': (year_df['observation_status'] == 'CENSORED_20D').sum(),
+            '分区边界截尾': (year_df['observation_status'] == 'CENSORED_PERIOD_END').sum(),
+            '数据截止截尾': (year_df['observation_status'] == 'CENSORED_DATA_END').sum(),
             '无未来数据': (year_df['observation_status'] == 'NO_FUTURE').sum(),
             '震荡往返': rt,
             '误杀卖飞': fk,
@@ -599,7 +640,8 @@ def generate_summary(df, output_dir):
             '子维度': str(regime),
             '总样本数': n,
             '完整20日': n_complete,
-            '截尾不足': (reg_df['observation_status'] == 'CENSORED_20D').sum(),
+            '分区边界截尾': (reg_df['observation_status'] == 'CENSORED_PERIOD_END').sum(),
+            '数据截止截尾': (reg_df['observation_status'] == 'CENSORED_DATA_END').sum(),
             '无未来数据': (reg_df['observation_status'] == 'NO_FUTURE').sum(),
             '震荡往返': rt,
             '误杀卖飞': fk,
@@ -648,7 +690,8 @@ def generate_summary(df, output_dir):
             '子维度': ticker,
             '总样本数': n,
             '完整20日': n_complete,
-            '截尾不足': (tdf['observation_status'] == 'CENSORED_20D').sum(),
+            '分区边界截尾': (tdf['observation_status'] == 'CENSORED_PERIOD_END').sum(),
+            '数据截止截尾': (tdf['observation_status'] == 'CENSORED_DATA_END').sum(),
             '无未来数据': (tdf['observation_status'] == 'NO_FUTURE').sum(),
             '震荡往返': rt,
             '误杀卖飞': fk,
@@ -699,7 +742,8 @@ def generate_summary(df, output_dir):
             '子维度': label,
             '总样本数': n,
             '完整20日': n_complete,
-            '截尾不足': (sub['observation_status'] == 'CENSORED_20D').sum(),
+            '分区边界截尾': (sub['observation_status'] == 'CENSORED_PERIOD_END').sum(),
+            '数据截止截尾': (sub['observation_status'] == 'CENSORED_DATA_END').sum(),
             '无未来数据': (sub['observation_status'] == 'NO_FUTURE').sum(),
             '震荡往返': rt,
             '误杀卖飞': fk,
@@ -750,7 +794,8 @@ def generate_summary(df, output_dir):
             '子维度': label,
             '总样本数': n,
             '完整20日': n_complete,
-            '截尾不足': (sub['observation_status'] == 'CENSORED_20D').sum(),
+            '分区边界截尾': (sub['observation_status'] == 'CENSORED_PERIOD_END').sum(),
+            '数据截止截尾': (sub['observation_status'] == 'CENSORED_DATA_END').sum(),
             '无未来数据': (sub['observation_status'] == 'NO_FUTURE').sum(),
             '震荡往返': rt,
             '误杀卖飞': fk,
@@ -800,7 +845,8 @@ def generate_summary(df, output_dir):
             '子维度': label,
             '总样本数': n,
             '完整20日': n_complete,
-            '截尾不足': (sub['observation_status'] == 'CENSORED_20D').sum(),
+            '分区边界截尾': (sub['observation_status'] == 'CENSORED_PERIOD_END').sum(),
+            '数据截止截尾': (sub['observation_status'] == 'CENSORED_DATA_END').sum(),
             '无未来数据': (sub['observation_status'] == 'NO_FUTURE').sum(),
             '震荡往返': rt,
             '误杀卖飞': fk,
@@ -829,12 +875,12 @@ def generate_summary(df, output_dir):
 def generate_report(df, summary_df, output_md):
     """生成Markdown报告"""
     with open(output_md, 'w', encoding='utf-8') as f:
-        f.write("# v1.3 Step 3 v2: 信号失效退出有效性归因报告\n\n")
+        f.write("# v1.3 Step 3 v3: 信号失效退出有效性归因报告\n\n")
         f.write(f"> 生成日期: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"> 基准: B0.4 (v1.2.3-b0.4, 0bp, 不计滑点)\n")
         f.write(f"> 分析样本: 341笔 BUY_CONDITION_FAILED 退出\n")
         f.write(f"> 口径: T+1开盘成交，有效交易日（非自然日），禁止未来函数\n")
-        f.write(f"> 修正: v2（完整保留341笔，禁止残缺窗口判断20日指标，统一15%阈值）\n\n")
+        f.write(f"> 修正: v3（修复时间分区泄漏，未来行情和买回搜索限制在各自期间边界内）\n\n")
 
         # 1. 数据勾稽
         f.write("## 1. 数据勾稽\n\n")
@@ -847,12 +893,14 @@ def generate_report(df, summary_df, output_md):
                 continue
             n = len(period_df)
             n_complete = (period_df['observation_status'] == 'COMPLETE_20D').sum()
-            n_censored = (period_df['observation_status'] == 'CENSORED_20D').sum()
+            n_censored_period = (period_df['observation_status'] == 'CENSORED_PERIOD_END').sum()
+            n_censored_data = (period_df['observation_status'] == 'CENSORED_DATA_END').sum()
             n_no_future = (period_df['observation_status'] == 'NO_FUTURE').sum()
-            f.write(f"**{period_name}**: {n} = 完整20日({n_complete}) + 截尾不足({n_censored}) + 无未来数据({n_no_future})\n")
+            f.write(f"**{period_name}**: {n} = 完整20日({n_complete}) + 分区边界截尾({n_censored_period}) + 数据截止截尾({n_censored_data}) + 无未来数据({n_no_future})\n")
             f.write(f"  - 完整20日样本: {n_complete} 笔（可用于20日分类）\n")
-            f.write(f"  - 截尾不足样本: {n_censored} 笔（未来交易日<20，主分类=数据不足）\n")
-            f.write(f"  - 无未来数据样本: {n_no_future} 笔（卖出后无交易日，主分类=数据不足）\n")
+            f.write(f"  - 分区边界截尾样本: {n_censored_period} 笔（分区边界内不足20日，主分类=数据不足）\n")
+            f.write(f"  - 数据截止截尾样本: {n_censored_data} 笔（数据截止前不足20日，主分类=数据不足）\n")
+            f.write(f"  - 无未来数据样本: {n_no_future} 笔（分区边界内无交易日，主分类=数据不足）\n")
 
             # 主分类合计勾稽（仅完整20日样本）
             complete_df = period_df[period_df['observation_status'] == 'COMPLETE_20D']
@@ -865,12 +913,19 @@ def generate_report(df, summary_df, output_md):
 
         f.write(f"**events.csv行数**: {len(df)} 笔（必须等于 {TARGET_BCF_COUNT}）\n\n")
 
+        # 全局勾稽
+        n_complete_all = (df['observation_status'] == 'COMPLETE_20D').sum()
+        n_censored_period_all = (df['observation_status'] == 'CENSORED_PERIOD_END').sum()
+        n_censored_data_all = (df['observation_status'] == 'CENSORED_DATA_END').sum()
+        n_no_future_all = (df['observation_status'] == 'NO_FUTURE').sum()
+        f.write(f"**全局勾稽**: {len(df)} = COMPLETE_20D({n_complete_all}) + CENSORED_PERIOD_END({n_censored_period_all}) + CENSORED_DATA_END({n_censored_data_all}) + NO_FUTURE({n_no_future_all})\n\n")
+
         # 2. 样本定义
         f.write("## 2. 样本定义\n\n")
         f.write("- **BUY_CONDITION_FAILED 样本数**: 341笔\n")
         f.write("- 分类逻辑复用 Step 1: reason='调出候选列表' 且 signal_type != 'BUY'\n")
         f.write("- 完整保留所有样本，不因无未来行情而跳过\n")
-        f.write("- 观察状态: COMPLETE_20D=完整20日观察, CENSORED_20D=截尾不足(<20日), NO_FUTURE=无未来数据\n\n")
+        f.write("- 观察状态: COMPLETE_20D=完整20日观察, CENSORED_PERIOD_END=分区边界截尾(<20日), CENSORED_DATA_END=数据截止截尾(<20日), NO_FUTURE=无未来数据\n\n")
 
         # 3. 总体分类结果（仅完整20日样本）
         f.write("## 3. 总体分类结果（仅完整20日样本）\n\n")
@@ -1011,8 +1066,9 @@ def generate_report(df, summary_df, output_md):
         f.write("- **假设**：重新买回定义为同一ETF的后续首次BUY，不假设必然执行。\n")
         f.write("- **假设**：分类阈值（20日收益±3%、20日最大涨跌±5%）为预设规则，未根据数据反向调整。\n")
         f.write("- **约束**：只有 COMPLETE_20D 样本才参与20日收益、最大涨跌、误杀卖飞、有效避损分类。\n")
-        f.write('- **约束**：CENSORED_20D 和 NO_FUTURE 样本主分类强制为"数据不足"，不根据部分窗口判断。\n')
+        f.write('- **约束**：CENSORED_PERIOD_END / CENSORED_DATA_END / NO_FUTURE 样本主分类强制为"数据不足"，不根据部分窗口判断。\n')
         f.write("- **约束**：20日分类以完整20日样本为分母，已披露排除数量。\n")
+        f.write("- **约束**：时间分区边界——研究期未来行情和买回搜索截止2022-12-31，验证期截止2024-12-31，样本外截止2026-06-18。\n")
         f.write("- **限制**：样本外（2025-2026）仅列出，不参与结论。\n")
         f.write("- **禁止未来函数**：所有计算均基于卖出日期之前已知的信号和价格。\n\n")
 
