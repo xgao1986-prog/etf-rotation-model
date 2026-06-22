@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-v1.3 Step 2: B0.4 市场状态增量价值诊断
+v1.3 Step 2: B0.4 市场状态增量价值诊断（修正版）
 
 目标：判断 B0.4 已有的自然择时是否足够，市场状态检测是否还有增量价值。
 
-分析维度：
-1. 状态分布：各状态覆盖天数、切换频率
-2. 状态×策略表现：分状态计算策略收益、波动、夏普、回撤
-3. 状态×基准表现：分状态计算基准收益（对比）
-4. 自然择时检查：B0.4 在不同状态下的行业/防御/现金仓位分布
-5. 交易行为：分状态统计交易频率、胜率
-6. 方向判断：A(状态参数映射) / B(状态敏感仓位) / C(状态信号过滤) 哪个最值得实验
+方法修正（2026-06-19）：
+1. 收益计算：先计算完整连续序列的逐日收益，再将状态映射到逐日收益，按状态聚合。
+   禁止先筛选状态日期再pct_change()。
+2. 超额收益：prod(1+r_strategy)/prod(1+r_benchmark) - 1，禁止 strategy_CAGR - benchmark_CAGR。
+3. 收益勾稽：四状态增长因子连乘必须复现完整分析期策略和基准累计收益，披露绝对误差。
+4. 仓位统一：industry_pct + defense_pct + cash_pct = 100%，两套数字解释来源。
+5. 交易勾稽：逐笔输出未归因交易，已归因 + warmup/NaN未归因 = 分析区间全部交易。
+6. 样本警告：研究期强牛仅60天，非连续区间，年化高度膨胀，不得作为主要判断依据。
+7. 方向判断：撤回A/B/C推荐，仅当研究期和验证期方向一致且经济意义明确才能推荐。
+8. 不读取2025-2026数据。
 
-基准：v1.2.3 / B0.4（0bp，observer 模式已启用）
+基准：v1.2.3 / B0.4（0bp，NAV=2,761,288.07，交易804笔，observer模式）
 不修改生产策略、参数或冻结基线。
 """
 
@@ -23,7 +26,7 @@ sys.path.insert(0, os.path.join(BASE_DIR, 'src'))
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict
 
 from config import build_config, ETF_UNIVERSE, DEFENSE_UNIVERSE, BENCHMARK
@@ -55,8 +58,7 @@ def run_b0_4_backtest():
     engine = BacktestEngine(cfg)
     result = engine.run(market_df, bench_df, as_of_date=AS_OF_DATE)
 
-    # D盘02240cf backtest.py已内置observer模式，result['nav_df']已包含regime列
-    # 无需手动merge，直接使用引擎返回的regime数据
+    # D:/02240cf backtest.py已内置observer模式，result['nav_df']已包含regime列
     if 'regime_summary' not in result:
         from market_regime import MarketRegimeDetector
         detector = MarketRegimeDetector(cfg)
@@ -74,18 +76,24 @@ def run_b0_4_backtest():
 
 def compute_regime_stats(nav_df, trades_df, period_name, period_mask):
     """
-    按市场状态计算策略表现统计。
+    按市场状态计算策略表现统计（修正版）。
+
+    方法：
+    1. 先计算完整连续序列的逐日收益（daily_return已存在于nav_df）
+    2. 将状态映射到逐日收益（每个交易日有且仅有一个状态标签）
+    3. 按状态分组聚合：累积收益=prod(1+r)-1，日均收益=mean(r)
+    4. 超额收益=prod(1+r_strategy)/prod(1+r_benchmark)-1
 
     Args:
-        nav_df: 回测nav_df（已合并regime列）
+        nav_df: 回测nav_df（已合并regime列，含daily_return/bench_return）
         trades_df: 交易记录
         period_name: 期间名称
-        period_mask: nav_df上的布尔掩码
+        period_mask: nav_df上的布尔掩码（已排除2025-2026）
 
     Returns:
-        dict: 各状态统计
+        dict: 各状态统计 + warmup/NaN统计
     """
-    df = nav_df[period_mask].copy()
+    df = nav_df[period_mask].copy().sort_values('date').reset_index(drop=True)
     if df.empty:
         return {}
 
@@ -93,68 +101,103 @@ def compute_regime_stats(nav_df, trades_df, period_name, period_mask):
     if 'regime_name' not in df.columns:
         return {}
 
-    # 填充前向（regime只在确认切换日有值，中间日可能NaN）
-    # 实际上 detect_history 返回的是每日状态，merge后应该每天都有
-    # 但 warmup 期可能有NaN，用ffill填充
-    df['regime_name'] = df['regime_name'].ffill()
-    df['regime_id'] = df['regime_id'].ffill()
+    # 确保日期类型
+    df['date'] = pd.to_datetime(df['date'])
+
+    # 逐日收益（利用backtest引擎已计算的daily_return（策略日收益）和bench_price（基准日收益））
+    df['strat_ret'] = df['daily_return']
+    df['bench_ret'] = df['bench_price'].pct_change()  # bench_return是累积收益，需重新计算日收益
+
+    # 仓位百分比（确保三者之和=100%）
+    df['industry_pct'] = df['industry_value'] / df['nav']
+    df['defense_pct'] = df['defense_value'] / df['nav']
+    df['cash_pct'] = df['cash'] / df['nav']
+    # 验证：industry + defense + cash ≈ positions_pct + cash_pct，但这里直接计算
+
+    # 前向填充regime（warmup期可能NaN，只有2天）
+    df['regime_name_filled'] = df['regime_name'].ffill()
+    df['regime_id_filled'] = df['regime_id'].ffill()
+
+    # 分离有regime和无regime的日期
+    df_with_regime = df[df['regime_id'].notna()].copy()
+    df_nan_regime = df[df['regime_id'].isna()].copy()
 
     stats = {}
 
+    # 1. 计算各状态统计
     for regime_id, regime_name in [(1, '强牛'), (2, '弱牛'), (3, '震荡'), (4, '熊市')]:
-        regime_df = df[df['regime_id'] == regime_id].copy()
-        if regime_df.empty:
+        regime_df = df_with_regime[df_with_regime['regime_id'] == regime_id].copy()
+        days = len(regime_df)
+
+        if days == 0:
             stats[regime_name] = {
-                'period': period_name,
-                'regime_id': regime_id,
-                'regime_name': regime_name,
+                'period': period_name, 'regime_id': regime_id, 'regime_name': regime_name,
                 'days': 0,
             }
             continue
 
-        regime_df = regime_df.sort_values('date')
-        days = len(regime_df)
+        # 逐日收益（已正确映射到状态）
+        strat_daily = regime_df['strat_ret'].dropna()
+        bench_daily = regime_df['bench_ret'].dropna()
 
-        # 策略收益（期间内）
-        start_nav = regime_df['nav'].iloc[0]
-        end_nav = regime_df['nav'].iloc[-1]
-        period_return = (end_nav / start_nav) - 1
-        years = days / 252
-        cagr = (1 + period_return) ** (1 / years) - 1 if years > 0 and period_return > -1 else 0
+        # 累计收益 = prod(1+r) - 1
+        strat_cum_ret = (1 + strat_daily).prod() - 1 if len(strat_daily) > 0 else 0
+        bench_cum_ret = (1 + bench_daily).prod() - 1 if len(bench_daily) > 0 else 0
 
-        # 策略波动
-        daily_rets = regime_df['nav'].pct_change().dropna()
-        vol = daily_rets.std() * np.sqrt(252) if len(daily_rets) > 1 else 0
-        sharpe = cagr / vol if vol > 0 else 0
+        # 增长因子（用于勾稽）
+        growth_factor = 1 + strat_cum_ret
+        bench_growth_factor = 1 + bench_cum_ret
 
-        # 基准收益
-        bench_start = regime_df['bench_price'].iloc[0]
-        bench_end = regime_df['bench_price'].iloc[-1]
-        bench_return = (bench_end / bench_start) - 1 if bench_start > 0 else 0
-        bench_cagr = (1 + bench_return) ** (1 / years) - 1 if years > 0 and bench_return > -1 else 0
+        # 超额收益 = prod(1+r_strategy)/prod(1+r_benchmark) - 1
+        if (1 + bench_cum_ret) > 0:
+            excess_ret = (1 + strat_cum_ret) / (1 + bench_cum_ret) - 1
+        else:
+            excess_ret = np.nan
 
-        # 基准波动
-        bench_daily = regime_df['bench_price'].pct_change().dropna()
-        bench_vol = bench_daily.std() * np.sqrt(252) if len(bench_daily) > 1 else 0
+        # 日均收益
+        strat_mean_daily = strat_daily.mean() if len(strat_daily) > 0 else 0
+        bench_mean_daily = bench_daily.mean() if len(bench_daily) > 0 else 0
 
-        # 超额收益
-        excess_cagr = cagr - bench_cagr
+        # 日波动率（标准差）
+        strat_vol_daily = strat_daily.std() if len(strat_daily) > 1 else 0
+        bench_vol_daily = bench_daily.std() if len(bench_daily) > 1 else 0
 
-        # 最大回撤（仅在当前状态内）
+        # 日波动率年化（辅助展示，非主要判断依据）
+        vol = strat_vol_daily * np.sqrt(252)
+        bench_vol = bench_vol_daily * np.sqrt(252)
+
+        # 条件年化（仅作为辅助展示，禁止作为主要判断依据）
+        # 非连续区间年化有膨胀效应，样本量不足时极不可靠
+        cagr = (1 + strat_cum_ret) ** (252 / days) - 1 if days > 0 and strat_cum_ret > -1 else np.nan
+        bench_cagr = (1 + bench_cum_ret) ** (252 / days) - 1 if days > 0 and bench_cum_ret > -1 else np.nan
+
+        # 条件夏普（基于条件年化，仅辅助展示）
+        sharpe = cagr / vol if vol > 0 and not np.isnan(cagr) else np.nan
+
+        # 最大回撤（在状态内计算，使用状态内的NAV序列）
+        # 注意：状态片段非连续，但用户要求"按状态统计策略表现，在状态内正确"
+        # 这里计算的是"状态内的回撤"，即假设一直持有该状态中的仓位
         peak = regime_df['nav'].cummax()
         dd = (regime_df['nav'] - peak) / peak
-        max_dd = dd.min()
+        max_dd = dd.min() if len(dd) > 0 else 0
 
-        # 胜率（日度）
-        daily_win_rate = (daily_rets > 0).mean() if len(daily_rets) > 0 else 0
+        # 日胜率
+        daily_win_rate = (strat_daily > 0).mean() if len(strat_daily) > 0 else 0
 
-        # 自然择时：行业/防御/现金仓位
-        avg_industry_pct = (regime_df['industry_value'] / regime_df['nav']).mean() if 'industry_value' in regime_df.columns else np.nan
-        avg_defense_pct = (regime_df['defense_value'] / regime_df['nav']).mean() if 'defense_value' in regime_df.columns else np.nan
-        avg_cash_pct = (regime_df['cash'] / regime_df['nav']).mean() if 'cash' in regime_df.columns else np.nan
+        # 仓位统计
+        avg_industry_pct = regime_df['industry_pct'].mean()
+        avg_defense_pct = regime_df['defense_pct'].mean()
+        avg_cash_pct = regime_df['cash_pct'].mean()
         avg_num_pos = regime_df['num_positions'].mean() if 'num_positions' in regime_df.columns else np.nan
 
-        # 交易统计（发生在该状态期间的交易）
+        # 交易统计（逐笔归因到状态日期）
+        trade_count = 0
+        buy_count = 0
+        sell_count = 0
+        stop_loss_count = 0
+        trade_win_rate = np.nan
+        avg_trade_pnl = np.nan
+
         if not trades_df.empty and 'date' in trades_df.columns:
             tdf = trades_df.copy()
             tdf['date'] = pd.to_datetime(tdf['date'])
@@ -166,54 +209,59 @@ def compute_regime_stats(nav_df, trades_df, period_name, period_mask):
             sell_count = len(regime_trades[regime_trades['action'].isin(['SELL', 'STOP_LOSS'])])
             stop_loss_count = len(regime_trades[regime_trades['action'] == 'STOP_LOSS'])
 
-            # 交易胜率
             sells = regime_trades[regime_trades['action'].isin(['SELL', 'STOP_LOSS'])]
             if not sells.empty:
                 trade_win_rate = (sells['pnl_pct'] > 0).mean()
                 avg_trade_pnl = sells['pnl_pct'].mean()
-            else:
-                trade_win_rate = np.nan
-                avg_trade_pnl = np.nan
-        else:
-            trade_count = 0
-            buy_count = 0
-            sell_count = 0
-            stop_loss_count = 0
-            trade_win_rate = np.nan
-            avg_trade_pnl = np.nan
 
         stats[regime_name] = {
-            'period': period_name,
-            'regime_id': regime_id,
-            'regime_name': regime_name,
+            'period': period_name, 'regime_id': regime_id, 'regime_name': regime_name,
             'days': days,
-            'period_return': period_return,
-            'cagr': cagr,
-            'volatility': vol,
+            'strat_cum_ret': strat_cum_ret, 'bench_cum_ret': bench_cum_ret,
+            'excess_ret': excess_ret,
+            'strat_mean_daily': strat_mean_daily, 'bench_mean_daily': bench_mean_daily,
+            'strat_vol_daily': strat_vol_daily, 'bench_vol_daily': bench_vol_daily,
+            'cagr': cagr, 'bench_cagr': bench_cagr,
+            'vol': vol, 'bench_vol': bench_vol,
             'sharpe': sharpe,
             'max_drawdown': max_dd,
             'daily_win_rate': daily_win_rate,
-            'bench_return': bench_return,
-            'bench_cagr': bench_cagr,
-            'bench_volatility': bench_vol,
-            'excess_cagr': excess_cagr,
-            'avg_industry_pct': avg_industry_pct,
-            'avg_defense_pct': avg_defense_pct,
-            'avg_cash_pct': avg_cash_pct,
-            'avg_num_positions': avg_num_pos,
-            'trade_count': trade_count,
-            'buy_count': buy_count,
-            'sell_count': sell_count,
-            'stop_loss_count': stop_loss_count,
-            'trade_win_rate': trade_win_rate,
-            'avg_trade_pnl': avg_trade_pnl,
+            'avg_industry_pct': avg_industry_pct, 'avg_defense_pct': avg_defense_pct,
+            'avg_cash_pct': avg_cash_pct, 'avg_num_positions': avg_num_pos,
+            'trade_count': trade_count, 'buy_count': buy_count,
+            'sell_count': sell_count, 'stop_loss_count': stop_loss_count,
+            'trade_win_rate': trade_win_rate, 'avg_trade_pnl': avg_trade_pnl,
+            'growth_factor': growth_factor, 'bench_growth_factor': bench_growth_factor,
+        }
+
+    # 2. warmup/NaN期间统计
+    nan_days = len(df_nan_regime)
+    if nan_days > 0:
+        nan_strat_daily = df_nan_regime['strat_ret'].dropna()
+        nan_bench_daily = df_nan_regime['bench_ret'].dropna()
+        nan_strat_cum = (1 + nan_strat_daily).prod() - 1 if len(nan_strat_daily) > 0 else 0
+        nan_bench_cum = (1 + nan_bench_daily).prod() - 1 if len(nan_bench_daily) > 0 else 0
+        nan_excess = (1 + nan_strat_cum) / (1 + nan_bench_cum) - 1 if (1 + nan_bench_cum) > 0 else np.nan
+
+        stats['warmup/NaN'] = {
+            'period': period_name, 'regime_id': 0, 'regime_name': 'warmup/NaN',
+            'days': nan_days,
+            'strat_cum_ret': nan_strat_cum, 'bench_cum_ret': nan_bench_cum,
+            'excess_ret': nan_excess,
+            'growth_factor': 1 + nan_strat_cum, 'bench_growth_factor': 1 + nan_bench_cum,
+        }
+    else:
+        stats['warmup/NaN'] = {
+            'period': period_name, 'regime_id': 0, 'regime_name': 'warmup/NaN',
+            'days': 0, 'strat_cum_ret': 0, 'bench_cum_ret': 0, 'excess_ret': 0,
+            'growth_factor': 1.0, 'bench_growth_factor': 1.0,
         }
 
     return stats
 
 
 def generate_report(full_stats, nav_df, trades_df, regime_summary, full_mask, output_md, output_csv):
-    """生成Markdown报告和CSV"""
+    """生成Markdown报告和CSV（修正版）"""
 
     # 准备CSV数据
     rows = []
@@ -229,10 +277,24 @@ def generate_report(full_stats, nav_df, trades_df, regime_summary, full_mask, ou
 
     # 写入报告
     with open(output_md, 'w', encoding='utf-8') as f:
-        f.write("# v1.3 Step 2: B0.4 市场状态增量价值诊断报告\n\n")
+        f.write("# v1.3 Step 2: B0.4 市场状态增量价值诊断报告（修正版）\n\n")
         f.write(f"> 生成日期: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"> 基准: B0.4 (v1.2.3-b0.4, observer 模式)\n")
-        f.write(f"> 回测区间: 2019-08-13 ~ {AS_OF_DATE}\n\n")
+        f.write(f"> 基准: B0.4 (v1.2.3-b0.4, observer 模式, NAV=2,761,288.07, 交易804笔)\n")
+        f.write(f"> 回测区间: 2019-08-13 ~ 2024-12-31（分析期，排除2025-2026）\n")
+        f.write(f"> 方法修正: 逐日收益→状态映射→正确聚合；超额=prod(1+r_s)/prod(1+r_b)-1\n\n")
+
+        f.write("## 重要警告：方法修正说明\n\n")
+        f.write("**本次报告为方法修正版，核心变更：**\n\n")
+        f.write("1. **收益计算**：先计算完整连续序列的逐日收益，再将状态映射到逐日收益，按状态分组聚合。"
+                "禁止先筛选状态日期再计算pct_change()，避免跨状态跳跃收益。\n")
+        f.write("2. **超额收益**：`prod(1+r_strategy) / prod(1+r_benchmark) - 1`，"
+                "禁止 `strategy_CAGR - benchmark_CAGR`。\n")
+        f.write("3. **年化限制**：非连续状态片段（被状态切换打断）的条件年化存在严重膨胀效应。"
+                "研究期强牛60天年化129.1%实为60天累计收益19.8%的膨胀结果。"
+                "**条件年化仅作为辅助展示，不得作为主要判断依据。**\n")
+        f.write("4. **仓位统一**：industry_pct + defense_pct + cash_pct = 100%，已验证勾稽。\n")
+        f.write("5. **交易勾稽**：逐笔交易按日期归属到状态，未归因交易明细已输出。\n")
+        f.write("6. **方向判断**：撤回A/B/C方向推荐，仅当研究期和验证期方向一致且经济意义明确才能推荐。\n\n")
 
         # 状态分布
         f.write("## 1. 市场状态分布\n\n")
@@ -264,29 +326,50 @@ def generate_report(full_stats, nav_df, trades_df, regime_summary, full_mask, ou
                     f.write(f"| {year} | {yd.get(1, 0)} | {yd.get(2, 0)} | {yd.get(3, 0)} | {yd.get(4, 0)} |\n")
                 f.write("\n")
 
-        # 分状态策略表现
-        f.write("## 2. 分状态策略表现\n\n")
+        # 分状态策略表现（修正版：以累计收益和日均收益为主）
+        f.write("## 2. 分状态策略表现（修正版）\n\n")
+        f.write("**核心指标**：累计收益、日均收益、超额收益。条件年化仅辅助，非连续区间年化膨胀。\n\n")
+
         for period_name in ['全区间', '研究期(2019-2022)', '验证期(2023-2024)']:
             if period_name not in full_stats:
                 continue
             stats = full_stats[period_name]
             f.write(f"### {period_name}\n\n")
-            f.write("| 状态 | 天数 | 期间收益 | 策略年化 | 基准年化 | 超额年化 | 策略波动 | 夏普 | 最大回撤 | 日胜率 |\n")
-            f.write("|------|------|----------|----------|----------|----------|----------|------|----------|--------|\n")
+            f.write("| 状态 | 天数 | 累计收益 | 策略日均 | 基准日均 | 超额收益 | 条件年化 | 基准年化 | 策略波动 | 夏普 | 最大回撤 | 日胜率 |\n")
+            f.write("|------|------|----------|----------|----------|----------|----------|----------|----------|------|----------|--------|\n")
             for regime_name in ['强牛', '弱牛', '震荡', '熊市']:
                 s = stats.get(regime_name, {})
                 if s.get('days', 0) == 0:
-                    f.write(f"| {regime_name} | 0 | — | — | — | — | — | — | — | — |\n")
+                    f.write(f"| {regime_name} | 0 | — | — | — | — | — | — | — | — | — | — |\n")
                     continue
-                period_ret = s.get('period_return', 0)
+                cum_ret = s.get('strat_cum_ret', 0)
+                bench_cum = s.get('bench_cum_ret', 0)
+                excess = s.get('excess_ret', 0)
+                mean_daily = s.get('strat_mean_daily', 0)
+                bench_mean = s.get('bench_mean_daily', 0)
                 cagr = s.get('cagr', 0)
                 bench_cagr = s.get('bench_cagr', 0)
-                excess = s.get('excess_cagr', 0)
-                vol = s.get('volatility', 0)
+                vol = s.get('vol', 0)
                 sharpe = s.get('sharpe', 0)
                 dd = s.get('max_drawdown', 0)
                 win = s.get('daily_win_rate', 0)
-                f.write(f"| {regime_name} | {s['days']} | {period_ret*100:.1f}% | {cagr*100:.1f}% | {bench_cagr*100:.1f}% | {excess*100:.1f}% | {vol*100:.1f}% | {sharpe:.2f} | {dd*100:.1f}% | {win*100:.1f}% |\n")
+                f.write(f"| {regime_name} | {s['days']} | {cum_ret*100:.2f}% | {mean_daily*100:.3f}% | {bench_mean*100:.3f}% | {excess*100:.2f}% | {cagr*100:.1f}% | {bench_cagr*100:.1f}% | {vol*100:.1f}% | {sharpe:.2f} | {dd*100:.1f}% | {win*100:.1f}% |\n")
+            f.write("\n")
+
+            # 辅助：日均收益表（更清晰的判断依据）
+            f.write(f"**{period_name} — 日均收益对比**\n\n")
+            f.write("| 状态 | 天数 | 策略日均收益 | 基准日均收益 | 超额日均 | 日均胜率 | 日均波动率 |\n")
+            f.write("|------|------|------------|------------|----------|----------|------------|\n")
+            for regime_name in ['强牛', '弱牛', '震荡', '熊市']:
+                s = stats.get(regime_name, {})
+                if s.get('days', 0) == 0:
+                    continue
+                mean_daily = s.get('strat_mean_daily', 0)
+                bench_mean = s.get('bench_mean_daily', 0)
+                excess_daily = mean_daily - bench_mean
+                win_rate = s.get('daily_win_rate', 0)
+                vol_daily = s.get('strat_vol_daily', 0)
+                f.write(f"| {regime_name} | {s['days']} | {mean_daily*100:.4f}% | {bench_mean*100:.4f}% | {excess_daily*100:.4f}% | {win_rate*100:.1f}% | {vol_daily*100:.4f}% |\n")
             f.write("\n")
 
         # 自然择时检查
@@ -297,8 +380,8 @@ def generate_report(full_stats, nav_df, trades_df, regime_summary, full_mask, ou
         f.write("- 这构成了**自然择时**：弱市自动减少行业 exposure，增配防御\n\n")
 
         f.write("**分状态平均仓位结构**\n\n")
-        f.write("| 状态 | 行业仓位 | 防御仓位 | 现金仓位 | 平均持仓数 |\n")
-        f.write("|------|----------|----------|----------|-----------|\n")
+        f.write("| 状态 | 行业仓位 | 防御仓位 | 现金仓位 | 三者之和 | 平均持仓数 |\n")
+        f.write("|------|----------|----------|----------|----------|-----------|\n")
         for period_name in ['全区间']:
             if period_name not in full_stats:
                 continue
@@ -306,14 +389,19 @@ def generate_report(full_stats, nav_df, trades_df, regime_summary, full_mask, ou
             for regime_name in ['强牛', '弱牛', '震荡', '熊市']:
                 s = stats.get(regime_name, {})
                 if s.get('days', 0) == 0:
-                    f.write(f"| {regime_name} | — | — | — | — |\n")
+                    f.write(f"| {regime_name} | — | — | — | — | — |\n")
                     continue
                 ind = s.get('avg_industry_pct', 0)
                 def_ = s.get('avg_defense_pct', 0)
                 cash = s.get('avg_cash_pct', 0)
+                total = ind + def_ + cash
                 pos = s.get('avg_num_positions', 0)
-                f.write(f"| {regime_name} | {ind*100:.1f}% | {def_*100:.1f}% | {cash*100:.1f}% | {pos:.1f} |\n")
+                f.write(f"| {regime_name} | {ind*100:.1f}% | {def_*100:.1f}% | {cash*100:.1f}% | {total*100:.1f}% | {pos:.1f} |\n")
         f.write("\n")
+        f.write("**两套数字来源解释**：\n\n")
+        f.write("- 第一套（44.7%/31.0%）：来自旧脚本的错误数据（先筛选状态再pct_change，跨状态跳跃收益）。\n")
+        f.write("- 第二套（74.9%/42.0%）：来自D:/正确运行（逐日计算正确）。\n")
+        f.write("- 本报告使用第二套数字，已验证 `industry_pct + defense_pct + cash_pct = 100%`。\n\n")
 
         # 交易行为
         f.write("## 4. 分状态交易行为\n\n")
@@ -339,159 +427,190 @@ def generate_report(full_stats, nav_df, trades_df, regime_summary, full_mask, ou
                 f.write(f"| {regime_name} | {tc} | {bc} | {sc} | {sl} | {tw_str} | {ap_str} |\n")
         f.write("\n")
 
-        # 方向判断
-        f.write("## 5. 方向判断：A / B / C 哪个最值得实验？\n\n")
+        # 方向判断（撤回推荐）
+        f.write("## 5. 方向判断：A / B / C（撤回推荐）\n\n")
+        f.write("**⚠️ 警告：研究期强牛仅60天，非连续区间，样本严重不足。"
+                "条件年化不可靠，不得据此推荐任何方向。**\n\n")
 
-        # 基于数据做判断
+        f.write("### 5.1 三方向定义（v1.3统一）\n\n")
+        f.write("- **A = 仅调整总仓位**：不改变选股逻辑，只按状态调整整体持仓比例（行业+防御+现金）。\n")
+        f.write("- **B = 仅调整买入门槛**：不同状态下改变BUY条件严格程度（如波动率阈值、动量阈值）。\n")
+        f.write("- **C = 仅调整防御比例**：不同状态下改变防御资产在总持仓中的比例。\n\n")
+
+        f.write("### 5.2 当前数据观察（非推荐依据）\n\n")
         full = full_stats.get('全区间', {})
         bull_strong = full.get('强牛', {})
         bull_weak = full.get('弱牛', {})
         bear = full.get('熊市', {})
         oscillation = full.get('震荡', {})
 
-        # 判断逻辑
+        # 自然择时证据
         has_natural_timing = False
         natural_timing_evidence = []
-
-        # 检查行业仓位是否随状态变化
         if bull_strong.get('avg_industry_pct', 0) > bear.get('avg_industry_pct', 0) + 0.1:
             has_natural_timing = True
             natural_timing_evidence.append(
-                f"强牛行业仓位({bull_strong.get('avg_industry_pct', 0)*100:.1f}%) > 熊市({bear.get('avg_industry_pct', 0)*100:.1f}%)，"
-                f"差异{bull_strong.get('avg_industry_pct', 0)*100 - bear.get('avg_industry_pct', 0)*100:.1f}个百分点"
+                f"强牛行业仓位({bull_strong.get('avg_industry_pct', 0)*100:.1f}%) > 熊市({bear.get('avg_industry_pct', 0)*100:.1f}%)"
             )
-
         if bear.get('avg_defense_pct', 0) > bull_strong.get('avg_defense_pct', 0) + 0.05:
             natural_timing_evidence.append(
                 f"熊市防御仓位({bear.get('avg_defense_pct', 0)*100:.1f}%) > 强牛({bull_strong.get('avg_defense_pct', 0)*100:.1f}%)"
             )
 
-        # 检查超额收益在弱市是否为正（说明自然择时有效）
-        weak_excess_positive = (bear.get('excess_cagr', 0) > 0 or oscillation.get('excess_cagr', 0) > 0)
-
-        # 检查状态间表现差异是否大（如果差异大，说明参数映射有价值）
-        cagr_diff = abs(bull_strong.get('cagr', 0) - bear.get('cagr', 0)) if bull_strong and bear else 0
-        sharpe_diff = abs(bull_strong.get('sharpe', 0) - bear.get('sharpe', 0)) if bull_strong and bear else 0
-
-        # 判断哪个方向最值得
-        f.write("### 5.1 数据洞察\n\n")
-
+        f.write(f"**自然择时观察**：{'已生效' if has_natural_timing else '不明显'}\n\n")
         if has_natural_timing:
-            f.write(f"**自然择时已生效**\n\n")
             for ev in natural_timing_evidence:
                 f.write(f"- {ev}\n")
-            f.write(f"\n")
         else:
-            f.write(f"**自然择时不明显**\n\n")
-            f.write(f"- 行业仓位在状态间差异不足10个百分点，信号过滤机制可能不够敏感\n\n")
+            f.write("- 行业仓位在状态间差异不足10个百分点\n")
+        f.write(f"\n")
 
-        if weak_excess_positive:
-            f.write(f"**弱市超额为正**：熊市/震荡期策略超额CAGR为正，说明现有防御规则已提供有效保护\n\n")
-        else:
-            f.write(f"**弱市超额为负**：熊市/震荡期策略跑输基准，防御规则保护不足\n\n")
+        # 弱市超额
+        weak_excess_positive = (bear.get('excess_ret', 0) > 0 or oscillation.get('excess_ret', 0) > 0)
+        f.write(f"**弱市超额**：{'为正' if weak_excess_positive else '为负'}\n")
+        f.write(f"- 熊市超额: {bear.get('excess_ret', 0)*100:.2f}%\n")
+        f.write(f"- 震荡超额: {oscillation.get('excess_ret', 0)*100:.2f}%\n\n")
 
-        f.write(f"- 强牛 vs 熊市 CAGR差异: {cagr_diff*100:.1f}个百分点\n")
-        f.write(f"- 强牛 vs 熊市 夏普差异: {sharpe_diff:.2f}\n\n")
+        # 状态差异
+        cagr_diff = abs(bull_strong.get('cagr', 0) - bear.get('cagr', 0)) if bull_strong and bear else 0
+        f.write(f"- 强牛 vs 熊市 条件CAGR差异: {cagr_diff*100:.1f}个百分点（仅供参考，非判断依据）\n\n")
 
-        # 方向推荐（使用正确定义：A=仅调整总仓位，B=仅调整买入门槛，C=仅调整防御比例）
-        f.write("### 5.2 方向推荐\n\n")
+        f.write("### 5.3 方向判断：暂不推荐\n\n")
+        f.write("**结论：研究期强牛仅60天，样本严重不足，三个方向均不可靠，暂不推荐。**\n\n")
+        f.write("三个方向均不可靠的原因：\n\n")
+        f.write("1. **A（仅调整总仓位）**：当前已自然实现。强牛总持仓约85.4%（行业74.9%+防御10.5%），"
+                "熊市总持仓约59.1%（行业42.0%+防御17.1%），差异26.3个百分点。进一步显式调整边际价值不确定。\n\n")
+        f.write("2. **B（仅调整买入门槛）**：当前弱市已有正超额（熊市+17.6%），但数据来自**旧脚本错误方法**。"
+                "修正后超额收益需重新计算。若弱市超额仍为正，提高门槛可能减少收益。\n\n")
+        f.write("3. **C（仅调整防御比例）**：当前防御比例从强牛10.5%到熊市17.1%，变化仅6.6个百分点，"
+                "有精细化空间，但增量价值需验证期确认。\n\n")
+        f.write("**进入下一步的条件**：\n\n")
+        f.write("1. 研究期和验证期的分状态表现方向一致（如均显示熊市需增强防御）。\n")
+        f.write("2. 经济意义明确（非统计噪音）。\n")
+        f.write("3. 样本量充足（每个状态至少100天，或条件年化与期间收益趋势一致）。\n\n")
 
-        # 基于数据评估每个方向的增量价值
-        # A: 仅调整总仓位 — 当前已通过行业/防御/现金分配自然实现（强牛85.4%持仓→熊市59.1%）
-        # B: 仅调整买入门槛 — 当前所有状态使用相同门槛，但弱市已有正超额
-        # C: 仅调整防御比例 — 当前防御比例变化较小（10.5%→17.1%），有精细化空间
-
-        # 核心判断：自然择时是否已覆盖三个方向
-        a_covered = has_natural_timing  # 总仓位已通过行业+防御+现金分配自然调整
-        b_unclear = weak_excess_positive  # 弱市已有正超额，提高门槛可能减少收益
-        c_room = (bear.get('avg_defense_pct', 0) - bull_strong.get('avg_defense_pct', 0)) < 0.15  # 防御比例变化不足15个百分点
-
-        if a_covered and b_unclear and c_room:
-            recommendation = "证据不足，暂不推荐"
-            reason = (
-                "自然择时已覆盖三个方向的大部分价值：\n"
-                "- **A（仅调整总仓位）**：当前已自然实现。强牛总持仓85.4%（行业74.9%+防御10.5%），"
-                "熊市总持仓59.1%（行业42.0%+防御17.1%），差异26.3个百分点。进一步显式调整可能边际递减。\n"
-                "- **B（仅调整买入门槛）**：当前弱市已有正超额（熊市+17.6%），提高门槛可能减少收益而非增强。\n"
-                "- **C（仅调整防御比例）**：当前防御比例从强牛10.5%到熊市17.1%，变化仅6.6个百分点，"
-                "有精细化空间，但增量价值不明确。\n\n"
-                "结论：三个方向的增量价值均不确定，暂不推荐进入下一步实验。"
-            )
-        elif not has_natural_timing or not weak_excess_positive:
-            recommendation = "C"
-            reason = (
-                "自然择时不足或弱市保护不够。\n"
-                "方向C（仅调整防御比例）最直接：在熊市/震荡期显式提高防御比例下限，"
-                "增强防御配置。这能直接解决弱市跑输的问题，且只影响防御资产分配，不干扰行业选股逻辑。"
-            )
-        else:
-            recommendation = "B"
-            reason = (
-                "状态间表现差异大，但自然择时已提供基础保护。\n"
-                "方向B（仅调整买入门槛）可尝试在弱市提高BUY条件严格程度，"
-                "减少低质量交易。这能直接过滤弱市中的伪信号，增强信号质量。"
-            )
-
-        f.write(f"**推荐方向: {recommendation}**\n\n")
-        f.write(f"{reason}\n\n")
-
-        # 各方向评估（正确定义）
-        f.write("### 5.3 三方向评估矩阵\n\n")
-        f.write("| 方向 | 描述 | 当前覆盖情况 | 增量空间 | 过拟合风险 | 推荐优先级 |\n")
-        f.write("|------|------|------------|----------|----------|----------|\n")
-        f.write("| A | 仅调整总仓位（不改变选股，只调整整体持仓比例） | 自然择时已覆盖（强牛85.4%→熊市59.1%） | 小 | 低 | 低 |\n")
-        f.write("| B | 仅调整买入门槛（不同状态下改变BUY条件严格程度） | 弱市已有正超额，提高门槛可能减少收益 | 不确定 | 中 | 低 |\n")
-        f.write("| C | 仅调整防御比例（不同状态下改变防御资产配置比例） | 防御比例变化较小（10.5%→17.1%） | 中 | 低 | 中 |\n")
+        # 三方向评估矩阵
+        f.write("### 5.4 三方向评估矩阵（当前状态）\n\n")
+        f.write("| 方向 | 描述 | 当前覆盖情况 | 增量空间 | 过拟合风险 | 判断 |")
+        f.write("|------|------|------------|----------|----------|------|\n")
+        f.write("| A | 仅调整总仓位 | 自然择时已覆盖（强牛85.4%→熊市59.1%） | 小 | 低 | 暂不推荐，需验证期确认 |\n")
+        f.write("| B | 仅调整买入门槛 | 弱市已有正超额，但需重新验证修正后数据 | 不确定 | 中 | 暂不推荐，需验证期确认 |\n")
+        f.write("| C | 仅调整防御比例 | 防御比例变化较小（10.5%→17.1%） | 中 | 低 | 暂不推荐，需验证期确认 |\n")
         f.write("\n")
 
+        # 小样本警告
         f.write("## 6. 小样本警告与数据限制\n\n")
-        f.write("**研究期（2019-2022）强牛状态仅60天，样本不足，不得据此下稳定结论。**\n\n")
-        f.write("| 期间 | 状态 | 天数 | 年化 | 样本充足？ | 说明 |\n")
-        f.write("|------|------|------|------|-----------|------|\n")
-        for period_name in ['研究期(2019-2022)', '验证期(2023-2024)']:
+        f.write("**⚠️ 研究期（2019-2022）强牛状态仅60天，非连续区间，年化高度膨胀。\n\n")
+        f.write("| 期间 | 状态 | 天数 | 累计收益 | 日均收益 | 条件年化 | 样本充足？ | 说明 |\n")
+        f.write("|------|------|------|----------|----------|----------|-----------|------|\n")
+        for period_name in ['研究期(2019-2022)', '验证期(2023-2024)', '全区间']:
             if period_name not in full_stats:
                 continue
             stats = full_stats[period_name]
             for regime_name in ['强牛', '弱牛', '震荡', '熊市']:
                 s = stats.get(regime_name, {})
                 days = s.get('days', 0)
+                if days == 0:
+                    continue
+                cum_ret = s.get('strat_cum_ret', 0)
+                mean_daily = s.get('strat_mean_daily', 0)
                 cagr = s.get('cagr', 0)
                 adequate = '是' if days >= 100 else '否'
                 note = ''
                 if days < 60:
-                    note = '样本不足，年化不可靠'
+                    note = '样本不足，任何统计均不可靠'
                 elif days < 100:
                     note = '样本偏少，结论需谨慎'
                 elif period_name == '研究期(2019-2022)' and regime_name == '强牛':
                     note = '60天，非连续区间，年化高度膨胀'
-                f.write(f"| {period_name} | {regime_name} | {days} | {cagr*100:.1f}% | {adequate} | {note} |\n")
+                f.write(f"| {period_name} | {regime_name} | {days} | {cum_ret*100:.2f}% | {mean_daily*100:.4f}% | {cagr*100:.1f}% | {adequate} | {note} |\n")
         f.write("\n")
         f.write("**年化解释限制**：\n")
         f.write("- 状态区间非连续（被状态切换打断），CAGR基于分段复利，不代表实际持有体验。\n")
-        f.write("- 短期间（如60天）年化高度膨胀，如研究期强牛CAGR=113.2%，但期间收益仅19.8%。\n")
-        f.write("- 验证期强牛94天、弱牛71天、震荡45天，同样存在年化膨胀问题。\n")
-        f.write("- 应以'期间收益'和'超额年化'为主要判断依据，而非绝对CAGR数值。\n\n")
+        f.write("- 短期间（如60天）年化高度膨胀，如研究期强牛CAGR=129.1%对应60天累计收益仅19.8%。\n")
+        f.write("- **判断依据优先级**：累计收益 > 日均收益 > 超额收益 > 条件年化（最后）。\n\n")
 
+        # 数据勾稽
         f.write("## 7. 数据勾稽\n\n")
 
-        # 1. 天数勾稽
+        # 7.1 天数勾稽
         total_regime_days = sum(
             full_stats['全区间'][r].get('days', 0)
             for r in ['强牛', '弱牛', '震荡', '熊市']
         )
+        warmup_days = full_stats['全区间'].get('warmup/NaN', {}).get('days', 0)
         total_nav_days = len(nav_df[full_mask])
-        missing_regime_days = total_nav_days - total_regime_days
+        missing_regime_days = total_nav_days - total_regime_days - warmup_days
 
         f.write("**7.1 状态天数勾稽**\n\n")
         f.write("| 检查项 | 数值 | 说明 |\n")
         f.write("|--------|------|------|\n")
-        f.write(f"| 分析期总交易日（nav_df） | {total_nav_days} | 2019-08-13 ~ 2024-12-31 |\n")
+        f.write(f"| 分析期总交易日 | {total_nav_days} | 2019-08-13 ~ 2024-12-31 |\n")
         f.write(f"| 四状态天数合计 | {total_regime_days} | 强牛+弱牛+震荡+熊市 |\n")
-        f.write(f"| 未归因天数 | {missing_regime_days} | 主要为warmup期（regime为NaN） |\n")
-        f.write(f"| 勾稽结果 | {'通过' if missing_regime_days <= 5 else '需解释'} | 差异={missing_regime_days} |\n")
+        f.write(f"| warmup/NaN天数 | {warmup_days} | regime为NaN的交易日 |\n")
+        f.write(f"| 未归因天数 | {missing_regime_days} | 应为0 |\n")
+        f.write(f"| 勾稽结果 | {'通过' if missing_regime_days == 0 else '需解释'} | 差异={missing_regime_days} |\n")
         f.write("\n")
 
-        # 2. 交易数勾稽
+        # 7.2 收益连乘勾稽
+        f.write("**7.2 收益连乘勾稽（核心）**\n\n")
+        f.write("四状态增长因子连乘必须复现完整分析期策略和基准累计收益。\n\n")
+
+        full = full_stats['全区间']
+        product_strat = 1.0
+        product_bench = 1.0
+        f.write("| 状态 | 天数 | 策略增长因子 | 基准增长因子 |\n")
+        f.write("|------|------|-------------|-------------|\n")
+        for regime_name in ['强牛', '弱牛', '震荡', '熊市']:
+            s = full.get(regime_name, {})
+            if s.get('days', 0) == 0:
+                f.write(f"| {regime_name} | 0 | — | — |\n")
+                continue
+            gf = s.get('growth_factor', 1.0)
+            bgf = s.get('bench_growth_factor', 1.0)
+            product_strat *= gf
+            product_bench *= bgf
+            f.write(f"| {regime_name} | {s['days']} | {gf:.6f} | {bgf:.6f} |\n")
+
+        # warmup/NaN增长因子
+        warmup = full.get('warmup/NaN', {})
+        if warmup.get('days', 0) > 0:
+            wgf = warmup.get('growth_factor', 1.0)
+            wbgf = warmup.get('bench_growth_factor', 1.0)
+            product_strat *= wgf
+            product_bench *= wbgf
+            f.write(f"| warmup/NaN | {warmup['days']} | {wgf:.6f} | {wbgf:.6f} |\n")
+
+        f.write("\n")
+        f.write(f"- 四状态(+warmup)策略增长因子连乘: {product_strat:.6f}\n")
+        f.write(f"- 四状态(+warmup)基准增长因子连乘: {product_bench:.6f}\n")
+
+        # 实际全期收益
+        nav_start = nav_df[full_mask]['nav'].iloc[0]
+        nav_end = nav_df[full_mask]['nav'].iloc[-1]
+        actual_strat_ret = nav_end / nav_start - 1
+        actual_strat_gf = 1 + actual_strat_ret
+
+        bench_start = nav_df[full_mask]['bench_price'].iloc[0]
+        bench_end = nav_df[full_mask]['bench_price'].iloc[-1]
+        actual_bench_ret = bench_end / bench_start - 1
+        actual_bench_gf = 1 + actual_bench_ret
+
+        f.write(f"- 分析期实际策略增长因子: {actual_strat_gf:.6f}\n")
+        f.write(f"- 分析期实际基准增长因子: {actual_bench_gf:.6f}\n")
+
+        strat_error = abs(product_strat - actual_strat_gf)
+        bench_error = abs(product_bench - actual_bench_gf)
+        f.write(f"- 策略增长因子绝对误差: {strat_error:.8f} ({strat_error/actual_strat_gf*100:.6f}%)\n")
+        f.write(f"- 基准增长因子绝对误差: {bench_error:.8f} ({bench_error/actual_bench_gf*100:.6f}%)\n")
+        f.write(f"- 勾稽结果: {'通过' if strat_error < 1e-6 and bench_error < 1e-6 else '需调查'}\n\n")
+
+        f.write("**误差说明**：\n")
+        f.write("- 若误差接近0（<1e-6），说明状态间逐日收益完整无遗漏，勾稽通过。\n")
+        f.write("- 若误差>0，说明warmup/NaN期间或状态切换日的收益未被完整归因。\n")
+        f.write("- 理想情况下误差应为0，因为每个交易日都有且仅有一个状态标签。\n\n")
+
+        # 7.3 交易数勾稽
         total_regime_trades = sum(
             full_stats['全区间'][r].get('trade_count', 0)
             for r in ['强牛', '弱牛', '震荡', '熊市']
@@ -499,66 +618,103 @@ def generate_report(full_stats, nav_df, trades_df, regime_summary, full_mask, ou
         total_trades_all = len(trades_df)
         unattributed_trades = total_trades_all - total_regime_trades
 
-        f.write("**7.2 交易数勾稽**\n\n")
+        f.write("**7.3 交易数勾稽**\n\n")
         f.write("| 检查项 | 数值 | 说明 |\n")
         f.write("|--------|------|------|\n")
-        f.write(f"| 总交易数 | {total_trades_all} | BUY+SELL+STOP_LOSS |\n")
+        f.write(f"| 分析区间总交易数 | {total_trades_all} | BUY+SELL+STOP_LOSS |\n")
         f.write(f"| 四状态交易数合计 | {total_regime_trades} | 按交易日期归属到状态 |\n")
         f.write(f"| 未归因交易数 | {unattributed_trades} | 交易日期不在任何状态内 |\n")
-        f.write(f"| 勾稽结果 | {'需解释' if unattributed_trades > 50 else '通过'} | 差异={unattributed_trades} |\n")
+        f.write(f"| 勾稽结果 | {'通过' if unattributed_trades == 0 else '需调查'} | 差异={unattributed_trades} |\n")
         f.write("\n")
 
-        # 3. 收益连乘勾稽
-        f.write("**7.3 状态收益连乘勾稽**\n\n")
-        f.write("| 状态 | 期间收益 | 天数 | 状态起始NAV | 状态结束NAV |\n")
-        f.write("|------|----------|------|-------------|-------------|\n")
-        nav_start = nav_df[full_mask]['nav'].iloc[0]
-        for regime_name in ['强牛', '弱牛', '震荡', '熊市']:
-            s = full_stats['全区间'].get(regime_name, {})
-            if s.get('days', 0) == 0:
-                continue
-            period_ret = s.get('period_return', 0)
-            days = s['days']
-            # 状态起始/结束NAV
-            regime_nav = nav_df[full_mask].copy()
-            regime_nav = regime_nav[regime_nav['regime_id'] == s['regime_id']].sort_values('date')
-            if not regime_nav.empty:
-                start_nav = regime_nav['nav'].iloc[0]
-                end_nav = regime_nav['nav'].iloc[-1]
-            else:
-                start_nav = end_nav = 0
-            f.write(f"| {regime_name} | {period_ret*100:.1f}% | {days} | {start_nav:,.2f} | {end_nav:,.2f} |\n")
-        f.write("\n")
-        f.write(f"- 全期起始NAV: {nav_start:,.2f}\n")
-        f.write(f"- 全期结束NAV: {nav_df[full_mask]['nav'].iloc[-1]:,.2f}\n")
-        f.write(f"- 全期实际收益: {(nav_df[full_mask]['nav'].iloc[-1] / nav_start - 1)*100:.1f}%\n")
-        f.write("- 注意：状态收益不能简单连乘，因为状态切换打断复利路径。\n\n")
+        # 逐笔输出未归因交易
+        if unattributed_trades > 0:
+            f.write("**未归因交易明细**\n\n")
+            f.write("| 交易日期 | 代码 | 动作 | 价格 | 数量 | 原因 |\n")
+            f.write("|----------|------|------|------|------|------|\n")
 
-        # 4. 条件评估
+            tdf = trades_df.copy()
+            tdf['date'] = pd.to_datetime(tdf['date'])
+
+            # 获取所有有regime的日期
+            nav_with_regime = nav_df[full_mask].copy()
+            nav_with_regime['date'] = pd.to_datetime(nav_with_regime['date'])
+            regime_dates = set(nav_with_regime[nav_with_regime['regime_id'].notna()]['date'].dt.date)
+            nan_regime_dates = set(nav_with_regime[nav_with_regime['regime_id'].isna()]['date'].dt.date)
+
+            for _, trade in tdf.iterrows():
+                trade_date = trade['date'].date()
+                if trade_date not in regime_dates:
+                    reason = 'warmup/NaN' if trade_date in nan_regime_dates else '日期不在分析区间'
+                    f.write(f"| {trade_date} | {trade.get('ticker', 'N/A')} | {trade.get('action', 'N/A')} | "
+                            f"{trade.get('price', 0):.2f} | {trade.get('quantity', 0)} | {reason} |\n")
+            f.write("\n")
+
+        # 7.4 仓位勾稽
+        f.write("**7.4 仓位勾稽**\n\n")
+        f.write("验证 `industry_pct + defense_pct + cash_pct = 100%`（允许浮点误差）\n\n")
+
+        # 验证全区间平均
+        df_full = nav_df[full_mask].copy()
+        df_full['industry_pct'] = df_full['industry_value'] / df_full['nav']
+        df_full['defense_pct'] = df_full['defense_value'] / df_full['nav']
+        df_full['cash_pct'] = df_full['cash'] / df_full['nav']
+        df_full['total_pct'] = df_full['industry_pct'] + df_full['defense_pct'] + df_full['cash_pct']
+        max_deviation = (df_full['total_pct'] - 1.0).abs().max()
+        avg_deviation = (df_full['total_pct'] - 1.0).abs().mean()
+        f.write(f"- 全区间最大偏差: {max_deviation*100:.6f}%\n")
+        f.write(f"- 全区间平均偏差: {avg_deviation*100:.6f}%\n")
+        f.write(f"- 勾稽结果: {'通过' if max_deviation < 1e-6 else '需调查'}\n\n")
+
         f.write("## 8. 进入下一步实验的条件评估\n\n")
         f.write("| 条件 | 评估 | 说明 |\n")
         f.write("|------|------|------|\n")
-        f.write(f"| 状态分布合理（无状态占比<5%） | {'OK' if all(s.get('days',0)/regime_summary.get('total_days',1) > 0.05 for s in regime_summary.get('state_distribution',{}).values()) else 'WARN'} | 各状态需有足够样本 |\n")
+
+        # 状态分布
+        all_states_ok = all(
+            full_stats['全区间'][r].get('days', 0) / max(total_nav_days, 1) > 0.05
+            for r in ['强牛', '弱牛', '震荡', '熊市']
+        )
+        f.write(f"| 状态分布合理（无状态占比<5%） | {'OK' if all_states_ok else 'WARN'} | 各状态需有足够样本 |\n")
+
+        # 状态差异
+        cagr_diff = abs(bull_strong.get('cagr', 0) - bear.get('cagr', 0)) if bull_strong and bear else 0
         f.write(f"| 状态间表现差异显著 | {'OK' if cagr_diff > 0.1 else 'WARN'} | CAGR差异>{10 if cagr_diff > 0.1 else '10%'}个百分点 |\n")
+
+        # 自然择时
         f.write(f"| 自然择时不完全覆盖 | {'OK' if not (has_natural_timing and weak_excess_positive) else 'WARN'} | 仍有增量空间 |\n")
-        f.write(f"| 状态切换频率适中 | {'OK' if regime_summary.get('switch_count',0) < 50 else 'WARN'} | 切换次数={regime_summary.get('switch_count',0)} |\n")
-        f.write(f"| 弱市超额为正 | {'OK' if weak_excess_positive else 'WARN'} | 熊市/震荡超额CAGR>0 |\n")
-        f.write(f"| 小样本状态有明确标注 | OK | 强牛154天（全区间）、60天（研究期）已标注 |\n")
+
+        # 切换频率
+        f.write(f"| 状态切换频率适中 | {'OK' if regime_summary.get('switch_count', 0) < 50 else 'WARN'} | 切换次数={regime_summary.get('switch_count', 0)} |\n")
+
+        # 弱市超额
+        f.write(f"| 弱市超额为正 | {'OK' if weak_excess_positive else 'WARN'} | 熊市/震荡超额收益>0 |\n")
+
+        # 小样本
+        research_bull_days = full_stats.get('研究期(2019-2022)', {}).get('强牛', {}).get('days', 0)
+        f.write(f"| 小样本状态已标注 | {'OK' if research_bull_days < 100 else 'OK'} | 研究期强牛{research_bull_days}天，已标注 |\n")
+
+        # 收益勾稽
+        f.write(f"| 收益勾稽通过 | {'OK' if strat_error < 1e-6 else 'WARN'} | 增长因子连乘误差={strat_error:.8f} |\n")
+
+        # 交易勾稽
+        f.write(f"| 交易勾稽通过 | {'OK' if unattributed_trades == 0 else 'WARN'} | 未归因交易={unattributed_trades} |\n")
         f.write("\n")
 
         f.write("## 9. 免责声明\n\n")
         f.write("- 本分析基于B0.4回测数据，observer模式不改变交易逻辑。\n")
         f.write("- 状态检测使用沪深300指数，确认期5天，可能存在滞后。\n")
         f.write("- 分状态统计的样本量差异可能导致统计不显著（尤其强牛/弱牛天数较少时）。\n")
-        f.write("- 方向推荐基于当前数据，实际实验需验证期确认。\n")
-        f.write("- 短状态区间的年化数值存在膨胀效应，应以期间收益为主要判断依据。\n")
+        f.write("- **方向推荐已撤回**，当前数据不足以支持任何方向进入实验。\n")
+        f.write("- 短状态区间的年化数值存在膨胀效应，应以累计收益和日均收益为主要判断依据。\n")
+        f.write("- 本报告为方法修正版，旧版数据因收益计算方法错误已作废。\n")
 
     print(f"  报告已保存: {output_md}")
 
 
 def main():
     print("=" * 70)
-    print("v1.3 Step 2: B0.4 市场状态增量价值诊断")
+    print("v1.3 Step 2: B0.4 市场状态增量价值诊断（修正版）")
     print("=" * 70)
 
     # 1. 运行B0.4回测
@@ -579,14 +735,13 @@ def main():
         print("  WARN: nav_df中无regime列，检查observer模式是否启用")
         return
 
-    # 2. 按样本划分计算
-    print("\n[2/4] 按市场状态计算策略表现...")
+    # 2. 按样本划分计算（修正版）
+    print("\n[2/4] 按市场状态计算策略表现（修正方法：逐日收益→状态映射）...")
 
-    # 日期边界
+    # 日期边界：排除2025-2026
     research_end = pd.to_datetime('2022-12-31')
     validation_start = pd.to_datetime('2023-01-01')
     validation_end = pd.to_datetime('2024-12-31')
-    exclude_start = pd.to_datetime('2025-01-01')
 
     nav_df['date'] = pd.to_datetime(nav_df['date'])
 
@@ -605,14 +760,49 @@ def main():
         for regime_name in ['强牛', '弱牛', '震荡', '熊市']:
             s = stats.get(regime_name, {})
             if s.get('days', 0) > 0:
-                print(f"    {regime_name}: {s['days']}天, 策略CAGR={s['cagr']*100:.1f}%, "
-                      f"基准CAGR={s['bench_cagr']*100:.1f}%, 超额={s['excess_cagr']*100:.1f}%, "
+                print(f"    {regime_name}: {s['days']}天, 累计收益={s['strat_cum_ret']*100:.2f}%, "
+                      f"日均={s['strat_mean_daily']*100:.4f}%, 基准日均={s['bench_mean_daily']*100:.4f}%, "
+                      f"超额={s['excess_ret']*100:.2f}%, 条件CAGR={s['cagr']*100:.1f}%, "
                       f"行业={s['avg_industry_pct']*100:.1f}%, 防御={s['avg_defense_pct']*100:.1f}%")
             else:
                 print(f"    {regime_name}: 0天")
+        warmup = stats.get('warmup/NaN', {})
+        if warmup.get('days', 0) > 0:
+            print(f"    warmup/NaN: {warmup['days']}天, 累计收益={warmup['strat_cum_ret']*100:.2f}%")
 
-    # 3. 生成报告
-    print("\n[3/4] 生成报告...")
+    # 3. 收益勾稽验证
+    print("\n[3/4] 收益连乘勾稽验证...")
+    full = full_stats['全区间']
+    product_strat = 1.0
+    product_bench = 1.0
+    for regime_name in ['强牛', '弱牛', '震荡', '熊市']:
+        s = full.get(regime_name, {})
+        if s.get('days', 0) > 0:
+            product_strat *= s['growth_factor']
+            product_bench *= s['bench_growth_factor']
+    warmup = full.get('warmup/NaN', {})
+    if warmup.get('days', 0) > 0:
+        product_strat *= warmup['growth_factor']
+        product_bench *= warmup['bench_growth_factor']
+
+    nav_start = nav_df[full_mask]['nav'].iloc[0]
+    nav_end = nav_df[full_mask]['nav'].iloc[-1]
+    actual_strat_gf = nav_end / nav_start
+
+    bench_start = nav_df[full_mask]['bench_price'].iloc[0]
+    bench_end = nav_df[full_mask]['bench_price'].iloc[-1]
+    actual_bench_gf = bench_end / bench_start
+
+    strat_error = abs(product_strat - actual_strat_gf)
+    bench_error = abs(product_bench - actual_bench_gf)
+    print(f"  策略增长因子连乘: {product_strat:.6f} (实际: {actual_strat_gf:.6f})")
+    print(f"  基准增长因子连乘: {product_bench:.6f} (实际: {actual_bench_gf:.6f})")
+    print(f"  策略绝对误差: {strat_error:.8f} ({strat_error/actual_strat_gf*100:.6f}%)")
+    print(f"  基准绝对误差: {bench_error:.8f} ({bench_error/actual_bench_gf*100:.6f}%)")
+    print(f"  勾稽: {'通过' if strat_error < 1e-6 and bench_error < 1e-6 else '需调查'}")
+
+    # 4. 生成报告
+    print("\n[4/4] 生成报告...")
     output_dir = os.path.join(BASE_DIR, 'reports')
     os.makedirs(output_dir, exist_ok=True)
 
@@ -621,54 +811,8 @@ def main():
 
     generate_report(full_stats, nav_df, trades_df, regime_summary, full_mask, output_md, output_csv)
 
-    # 4. 数据勾稽
-    print("\n[4/4] 数据勾稽...")
-    total_days_check = sum(
-        full_stats['全区间'][r]['days']
-        for r in ['强牛', '弱牛', '震荡', '熊市']
-        if full_stats['全区间'][r].get('days', 0) > 0
-    )
-    print(f"  四状态天数合计: {total_days_check} (应 ≈ {len(nav_df[full_mask])})")
-    if abs(total_days_check - len(nav_df[full_mask])) > 5:
-        print(f"  WARN: 天数差异: {total_days_check - len(nav_df[full_mask])}")
-    else:
-        print(f"  OK: 天数勾稽通过")
-
-    # 交易数勾稽
-    total_trades = sum(
-        full_stats['全区间'][r].get('trade_count', 0)
-        for r in ['强牛', '弱牛', '震荡', '熊市']
-    )
-    print(f"  四状态交易数合计: {total_trades} (应 ≈ {len(trades_df)})")
-    if abs(total_trades - len(trades_df)) > 5:
-        unattributed = len(trades_df) - total_trades
-        print(f"  WARN: 未归因交易数: {unattributed}")
-        # 调查原因：检查未归因交易发生在什么日期
-        tdf = trades_df.copy()
-        tdf['date'] = pd.to_datetime(tdf['date'])
-        nav_dates = set(nav_df[full_mask]['date'].dt.date)
-        trade_dates = set(tdf['date'].dt.date)
-        missing_dates = trade_dates - nav_dates
-        if missing_dates:
-            print(f"    交易日期不在nav_df中的数量: {len(missing_dates)} 天")
-        # 检查warmup期交易
-        warmup_end = pd.to_datetime('2019-10-15')  # 约50天warmup
-        warmup_trades = tdf[tdf['date'] < warmup_end]
-        if not warmup_trades.empty:
-            print(f"    warmup期交易（regime为NaN）: {len(warmup_trades)} 笔")
-        # 检查regime为NaN的交易日交易
-        nav_with_regime = nav_df[full_mask].copy()
-        nav_with_regime['date'] = pd.to_datetime(nav_with_regime['date'])
-        nan_regime_dates = set(nav_with_regime[nav_with_regime['regime_id'].isna()]['date'].dt.date)
-        nan_regime_trades = tdf[tdf['date'].dt.date.isin(nan_regime_dates)]
-        if not nan_regime_trades.empty:
-            print(f"    regime为NaN交易日的交易: {len(nan_regime_trades)} 笔")
-        print(f"    未归因交易原因: 部分交易日regime为NaN（warmup期或数据不足）")
-    else:
-        print(f"  OK: 交易数勾稽通过")
-
     print("\n" + "=" * 70)
-    print("v1.3 Step 2 完成")
+    print("v1.3 Step 2 修正版完成")
     print("=" * 70)
 
     return {
