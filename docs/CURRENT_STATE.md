@@ -1,10 +1,10 @@
 # 当前工程现场
 
-**最后更新**：2026-06-23（Step 3 v3: 修复时间分区泄漏）  
+**最后更新**：2026-06-23（Step 4: 80/20组合结构机制拆解）  
 **工作目录**：`D:\etf_rotation_model`  
 **当前分支**：`feature/v1.3-regime-research`  
 **当前版本**：v1.2.3
-**当前研究提交**：`ab0b8c2`（v1.3 Step 3 v3: 修复时间分区泄漏）  
+**当前研究提交**：`待生成`（v1.3 Step 4: 80/20组合结构机制拆解）  
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78  
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）  
 **数据截止**：2026-06-18  
@@ -61,7 +61,18 @@
   - 决策建议：震荡往返比例两期均>15%，是支持 holding stability 实验的主要证据；误杀卖飞不能作为独立证据。
   - 交付物：scripts/v1_3_step3_exit_effectiveness.py（v3）、reports/v1_3_step3_exit_effectiveness.md（v3）、reports/v1_3_step3_exit_events.csv（v3）、reports/v1_3_step3_exit_summary.csv（v3）。
   - 不修改 B0.4 策略、参数或冻结基线。
-- **下一阶段唯一任务**：Step 3 已完成，等待用户决定下一步研究方向（holding stability 实验或其他）。不修改 B0.4 交易逻辑。
+- **v1.3 Step 4: 80/20组合结构机制拆解 已完成**：
+  - 在不修改引擎核心逻辑的前提下，仅通过配置参数运行4个组合结构方案（B0.4/A/B/C）。
+  - B0.4 基线精确复现：NAV=2,761,288.07，交易804笔 ✓。
+  - 方案A（4行业+无防御）：总收益152.97%，CAGR 15.14%，夏普0.89，最大回撤-16.66%，现金占比49.1%。
+  - 方案B（4行业+1防御）：总收益180.91%，CAGR 16.99%，夏普0.98，最大回撤-16.38%，为4方案中夏普最高、回撤最小。
+  - 方案C（5行业×16%）：总收益118.34%，CAGR 12.59%，夏普0.81，最大回撤-16.27%，现金占比53.18%。
+  - 滑点压力测试：0/3/5/10bp 四个方案均单调递减，无异常。
+  - 第5槽位占用：B0.4 cash=900天/industry=601天/bond=92天/gold=25天；B bond=310天/gold=271天；C cash=1058天/industry=601天。
+  - 黄金/国债贡献：B0.4 黄金+4.96%、国债+2.39%；B 黄金+8.30%、国债+2.53%。
+  - 交付物：scripts/v1_3_step4_portfolio_structure_ab.py、reports/v1_3_step4_portfolio_structure_ab.md、reports/v1_3_step4_portfolio_metrics.csv、reports/v1_3_step4_portfolio_daily_attribution.csv。
+  - 不修改 B0.4 策略、参数或冻结基线。
+- **下一阶段唯一任务**：Step 4 已完成，等待用户决定下一步研究方向。不修改 B0.4 交易逻辑。
 
 ## 2. B0.4 冻结口径
 
@@ -164,9 +175,9 @@
 当前分支已同步远端，但工作区不是干净状态：
 
 - 已修改：`docs/CURRENT_STATE.md`
-  - 本次 v1.3 Step 3 交接摘要更新，尚未提交。
+  - 本次 v1.3 Step 4 交接摘要更新，尚未提交。
 - 已修改：`docs/CHANGES.md`
-  - v1.3 Step 3 记录，尚未提交。
+  - v1.3 Step 4 记录，尚未提交。
 - 已修改：`src/backtest.py`
   - nav_records 增加 `industry_value` / `defense_value`（不改变交易逻辑）。
 - 已修改：`reports/ab_test_data_fill_impact.md`
@@ -183,6 +194,10 @@
 - 新增：`reports/v1_3_step3_exit_effectiveness.md`
 - 新增：`reports/v1_3_step3_exit_events.csv`
 - 新增：`reports/v1_3_step3_exit_summary.csv`
+- 新增：`scripts/v1_3_step4_portfolio_structure_ab.py`
+- 新增：`reports/v1_3_step4_portfolio_structure_ab.md`
+- 新增：`reports/v1_3_step4_portfolio_metrics.csv`
+- 新增：`reports/v1_3_step4_portfolio_daily_attribution.csv`
 
 这些文件均视为用户已有研究材料。不得删除、移动、覆盖、暂存或提交，除非当前任务明确要求。
 
@@ -200,9 +215,9 @@
 
 ## 7. 下一步唯一任务
 
-Step 3 已完成。等待用户决定下一步研究方向：
-- 选项 A：设计 holding stability 实验（减少震荡往返导致的频繁换仓）。
-- 选项 B：进入其他单变量实验。
+Step 4 已完成。等待用户决定下一步研究方向：
+- 选项 A：基于 Step 4 结论，进一步优化组合结构（如测试方案B的变体）。
+- 选项 B：进入其他单变量实验（如 holding stability、滑点参数优化等）。
 - 选项 C：不进入实验，继续观察。
 
 当前不修改 B0.4 交易逻辑、策略或冻结基线。
