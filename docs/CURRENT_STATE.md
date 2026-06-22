@@ -1,10 +1,10 @@
 # 当前工程现场
 
-**最后更新**：2026-06-22（修正版v2）  
+**最后更新**：2026-06-22（修正版v3）  
 **工作目录**：`D:\etf_rotation_model`  
 **当前分支**：`feature/v1.3-regime-research`  
 **当前版本**：v1.2.3
-**当前研究提交**：`22ddbae`（v1.3 Step 2修正: 收益计算方法修正、勾稽、撤回推荐）  
+**当前研究提交**：`81b0d54`（v1.3 Step 2修正版v2: bench_ret计算顺序、交易勾稽、44.7%/31.0%来源说明）  
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78  
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）  
 **数据截止**：2026-06-18  
@@ -34,7 +34,7 @@
   - 交易分类勾稽：341 + 46 + 17 + 1 = 405 = 卖出合计 ✓；纯排名替换0 = 事件CSV行数 ✓。
   - 不满足进入 Step 2（测试 replacement_score_gap）的任何条件。
   - 不创建 replacement_score_gap 规则，不修改 B0.4。
-- **v1.3 Step 2: B0.4 市场状态增量价值诊断 已完成（修正版v2）**：
+- **v1.3 Step 2: B0.4 市场状态增量价值诊断 已完成（修正版v3）**：
   - 方法修正：在完整nav_df上先计算 bench_ret = bench_price.pct_change()，再按研究期/验证期筛选；超额收益用 prod(1+r_s)/prod(1+r_b)-1（禁止CAGR-CAGR）。
   - 自然择时已生效：强牛行业仓位 74.9% > 熊市 42.0%，差异 32.9 个百分点；总持仓强牛 85.4% > 熊市 59.1%。
   - 弱市超额为正：熊市超额 +11.10%，震荡 +13.18%（prod比率法，非CAGR-CAGR）。
@@ -45,9 +45,9 @@
   - 交易勾稽：804 = 642（四状态已归因）+ 162（2025-2026样本外）+ 0（warmup/NaN）。
   - 收益勾稽：四状态增长因子连乘误差 0.000000（策略），0.000000（基准）。
   - 44.7%/31.0%：旧报告错误值，来源不可复现。不能归因于pct_change收益算法。
-  - 交付物：scripts/v1_3_step2_b0_4_regime_diagnosis.py（修正版v2）、reports/v1_3_step2_regime_diagnosis.md（修正版v2）、reports/v1_3_step2_regime_stats.csv（修正版v2）。
+  - 交付物：scripts/v1_3_step2_b0_4_regime_diagnosis.py（修正版v3）、reports/v1_3_step2_regime_diagnosis.md（修正版v3）、reports/v1_3_step2_regime_stats.csv（修正版v3）。
   - 不修改 B0.4 策略、参数或冻结基线。
-- **WorkBuddy 复审状态**：用户反馈旧数据"too good to be true"，已修正收益计算方法（完整序列先计算bench_ret再筛选）、超额收益公式（prod比率法）、交易勾稽（642+162+0=804）、仓位来源说明（44.7%/31.0%来源不可复现，不归因于pct_change）。修正版v2已推送，等待终审。
+- **WorkBuddy 复审状态**：用户反馈旧数据"too good to be true"，已修正：① 收益计算方法（完整序列先计算bench_ret再筛选）；② 超额收益公式（prod比率法）；③ 交易勾稽（642+162+0=804）；④ 仓位来源说明（44.7%/31.0%来源不可复现，不归因于pct_change）；⑤ 交易明细shares列修正（quantity→shares，数量不再全部为0）；⑥ 清理14个意外生成的空文件。修正版v3已推送，等待终审。
 - **下一阶段唯一任务**：完成 Step 2 终审后再决定研究方向。不进入任何方向实验，不修改 B0.4 交易逻辑。
 
 ## 2. B0.4 冻结口径

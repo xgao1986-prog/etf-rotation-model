@@ -664,7 +664,7 @@ def generate_report(full_stats, nav_df, trades_df, regime_summary, full_mask, ou
             f.write("|----------|------|------|------|------|\n")
             for _, trade in warmup_trades.iterrows():
                 f.write(f"| {trade['date'].strftime('%Y-%m-%d')} | {trade.get('ticker', 'N/A')} | {trade['action']} | "
-                        f"{trade.get('price', 0):.2f} | {trade.get('quantity', 0)} |\n")
+                        f"{trade.get('price', 0):.2f} | {trade.get('shares', 0)} |\n")
             f.write("\n")
         else:
             f.write("**warmup/NaN交易明细**：0笔。\n\n")
@@ -678,7 +678,7 @@ def generate_report(full_stats, nav_df, trades_df, regime_summary, full_mask, ou
             f.write("|----------|------|------|------|------|\n")
             for _, trade in sample_out_trades.iterrows():
                 f.write(f"| {trade['date'].strftime('%Y-%m-%d')} | {trade.get('ticker', 'N/A')} | {trade['action']} | "
-                        f"{trade.get('price', 0):.2f} | {trade.get('quantity', 0)} |\n")
+                        f"{trade.get('price', 0):.2f} | {trade.get('shares', 0)} |\n")
             f.write("\n")
 
         # 7.4 仓位勾稽
