@@ -5,6 +5,38 @@
 
 ---
 
+## 2026-06-22（本次 - v1.3 Step 1 P1修复：PURE_RANKING分类与事件分析不一致）
+
+**目标：** 修复WorkBuddy P1：分类汇总出现1笔PURE_RANKING，但事件分析为0笔。
+
+**修复内容：**
+1. `classify_trades`：统一PURE_RANKING定义，增加"同日有行业买入"条件；无匹配时分类为UNMATCHED_EXIT；新增match_status/match_reason字段
+2. `analyze_pure_ranking_events`：移除`matched_buys`为空时的静默跳过`continue`，改为记录NO_MATCH事件（带match_status）
+3. `generate_report`：修正CSV列头与脚本真实输出一致（含match_status/match_reason）；分类汇总增加UNMATCHED_EXIT；数据勾稽增加纯排名替换vs无匹配退出拆分
+4. 报告：明确区分"纯排名替换（有匹配买入）"和"无匹配退出（有BUY信号但无行业买入）"
+
+**修复前：**
+| 分类 | 数量 |
+|------|------|
+| PURE_RANKING | 1 |
+| 事件分析 | 0（被静默跳过）|
+
+**修复后：**
+| 分类 | 数量 |
+|------|------|
+| PURE_RANKING | 0 |
+| UNMATCHED_EXIT | 1 |
+| 事件分析 | 0（与PURE_RANKING一致）|
+
+**勾稽验证：**
+- 卖出合计 = 341 + 46 + 17 + 1 = 405 ✓
+- 总交易 = 399 + 405 = 804 ✓
+- 纯排名替换 = 0 = 事件CSV行数 ✓
+
+**结论不变：** 不满足进入Step 2的条件，停止。
+
+---
+
 ## 2026-06-22（本次 - v1.3 Step 1: 换仓成本与有效性归因）
 
 **目标：** 判断B0.4中是否存在大量"持仓仍合格，仅因排名小幅变化而被替换"的低价值换仓。不修改生产策略、参数或冻结基线。

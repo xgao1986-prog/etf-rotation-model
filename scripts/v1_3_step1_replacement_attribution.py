@@ -89,8 +89,11 @@ def classify_trades(trades_df, scores_df, cfg):
     1. 止损退出 (action == 'STOP_LOSS')
     2. 不再满足BUY条件 (reason == '调出候选列表' 且该ticker当日signal_type == 'SELL')
     3. 防御资产为行业让路 (reason contains '防御让路')
-    4. 纯排名替换 (reason == '调出候选列表' 且该ticker当日signal_type == 'BUY')
-       - 原持仓仍满足全部BUY条件，但因排名不够高被替换
+    4. 纯排名替换：
+       - 原持仓仍满足全部BUY条件
+       - 同一调仓日存在实际行业ETF买入（非防御）
+       - 不是止损或趋势失效造成
+    5. 无匹配退出：原持仓仍满足BUY条件，但同日无行业买入可匹配
     """
     
     # 确保日期格式一致
@@ -103,6 +106,15 @@ def classify_trades(trades_df, scores_df, cfg):
     defense_tickers = set(DEFENSE_UNIVERSE.keys())
     industry_tickers = set(ETF_UNIVERSE.keys())
     
+    # 预计算每个调仓日的行业买入列表（非防御）
+    buy_dates = {}
+    for _, row in trades_df[trades_df['action'] == 'BUY'].iterrows():
+        d = pd.to_datetime(row['date']).date() if hasattr(row['date'], 'strftime') else row['date']
+        if d not in buy_dates:
+            buy_dates[d] = []
+        if row['ticker'] not in defense_tickers:
+            buy_dates[d].append(row['ticker'])
+    
     classified = []
     
     for _, row in trades_df.iterrows():
@@ -114,13 +126,17 @@ def classify_trades(trades_df, scores_df, cfg):
         # 默认分类
         category = 'OTHER'
         is_pure_ranking = False
+        match_status = 'N/A'
+        match_reason = ''
         
         if action == 'STOP_LOSS':
             category = 'STOP_LOSS'
+            match_status = 'N/A'
         elif action == 'SELL':
             # 防御让路
             if '防御让路' in reason or '防御减持让路' in reason:
                 category = 'DEFENSE_YIELD'
+                match_status = 'N/A'
             elif reason == '调出候选列表':
                 # 需要判断该ticker当日是否仍满足BUY条件
                 day_signals = scores_df[scores_df['date'] == date]
@@ -129,19 +145,34 @@ def classify_trades(trades_df, scores_df, cfg):
                 if not ticker_signal.empty:
                     signal_type = ticker_signal['signal_type'].iloc[0]
                     if signal_type == 'BUY':
-                        # 仍满足BUY条件，但被调出候选列表 = 纯排名替换
-                        category = 'PURE_RANKING'
-                        is_pure_ranking = True
+                        # 仍满足BUY条件
+                        # 检查同日是否有行业买入（非防御）
+                        day_industry_buys = buy_dates.get(date, [])
+                        if day_industry_buys:
+                            # 有行业买入，可确认为纯排名替换
+                            category = 'PURE_RANKING'
+                            is_pure_ranking = True
+                            match_status = 'MATCHED'
+                            match_reason = f'同日行业买入: {day_industry_buys}'
+                        else:
+                            # 无行业买入，不可确认为排名替换
+                            category = 'UNMATCHED_EXIT'
+                            match_status = 'NO_MATCH'
+                            match_reason = '同日无行业买入（仅防御买入或纯卖出）'
                     else:
                         # 不再满足BUY条件（跌破均线等）
                         category = 'BUY_CONDITION_FAILED'
+                        match_status = 'N/A'
                 else:
                     # 无当日信号（罕见，可能是数据缺失）
                     category = 'NO_SIGNAL_DATA'
+                    match_status = 'NO_SIGNAL'
             else:
                 category = 'OTHER_SELL'
+                match_status = 'N/A'
         elif action == 'BUY':
             category = 'BUY'
+            match_status = 'N/A'
         
         classified.append({
             'date': date,
@@ -155,6 +186,8 @@ def classify_trades(trades_df, scores_df, cfg):
             'reason': reason,
             'category': category,
             'is_pure_ranking': is_pure_ranking,
+            'match_status': match_status,
+            'match_reason': match_reason,
         })
     
     return pd.DataFrame(classified)
@@ -223,51 +256,82 @@ def analyze_pure_ranking_events(classified_df, trades_df, scores_df, market_df, 
             })
         
         if not matched_buys:
-            continue
-        
-        # 选择score_gap最大的作为最可能对应的买入（策略排名逻辑）
-        matched_buys.sort(key=lambda x: x['score_gap'] if not pd.isna(x['score_gap']) else -999, reverse=True)
-        best_match = matched_buys[0]
-        
-        # 计算未来收益（执行日open至未来对应交易日open）
-        fwd_returns = calculate_forward_returns(
-            market_df, sell_ticker, best_match['buy_ticker'],
-            date, sell_price, best_match['buy_price']
-        )
-        
-        # 计算成本
-        total_commission = sell_commission + best_match['buy_commission']
-        slippage_cost_3bp = (sell_amount * 0.0003) + (best_match['buy_amount'] * 0.0003)
-        total_cost_0bp = total_commission
-        total_cost_3bp = total_commission + slippage_cost_3bp
-        
-        events.append({
-            'date': date,
-            'sell_ticker': sell_ticker,
-            'buy_ticker': best_match['buy_ticker'],
-            'sell_score': old_score,
-            'buy_score': best_match['buy_score'],
-            'score_gap': best_match['score_gap'],
-            'sell_rank': old_rank,
-            'buy_rank': best_match['buy_rank'],
-            'sell_amount': sell_amount,
-            'buy_amount': best_match['buy_amount'],
-            'sell_commission': sell_commission,
-            'buy_commission': best_match['buy_commission'],
-            'total_commission': total_commission,
-            'slippage_cost_3bp': slippage_cost_3bp,
-            'total_cost_0bp': total_cost_0bp,
-            'total_cost_3bp': total_cost_3bp,
-            'sell_return_5d': fwd_returns.get('sell_5d', np.nan),
-            'sell_return_10d': fwd_returns.get('sell_10d', np.nan),
-            'sell_return_20d': fwd_returns.get('sell_20d', np.nan),
-            'buy_return_5d': fwd_returns.get('buy_5d', np.nan),
-            'buy_return_10d': fwd_returns.get('buy_10d', np.nan),
-            'buy_return_20d': fwd_returns.get('buy_20d', np.nan),
-            'excess_5d': fwd_returns.get('excess_5d', np.nan),
-            'excess_10d': fwd_returns.get('excess_10d', np.nan),
-            'excess_20d': fwd_returns.get('excess_20d', np.nan),
-        })
+            # 无匹配行业买入：记录为NO_MATCH事件（不静默跳过）
+            events.append({
+                'date': date,
+                'sell_ticker': sell_ticker,
+                'buy_ticker': np.nan,
+                'sell_score': old_score,
+                'buy_score': np.nan,
+                'score_gap': np.nan,
+                'sell_rank': old_rank,
+                'buy_rank': np.nan,
+                'sell_amount': sell_amount,
+                'buy_amount': np.nan,
+                'sell_commission': sell_commission,
+                'buy_commission': np.nan,
+                'total_commission': sell_commission,
+                'slippage_cost_3bp': sell_amount * 0.0003,
+                'total_cost_0bp': sell_commission,
+                'total_cost_3bp': sell_commission + sell_amount * 0.0003,
+                'sell_return_5d': np.nan,
+                'sell_return_10d': np.nan,
+                'sell_return_20d': np.nan,
+                'buy_return_5d': np.nan,
+                'buy_return_10d': np.nan,
+                'buy_return_20d': np.nan,
+                'excess_5d': np.nan,
+                'excess_10d': np.nan,
+                'excess_20d': np.nan,
+                'match_status': 'NO_MATCH',
+                'match_reason': '无匹配行业买入',
+            })
+        else:
+            # 选择score_gap最大的作为最可能对应的买入（策略排名逻辑）
+            matched_buys.sort(key=lambda x: x['score_gap'] if not pd.isna(x['score_gap']) else -999, reverse=True)
+            best_match = matched_buys[0]
+            
+            # 计算未来收益（执行日open至未来对应交易日open）
+            fwd_returns = calculate_forward_returns(
+                market_df, sell_ticker, best_match['buy_ticker'],
+                date, sell_price, best_match['buy_price']
+            )
+            
+            # 计算成本
+            total_commission = sell_commission + best_match['buy_commission']
+            slippage_cost_3bp = (sell_amount * 0.0003) + (best_match['buy_amount'] * 0.0003)
+            total_cost_0bp = total_commission
+            total_cost_3bp = total_commission + slippage_cost_3bp
+            
+            events.append({
+                'date': date,
+                'sell_ticker': sell_ticker,
+                'buy_ticker': best_match['buy_ticker'],
+                'sell_score': old_score,
+                'buy_score': best_match['buy_score'],
+                'score_gap': best_match['score_gap'],
+                'sell_rank': old_rank,
+                'buy_rank': best_match['buy_rank'],
+                'sell_amount': sell_amount,
+                'buy_amount': best_match['buy_amount'],
+                'sell_commission': sell_commission,
+                'buy_commission': best_match['buy_commission'],
+                'total_commission': total_commission,
+                'slippage_cost_3bp': slippage_cost_3bp,
+                'total_cost_0bp': total_cost_0bp,
+                'total_cost_3bp': total_cost_3bp,
+                'sell_return_5d': fwd_returns.get('sell_5d', np.nan),
+                'sell_return_10d': fwd_returns.get('sell_10d', np.nan),
+                'sell_return_20d': fwd_returns.get('sell_20d', np.nan),
+                'buy_return_5d': fwd_returns.get('buy_5d', np.nan),
+                'buy_return_10d': fwd_returns.get('buy_10d', np.nan),
+                'buy_return_20d': fwd_returns.get('buy_20d', np.nan),
+                'excess_5d': fwd_returns.get('excess_5d', np.nan),
+                'excess_10d': fwd_returns.get('excess_10d', np.nan),
+                'excess_20d': fwd_returns.get('excess_20d', np.nan),
+                'match_status': 'MATCHED',
+                'match_reason': f'匹配买入: {best_match["buy_ticker"]} (score_gap={best_match["score_gap"]:.2f})',
+            })
     
     return pd.DataFrame(events)
 
@@ -441,19 +505,23 @@ def generate_report(classified_df, events_df, stats_research, stats_validation,
                      output_md, output_events_csv, output_summary_csv):
     """生成报告和CSV"""
     
-    # 保存事件CSV（空DataFrame也保留正确列名）
+    # 保存事件CSV（列头必须与analyze_pure_ranking_events输出一致）
+    event_columns = [
+        'date', 'sell_ticker', 'buy_ticker', 'sell_score', 'buy_score', 'score_gap',
+        'sell_rank', 'buy_rank', 'sell_amount', 'buy_amount', 'sell_commission',
+        'buy_commission', 'total_commission', 'slippage_cost_3bp', 'total_cost_0bp',
+        'total_cost_3bp', 'sell_return_5d', 'sell_return_10d', 'sell_return_20d',
+        'buy_return_5d', 'buy_return_10d', 'buy_return_20d', 'excess_5d', 'excess_10d', 'excess_20d',
+        'match_status', 'match_reason'
+    ]
     if events_df.empty:
-        # 创建带正确列名的空DataFrame
-        empty_events = pd.DataFrame(columns=[
-            'date', 'sell_ticker', 'buy_ticker', 'sell_score', 'buy_score', 'score_gap',
-            'sell_rank', 'buy_rank', 'sell_amount', 'buy_amount', 'sell_commission',
-            'buy_commission', 'total_commission', 'slippage_cost_3bp', 'total_cost_0bp',
-            'total_cost_3bp', 'sell_return_5d', 'sell_return_10d', 'sell_return_20d',
-            'buy_return_5d', 'buy_return_10d', 'buy_return_20d', 'excess_5d', 'excess_10d', 'excess_20d'
-        ])
+        empty_events = pd.DataFrame(columns=event_columns)
         empty_events.to_csv(output_events_csv, index=False, encoding='utf-8-sig')
     else:
-        events_df.to_csv(output_events_csv, index=False, encoding='utf-8-sig')
+        for col in event_columns:
+            if col not in events_df.columns:
+                events_df[col] = None
+        events_df[event_columns].to_csv(output_events_csv, index=False, encoding='utf-8-sig')
     
     # 汇总统计（即使为空也保留period列）
     summary_rows = []
@@ -501,7 +569,8 @@ def generate_report(classified_df, events_df, stats_research, stats_validation,
                 'STOP_LOSS': '止损退出',
                 'BUY_CONDITION_FAILED': '不再满足BUY条件（跌破均线等）',
                 'DEFENSE_YIELD': '防御资产为行业让路',
-                'PURE_RANKING': '纯排名替换（原持仓仍满足BUY条件）',
+                'PURE_RANKING': '纯排名替换（原持仓仍满足BUY条件+同日有行业买入）',
+                'UNMATCHED_EXIT': '无匹配退出（原持仓仍满足BUY条件但无行业买入）',
                 'NO_SIGNAL_DATA': '无信号数据',
                 'OTHER_SELL': '其他卖出',
             }.get(cat, cat)
