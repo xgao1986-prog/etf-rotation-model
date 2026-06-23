@@ -1,4 +1,4 @@
-"""最小测试：B0-18 配置签名正确性验证（不依赖 app.py 完整导入）。"""
+"""最小测试：B0-18 配置签名正确性验证（直接调用生产函数）。"""
 import sys
 import os
 
@@ -10,44 +10,7 @@ sys.path.insert(0, root)
 import unittest
 
 from config import build_config
-
-
-def cfg_signature(cfg):
-    """B0-18标准配置签名：包含所有影响回测结果的关键参数。
-    
-    与 app.py 中的 cfg_signature 保持完全同步。
-    """
-    weights = tuple((key, round(value, 6)) for key, value in sorted(cfg["weights"].items()))
-    params = (
-        cfg["min_trend_score"],
-        cfg["min_confirm_score"],
-        cfg["min_total_score"],
-        cfg["max_holdings"],
-        round(cfg["max_position_per_etf"], 6),
-        round(cfg["stop_loss"], 6),
-        cfg.get("stop_loss_mode", "fixed"),
-        cfg.get("atr_stop_multiplier", 2.0),
-        cfg["market_timing"],
-        cfg.get("cooling_period", 0),
-        cfg.get("cooling_score_boost", 0),
-        cfg.get("rebalance_freq", "weekly"),
-        cfg.get("rebalance_weekday", 3),
-        cfg.get("trailing_stop_mode", "none"),
-        round(cfg.get("trailing_stop", -0.1) or -0.1, 6) if "trailing_stop" in cfg else None,
-        cfg.get("tier_1_pnl", 0.05),
-        cfg.get("tier_1_drawdown", -0.05),
-        cfg.get("tier_2_pnl", 0.15),
-        cfg.get("tier_2_drawdown", -0.08),
-        cfg.get("tier_3_pnl", 0.30),
-        cfg.get("tier_3_drawdown", -0.12),
-        cfg.get("defense_enabled", True),
-        cfg.get("fallback_equity_enabled", False),
-        cfg.get("sector_boost_enabled", False),
-        cfg.get("momentum_factor_enabled", True),
-        cfg.get("volatility_factor_enabled", True),
-        round(cfg.get("initial_capital", 1_000_000), 6),
-    )
-    return weights + params
+from utils import cfg_signature
 
 
 class TestB0Signature(unittest.TestCase):
@@ -143,6 +106,55 @@ class TestB0Signature(unittest.TestCase):
         sig = cfg_signature(cfg)
         b0_18_sig = cfg_signature(build_config())
         self.assertNotEqual(sig, b0_18_sig)
+
+    # ========== 回归测试：trailing_stop=None 修复 ==========
+
+    def test_default_signature_does_not_raise(self):
+        """build_config() 默认配置调用签名不报错（trailing_stop=None 修复）。"""
+        cfg = build_config()
+        # trailing_stop 默认为 None，不应触发 TypeError
+        sig = cfg_signature(cfg)
+        self.assertIsInstance(sig, tuple)
+        self.assertTrue(len(sig) > 0)
+
+    def test_trailing_stop_none_stable_signature(self):
+        """trailing_stop=None 能生成稳定签名，且与显式 None 一致。"""
+        cfg = build_config()
+        sig1 = cfg_signature(cfg)
+
+        cfg2 = build_config()
+        cfg2["trailing_stop"] = None
+        sig2 = cfg_signature(cfg2)
+
+        self.assertEqual(sig1, sig2)
+        # None 在签名中应体现为 None（不是被 round 成 -0.1）
+        self.assertIn(None, sig1)
+
+    def test_trailing_stop_simple_deviates(self):
+        """simple 模式下 trailing_stop 数值变化会改变签名。"""
+        cfg = build_config()
+        cfg["trailing_stop_mode"] = "simple"
+        cfg["trailing_stop"] = -0.05
+        sig1 = cfg_signature(cfg)
+
+        cfg2 = build_config()
+        cfg2["trailing_stop_mode"] = "simple"
+        cfg2["trailing_stop"] = -0.10
+        sig2 = cfg_signature(cfg2)
+
+        self.assertNotEqual(sig1, sig2)
+
+    def test_trailing_stop_none_vs_numeric_deviates(self):
+        """trailing_stop=None 与 trailing_stop=-0.1 签名不同。"""
+        cfg_none = build_config()
+        cfg_none["trailing_stop"] = None
+        sig_none = cfg_signature(cfg_none)
+
+        cfg_num = build_config()
+        cfg_num["trailing_stop"] = -0.1
+        sig_num = cfg_signature(cfg_num)
+
+        self.assertNotEqual(sig_none, sig_num)
 
 
 if __name__ == "__main__":

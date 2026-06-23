@@ -1,27 +1,33 @@
 # 当前工程现场
 
-**最后更新**：2026-06-24（Step 5补充: 防御总开关工程修复 + 三维归因分析）
+**最后更新**：2026-06-24（Step 5补充: Codex 终审 P1 修复 — cfg_signature 提取 + trailing_stop=None 修复）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
-**当前研究提交**：`46a8cc6`（v1.3 Step 5补充: B0.4 vs 方案B三维归因 + 防御开关修复）
+**当前 HEAD**：以 `git status` 为准
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）
 **数据截止**：2026-06-18
 
-> 当前 HEAD 以 `git status` 为准。旧分支 `feature/v1.2.1-regime-adaptive` 保留，不删除、不重置、不强推。标签 `v1.2.3-b0.4` 保持不动。
+> 旧分支 `feature/v1.2.1-regime-adaptive` 保留，不删除、不重置、不强推。标签 `v1.2.3-b0.4` 保持不动。
 
 ---
 
 ## 1. 当前结论
 
+- **Codex 终审 P1 修复已完成（cfg_signature 提取 + trailing_stop=None 修复）**：
+  - `app.py:465` 对默认配置 `trailing_stop=None` 执行 `round(None, 6)` 会导致 `TypeError`。
+  - 修复：`None` 保持为 `None`；仅对非 `None` 数值执行 `round`。
+  - 将 `cfg_signature` 从 `app.py` 提取到 `src/utils.py`，成为纯函数，供 `app.py` 和测试共同调用同一实现。
+  - 测试不再复制 `cfg_signature`；直接导入生产函数 `from utils import cfg_signature`。
+  - 新增4项回归测试：默认签名不报错、`trailing_stop=None` 稳定签名、`simple` 模式数值变化改变签名、`None` 与 `-0.1` 签名不同。
+  - `tests/test_app_b0_signature.py` 扩展至13项全部通过。
 - **App/防御总开关工程修复已完成**：
   - `app.py` 配置签名补齐缺失字段（`fallback_equity_enabled`, `atr_stop_multiplier`, `cooling_score_boost`, `trailing_stop`, 动态止盈档位, `initial_capital`）。
   - `backtest.py` 和 `rebalance_planner.py` 补全 `defense_enabled` 总开关逻辑。
   - 默认 `defense_enabled=True`，B0.4 行为完全不变。
   - 新增 `tests/test_defense_enabled_switch.py`（7个场景）全部通过。
-  - `tests/test_app_b0_signature.py` 扩展至9项全部通过。
-  - B0.4 滑点测试 v2 8项全部通过（155.94s），0bp 复现 NAV=2,761,288.07，交易804笔。
+  - B0.4 滑点测试 v2 8项全部通过（175.11s），0bp 复现 NAV=2,761,288.07，交易804笔。
 - **v1.3 Step 5补充: B0.4 vs 方案B 三维归因分析已完成**：
 - B0.3 使用的尾部行情不完整：2026-06-08 至 2026-06-12 大部分 ETF 和沪深300数据缺失。
 - 受控 A/B 实验证明：排除补齐数据可复现 B0.3；使用完整数据得到 B0.4。差异来自数据补齐，不是策略或历史代码变化。

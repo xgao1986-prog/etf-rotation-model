@@ -23,6 +23,7 @@ from config import (BACKTEST_CONFIG, BENCHMARK, ETF_UNIVERSE, DEFENSE_UNIVERSE,
                     TRADING_RULES_CONFIG, DEFENSE_CONFIG, build_config)
 from database import ETFDatabase
 from strategy import StrategyEngine
+from utils import cfg_signature
 
 
 st.set_page_config(
@@ -443,41 +444,6 @@ def _get_ticker_name(ticker):
     elif ticker == BENCHMARK:
         return "沪深300"
     return ticker
-
-def cfg_signature(cfg):
-    """B0-18标准配置签名：包含所有影响回测结果的关键参数。"""
-    weights = tuple((key, round(value, 6)) for key, value in sorted(cfg["weights"].items()))
-    params = (
-        cfg["min_trend_score"],
-        cfg["min_confirm_score"],
-        cfg["min_total_score"],
-        cfg["max_holdings"],
-        round(cfg["max_position_per_etf"], 6),
-        round(cfg["stop_loss"], 6),
-        cfg.get("stop_loss_mode", "fixed"),
-        cfg.get("atr_stop_multiplier", 2.0),
-        cfg["market_timing"],
-        cfg.get("cooling_period", 0),
-        cfg.get("cooling_score_boost", 0),
-        cfg.get("rebalance_freq", "weekly"),
-        cfg.get("rebalance_weekday", 3),
-        cfg.get("trailing_stop_mode", "none"),
-        round(cfg.get("trailing_stop", -0.1), 6) if "trailing_stop" in cfg else None,
-        cfg.get("tier_1_pnl", 0.05),
-        cfg.get("tier_1_drawdown", -0.05),
-        cfg.get("tier_2_pnl", 0.15),
-        cfg.get("tier_2_drawdown", -0.08),
-        cfg.get("tier_3_pnl", 0.30),
-        cfg.get("tier_3_drawdown", -0.12),
-        cfg.get("defense_enabled", True),
-        cfg.get("fallback_equity_enabled", False),
-        cfg.get("sector_boost_enabled", False),
-        cfg.get("momentum_factor_enabled", True),
-        cfg.get("volatility_factor_enabled", True),
-        round(cfg.get("initial_capital", 1_000_000), 6),
-    )
-    return weights + params
-
 
 def get_latest_score_table(cfg):
     db = get_database()
