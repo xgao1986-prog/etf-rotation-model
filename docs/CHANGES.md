@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-06-24（本次 - v1.3 Step 6: Codex终审最小修复 — LOO真实数据+证据收口）
+
+**目标：** 修复唯一真实P1：LOO测试必须读取新鲜回测结果，不得硬编码。新增loyo.csv，强化证据验证，明确annual_contribution与LOO定义差异。
+
+**修正清单：**
+1. **LOO测试读取CSV调用生产函数**：`test_preregistration_loyo_majority` 删除硬编码数据，读取 `nav_A/B/C.csv`，调用 `leave_one_year_out` 生产函数，验证只包含2019-2024（6年），实际结果 C>A 1/6=16.7%，标准5判定 FAIL。
+2. **新增 loyo.csv**：`leave_one_year_out` 实际结果输出到 `reports/v1_3_step6_loyo.csv`。
+3. **LOO与annual定义区分**：新增 `test_loyo_vs_annual_distinction` 验证两者列名/定义不同；报告中数据文件列表明确标注定义差异。
+4. **防御贡献字段重命名**：`gold_mv_a` → `gold_final_position_mv_a`，更清晰表达"期末持仓市值"。
+5. **--output-dir参数**：脚本支持 `--output-dir` 参数，默认仍为 reports，不影响回测逻辑。
+6. **测试全部通过**：16 passed。
+
+**改了哪些文件：**
+- `scripts/v1_3_step6_dynamic_fifth_slot_ab.py`：main()添加output_dir参数、argparse、loyo.csv输出、字段重命名、所有CSV路径使用os.path.join。
+- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：16项测试（新增test_loyo_vs_annual_distinction、重写test_preregistration_loyo_majority读取CSV+调用生产函数）。
+- `reports/v1_3_step6_dynamic_fifth_slot_ab.md`：新鲜重新生成。
+- `reports/v1_3_step6_loyo.csv`：新增。
+- `reports/v1_3_step6_defense_contribution.csv`：字段重命名。
+- `docs/CURRENT_STATE.md`、`docs/CHANGES.md`：本条目。
+
+**测试结果：**
+- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：16 passed，0 warnings。
+
+**Commit：** 待完成
+
+---
+
 ## 2026-06-24（本次 - v1.3 Step 6: Codex终审证据收口 — 重新运行+8项修正）
 
 **目标：** 完成证据收口：annual_contribution/defense_etf_contribution 严格截止2024-12-31；defense使用mark-to-market；重新完整运行实验生成新鲜报告；强化CSV勾稽测试（FAIL不skip）；清理行尾空格。

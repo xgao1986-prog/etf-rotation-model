@@ -249,23 +249,82 @@ def test_preregistration_slippage_direction():
 def test_preregistration_loyo_majority():
     """预注册标准5：leave-one-year-out 严格多数结果方向一致（>50%）。
 
-    仅分析期2019-2024（6年），C>A 4/6 = 66.7% > 50%，判定为通过。
+    读取 nav_A/B/C.csv，调用生产函数 leave_one_year_out，
+    验证只包含2019-2024（6年），不得使用 annual_contribution.csv 代替。
     """
-    loyo = [
-        {"exclude_year": 2019, "diff_ca": 0.0247},
-        {"exclude_year": 2020, "diff_ca": -0.1063},
-        {"exclude_year": 2021, "diff_ca": 0.0323},
-        {"exclude_year": 2022, "diff_ca": 0.0934},
-        {"exclude_year": 2023, "diff_ca": -0.0819},
-        {"exclude_year": 2024, "diff_ca": 0.1377},
-    ]
+    from v1_3_step6_dynamic_fifth_slot_ab import leave_one_year_out
 
+    base = os.path.join(os.path.dirname(__file__), "..")
+    nav_a_path = os.path.join(base, "reports", "v1_3_step6_nav_A.csv")
+    nav_b_path = os.path.join(base, "reports", "v1_3_step6_nav_B.csv")
+    nav_c_path = os.path.join(base, "reports", "v1_3_step6_nav_C.csv")
+    loyo_path = os.path.join(base, "reports", "v1_3_step6_loyo.csv")
+
+    # 证据文件必须存在（FAIL 不 skip）
+    assert os.path.exists(nav_a_path), f"NAV A CSV 不存在: {nav_a_path}"
+    assert os.path.exists(nav_b_path), f"NAV B CSV 不存在: {nav_b_path}"
+    assert os.path.exists(nav_c_path), f"NAV C CSV 不存在: {nav_c_path}"
+    assert os.path.exists(loyo_path), f"LOO CSV 不存在: {loyo_path}"
+
+    nav_a = pd.read_csv(nav_a_path)
+    nav_b = pd.read_csv(nav_b_path)
+    nav_c = pd.read_csv(nav_c_path)
+    loyo_csv = pd.read_csv(loyo_path)
+
+    # 调用生产函数
+    loyo = leave_one_year_out(nav_a, nav_b, nav_c)
+    loyo_df = pd.DataFrame(loyo)
+
+    # 1. 验证只包含2019-2024（6年）
+    years = [r["exclude_year"] for r in loyo]
+    assert set(years) == {2019, 2020, 2021, 2022, 2023, 2024}, f"LOO年份错误: {years}"
+    assert len(loyo) == 6, f"LOO应为6年，实际{len(loyo)}"
+
+    # 2. LOO函数结果与loyo.csv逐行一致
+    assert len(loyo_df) == len(loyo_csv), f"LOO行数不一致: 函数={len(loyo_df)}, CSV={len(loyo_csv)}"
+    for idx in range(len(loyo_df)):
+        assert abs(loyo_df.iloc[idx]["diff_ca"] - loyo_csv.iloc[idx]["diff_ca"]) < 0.0001, (
+            f"LOO diff_ca 不一致，行{idx}: 函数={loyo_df.iloc[idx]['diff_ca']:.6f}, CSV={loyo_csv.iloc[idx]['diff_ca']:.6f}"
+        )
+
+    # 3. 预注册标准5评估：严格>50%才算多数
     ca_directions = [r["diff_ca"] > 0 for r in loyo]
     majority = sum(ca_directions) / len(ca_directions)
-    loyo_ok = majority > 0.5  # P1修正：严格>50%才算多数
+    loyo_ok = majority > 0.5
 
-    assert majority == 4/6, f"C>A: {sum(ca_directions)}/{len(ca_directions)} = {majority:.1%}"
-    assert loyo_ok is True, "4/6=66.7% > 50%，应判定为通过"
+    # 实际结果：C>A 1/6 = 16.7%，标准5判定 FAIL
+    assert majority == 1/6, f"C>A: {sum(ca_directions)}/{len(ca_directions)} = {majority:.1%}"
+    assert loyo_ok == False, "1/6=16.7% < 50%，标准5应判定为未通过"
+
+
+def test_loyo_vs_annual_distinction():
+    """验证 LOO 与 annual_contribution 定义不同，不要求正负方向逐年一致。
+
+    LOO：剔除某年后其余年份组合的总收益差。
+    annual_contribution：每个自然年A和C各自完整年度的收益差。
+    """
+    base = os.path.join(os.path.dirname(__file__), "..")
+    loyo_path = os.path.join(base, "reports", "v1_3_step6_loyo.csv")
+    annual_path = os.path.join(base, "reports", "v1_3_step6_annual_contribution.csv")
+
+    assert os.path.exists(loyo_path), f"LOO CSV 不存在: {loyo_path}"
+    assert os.path.exists(annual_path), f"annual CSV 不存在: {annual_path}"
+
+    loyo_df = pd.read_csv(loyo_path)
+    annual_df = pd.read_csv(annual_path)
+
+    # 两者行数不同（LOO=6行剔除年份，annual=6行自然年）
+    assert len(loyo_df) == 6, f"LOO应为6行: {len(loyo_df)}"
+    assert len(annual_df) == 6, f"annual应为6行: {len(annual_df)}"
+
+    # 列名不同
+    assert "exclude_year" in loyo_df.columns
+    assert "year" in annual_df.columns
+    assert "diff_ca" in loyo_df.columns
+    assert "diff_ca" in annual_df.columns
+
+    # 两者不要求正负方向一致（可能某年自然年C>A但LOO剔除后C<A）
+    # 这里不做强断言，仅验证数据存在即可
 
 
 # ========== 5. NaN/warmup 回退测试 ==========

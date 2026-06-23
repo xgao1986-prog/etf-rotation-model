@@ -17,7 +17,7 @@ C：动态第5槽位（震荡=5行业，其他=4+1防御）
 - 固定规则后不得继续调参
 """
 
-import sys, os, copy, json
+import sys, os, copy, json, argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
@@ -433,8 +433,8 @@ def defense_etf_contribution(nav_a, nav_c, trades_a, trades_c, market_df, defens
         results[f'{name}_sell_c'] = sell_c
         results[f'{name}_comm_a'] = comm_a
         results[f'{name}_comm_c'] = comm_c
-        results[f'{name}_mv_a'] = mv_a
-        results[f'{name}_mv_c'] = mv_c
+        results[f'{name}_final_position_mv_a'] = mv_a
+        results[f'{name}_final_position_mv_c'] = mv_c
         results[f'{name}_buy_shares_a'] = bs_a
         results[f'{name}_buy_shares_c'] = bs_c
         results[f'{name}_sell_shares_a'] = ss_a
@@ -626,7 +626,11 @@ def analyze_regime_switching(nav_c, trades_c, regime_df):
     return pd.DataFrame(switch_analysis)
 
 
-def main():
+def main(output_dir=None):
+    """主入口。"""
+    if output_dir is None:
+        output_dir = 'D:/etf_rotation_model/reports'
+    os.makedirs(output_dir, exist_ok=True)
     # 加载数据（匹配B0.4滑点测试：不包含fallback tickers）
     db = ETFDatabase()
     tickers = sorted(set(list(ETF_UNIVERSE.keys()) + list(DEFENSE_UNIVERSE.keys())))
@@ -654,12 +658,12 @@ def main():
     print(f"C NAV: {result_c['nav_df']['nav'].iloc[-1]:,.2f}, 交易: {result_c['num_trades']}")
 
     # 保存中间数据
-    result_a['nav_df'].to_csv('D:/etf_rotation_model/reports/v1_3_step6_nav_A.csv', index=False)
-    result_b['nav_df'].to_csv('D:/etf_rotation_model/reports/v1_3_step6_nav_B.csv', index=False)
-    result_c['nav_df'].to_csv('D:/etf_rotation_model/reports/v1_3_step6_nav_C.csv', index=False)
-    result_a['trades_df'].to_csv('D:/etf_rotation_model/reports/v1_3_step6_trades_A.csv', index=False)
-    result_b['trades_df'].to_csv('D:/etf_rotation_model/reports/v1_3_step6_trades_B.csv', index=False)
-    result_c['trades_df'].to_csv('D:/etf_rotation_model/reports/v1_3_step6_trades_C.csv', index=False)
+    result_a['nav_df'].to_csv(os.path.join(output_dir, 'v1_3_step6_nav_A.csv'), index=False)
+    result_b['nav_df'].to_csv(os.path.join(output_dir, 'v1_3_step6_nav_B.csv'), index=False)
+    result_c['nav_df'].to_csv(os.path.join(output_dir, 'v1_3_step6_nav_C.csv'), index=False)
+    result_a['trades_df'].to_csv(os.path.join(output_dir, 'v1_3_step6_trades_A.csv'), index=False)
+    result_b['trades_df'].to_csv(os.path.join(output_dir, 'v1_3_step6_trades_B.csv'), index=False)
+    result_c['trades_df'].to_csv(os.path.join(output_dir, 'v1_3_step6_trades_C.csv'), index=False)
 
     # 期间对比
     periods = [
@@ -703,10 +707,14 @@ def main():
     print("\n--- leave-one-year-out (分析期2019-2024) ---")
     loyo = leave_one_year_out(result_a['nav_df'], result_b['nav_df'], result_c['nav_df'])
 
+    # 保存LOO结果
+    loyo_df = pd.DataFrame(loyo)
+    loyo_df.to_csv(os.path.join(output_dir, 'v1_3_step6_loyo.csv'), index=False)
+
     # 状态切换分析
     print("\n--- 状态切换分析 ---")
     switch_df = analyze_regime_switching(result_c['nav_df'], result_c['trades_df'], regimes)
-    switch_df.to_csv('D:/etf_rotation_model/reports/v1_3_step6_regime_switches.csv', index=False)
+    switch_df.to_csv(os.path.join(output_dir, 'v1_3_step6_regime_switches.csv'), index=False)
 
     # 机制归因
     print("\n--- 机制归因 ---")
@@ -715,13 +723,13 @@ def main():
         result_a['trades_df'], result_c['trades_df'],
         regimes, market_df
     )
-    attr_df.to_csv('D:/etf_rotation_model/reports/v1_3_step6_mechanism_attr.csv', index=False)
-    regime_summary.to_csv('D:/etf_rotation_model/reports/v1_3_step6_regime_summary.csv', index=False)
+    attr_df.to_csv(os.path.join(output_dir, 'v1_3_step6_mechanism_attr.csv'), index=False)
+    regime_summary.to_csv(os.path.join(output_dir, 'v1_3_step6_regime_summary.csv'), index=False)
 
     # P1-3: 自然年C-A贡献（严格截止分析期2024-12-31）
     annual = annual_contribution(result_a['nav_df'], result_c['nav_df'], analysis_end='2024-12-31')
     annual_df = pd.DataFrame(annual)
-    annual_df.to_csv('D:/etf_rotation_model/reports/v1_3_step6_annual_contribution.csv', index=False)
+    annual_df.to_csv(os.path.join(output_dir, 'v1_3_step6_annual_contribution.csv'), index=False)
 
     # P1-4: 防御ETF贡献（mark-to-market，严格截止分析期2024-12-31）
     defense_contrib = defense_etf_contribution(
@@ -730,7 +738,7 @@ def main():
         market_df, set(DEFENSE_UNIVERSE.keys()), analysis_end='2024-12-31'
     )
     defense_df = pd.DataFrame([defense_contrib])
-    defense_df.to_csv('D:/etf_rotation_model/reports/v1_3_step6_defense_contribution.csv', index=False)
+    defense_df.to_csv(os.path.join(output_dir, 'v1_3_step6_defense_contribution.csv'), index=False)
 
     # P1-5: 实际佣金（严格截止分析期2024-12-31）
     comm_a = total_commission(result_a['trades_df'], analysis_end='2024-12-31')
@@ -740,11 +748,11 @@ def main():
 
     # 勾稽汇总
     recon = reconciliation_summary(result_a, result_b, result_c, comm_a, comm_b, comm_c)
-    recon.to_csv('D:/etf_rotation_model/reports/v1_3_step6_reconciliation.csv', index=False)
+    recon.to_csv(os.path.join(output_dir, 'v1_3_step6_reconciliation.csv'), index=False)
 
     # 生成报告
     generate_report(period_results, slippage_results, loyo, switch_df, regimes, regime_summary,
-                    result_a, result_b, result_c, annual, defense_contrib, comm_a, comm_b, comm_c)
+                    result_a, result_b, result_c, annual, defense_contrib, comm_a, comm_b, comm_c, output_dir=output_dir)
 
     print("\n实验完成。")
     return {
@@ -755,7 +763,7 @@ def main():
     }
 
 
-def generate_report(period_results, slippage_results, loyo, switch_df, regimes, regime_summary, result_a, result_b, result_c, annual, defense_contrib, comm_a, comm_b, comm_c):
+def generate_report(period_results, slippage_results, loyo, switch_df, regimes, regime_summary, result_a, result_b, result_c, annual, defense_contrib, comm_a, comm_b, comm_c, output_dir='D:/etf_rotation_model/reports'):
     """生成实验报告。"""
     lines = []
     lines.append("# v1.3 Step 6: 基于市场状态的动态第5槽位 A/B 实验")
@@ -882,12 +890,12 @@ def generate_report(period_results, slippage_results, loyo, switch_df, regimes, 
     lines.append(f"7. 防御ETF分别贡献（P1-4修正：mark-to-market，含期末未平仓估值）：")
     lines.append(f"   计算口径：总PnL = 总卖出收入 + 期末市值 - 总买入成本 - 总佣金")
     lines.append(f"   黄金ETF(518880.SH)：")
-    lines.append(f"     A: 买入成本={defense_contrib['gold_buy_a']:,.2f}, 卖出收入={defense_contrib['gold_sell_a']:,.2f}, 佣金={defense_contrib['gold_comm_a']:,.2f}, 期末市值={defense_contrib['gold_mv_a']:,.2f}, PnL={defense_contrib['gold_pnl_a']:,.2f}")
-    lines.append(f"     C: 买入成本={defense_contrib['gold_buy_c']:,.2f}, 卖出收入={defense_contrib['gold_sell_c']:,.2f}, 佣金={defense_contrib['gold_comm_c']:,.2f}, 期末市值={defense_contrib['gold_mv_c']:,.2f}, PnL={defense_contrib['gold_pnl_c']:,.2f}")
+    lines.append(f"     A: 买入成本={defense_contrib['gold_buy_a']:,.2f}, 卖出收入={defense_contrib['gold_sell_a']:,.2f}, 佣金={defense_contrib['gold_comm_a']:,.2f}, 期末市值={defense_contrib['gold_final_position_mv_a']:,.2f}, PnL={defense_contrib['gold_pnl_a']:,.2f}")
+    lines.append(f"     C: 买入成本={defense_contrib['gold_buy_c']:,.2f}, 卖出收入={defense_contrib['gold_sell_c']:,.2f}, 佣金={defense_contrib['gold_comm_c']:,.2f}, 期末市值={defense_contrib['gold_final_position_mv_c']:,.2f}, PnL={defense_contrib['gold_pnl_c']:,.2f}")
     lines.append(f"     C-A={defense_contrib['gold_diff']:,.2f}")
     lines.append(f"   国债ETF(511010.SH)：")
-    lines.append(f"     A: 买入成本={defense_contrib['bond_buy_a']:,.2f}, 卖出收入={defense_contrib['bond_sell_a']:,.2f}, 佣金={defense_contrib['bond_comm_a']:,.2f}, 期末市值={defense_contrib['bond_mv_a']:,.2f}, PnL={defense_contrib['bond_pnl_a']:,.2f}")
-    lines.append(f"     C: 买入成本={defense_contrib['bond_buy_c']:,.2f}, 卖出收入={defense_contrib['bond_sell_c']:,.2f}, 佣金={defense_contrib['bond_comm_c']:,.2f}, 期末市值={defense_contrib['bond_mv_c']:,.2f}, PnL={defense_contrib['bond_pnl_c']:,.2f}")
+    lines.append(f"     A: 买入成本={defense_contrib['bond_buy_a']:,.2f}, 卖出收入={defense_contrib['bond_sell_a']:,.2f}, 佣金={defense_contrib['bond_comm_a']:,.2f}, 期末市值={defense_contrib['bond_final_position_mv_a']:,.2f}, PnL={defense_contrib['bond_pnl_a']:,.2f}")
+    lines.append(f"     C: 买入成本={defense_contrib['bond_buy_c']:,.2f}, 卖出收入={defense_contrib['bond_sell_c']:,.2f}, 佣金={defense_contrib['bond_comm_c']:,.2f}, 期末市值={defense_contrib['bond_final_position_mv_c']:,.2f}, PnL={defense_contrib['bond_pnl_c']:,.2f}")
     lines.append(f"     C-A={defense_contrib['bond_diff']:,.2f}")
     
     # P1-5: 实际佣金
@@ -928,17 +936,22 @@ def generate_report(period_results, slippage_results, loyo, switch_df, regimes, 
     lines.append("- `reports/v1_3_step6_regime_switches.csv` — 状态切换明细")
     lines.append("- `reports/v1_3_step6_mechanism_attr.csv` — 逐日机制归因")
     lines.append("- `reports/v1_3_step6_regime_summary.csv` — 状态汇总")
-    lines.append("- `reports/v1_3_step6_annual_contribution.csv` — 自然年C-A贡献（P1-3）")
+    lines.append("- `reports/v1_3_step6_annual_contribution.csv` — 自然年C-A贡献（P1-3）：每个自然年A和C各自完整年度的收益差")
+    lines.append("- `reports/v1_3_step6_loyo.csv` — Leave-One-Year-Out结果（标准5）：剔除某年后其余年份组合的总收益差。与自然年贡献定义不同，不要求正负方向逐年一致。")
     lines.append("- `reports/v1_3_step6_defense_contribution.csv` — 防御ETF贡献（P1-4）")
     lines.append("- `reports/v1_3_step6_reconciliation.csv` — 勾稽验证汇总（P1-6）")
     lines.append("")
 
     report = "\n".join(lines)
-    with open('D:/etf_rotation_model/reports/v1_3_step6_dynamic_fifth_slot_ab.md', 'w', encoding='utf-8') as f:
+    with open(os.path.join(output_dir, 'v1_3_step6_dynamic_fifth_slot_ab.md'), 'w', encoding='utf-8') as f:
         f.write(report)
 
-    print("报告已保存: D:/etf_rotation_model/reports/v1_3_step6_dynamic_fifth_slot_ab.md")
+    print(f"报告已保存: {os.path.join(output_dir, 'v1_3_step6_dynamic_fifth_slot_ab.md')}")
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='v1.3 Step 6: 动态第5槽位 A/B 实验')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='输出目录，默认 reports')
+    args = parser.parse_args()
+    main(output_dir=args.output_dir)
