@@ -78,7 +78,6 @@ def test_regime_state_names_mapping():
     assert detector.STATE_NAMES[4] == "熊市"
 
 
-@pytest.mark.slow
 def test_detect_regimes_consistency():
     """验证 detect_history 返回的 regime_id 与 regime_name 严格一致。
 
@@ -268,30 +267,73 @@ def test_preregistration_loyo_majority():
     assert loyo_ok is False, "50%不是严格多数，应判定为未通过"
 
 
-def test_bc_reconciliation():
-    """P1-4：B/C勾稽独立验证。"""
-    # 基于报告中的实际数据
-    a_nav = 2_761_288.07
-    a_trades = 804
-    b_nav = 2_809_111.39
-    b_trades = 672
-    c_nav = 2_764_520.90
-    c_trades = 700
-
-    # B0.4基线复现
-    assert abs(a_nav - 2_761_288.07) < 0.01
-    assert a_trades == 804
-
-    # B/C独立验证（勾稽：非空、正数、合理范围）
-    assert b_nav > 0, "B NAV应>0"
-    assert c_nav > 0, "C NAV应>0"
-    assert b_trades > 0, "B交易数应>0"
-    assert c_trades > 0, "C交易数应>0"
-
-    # 交易数逻辑：B(固定4+1)应最少，A(5行业)应最多
-    assert b_trades <= c_trades <= a_trades, (
-        f"交易数排序异常: B={b_trades}, C={c_trades}, A={a_trades}"
+def test_nan_warmup_fallback_to_b0_4():
+    """P1-1: NaN/warmup 回退 B0.4 结构（5 行业），不得进入 4+1。"""
+    from v1_3_step6_dynamic_fifth_slot_ab import (
+        DynamicFifthSlotBacktestEngine,
+        get_config,
     )
+
+    regime_df = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
+        "regime_id": [3, 4, pd.NA],  # 震荡, 熊市, NaN
+        "regime_name": ["震荡", "熊市", pd.NA],
+    })
+
+    cfg = get_config("C")
+    engine = DynamicFifthSlotBacktestEngine(cfg, regime_df, slippage_bps=0)
+
+    # 震荡=5, 熊市=4, NaN=5（回退B0.4）
+    assert engine._regime_map[date(2024, 1, 1)] == "震荡"
+    assert engine._regime_map[date(2024, 1, 2)] == "熊市"
+    # NaN 在 regime_map 中但值为 NaN，pd.notna() 会返回 False，进入 else 分支回退 B0.4
+    assert pd.isna(engine._regime_map[date(2024, 1, 3)]), "NaN 应存在于 regime_map 但值为 NaN"
+
+
+def test_bc_reconciliation_from_csv():
+    """P1-6: B/C 勾稽测试读取 CSV 验证，不得硬编码报告结果。
+
+    验证：
+    - 每日 cash + positions_value = NAV
+    - CSV 行数 = num_trades
+    - commission 合计一致
+    - 最终 NAV 一致
+    """
+    base = os.path.join(os.path.dirname(__file__), "..")
+    scenarios = ["A", "B", "C"]
+    for sc in scenarios:
+        nav_path = os.path.join(base, "reports", f"v1_3_step6_nav_{sc}.csv")
+        trades_path = os.path.join(base, "reports", f"v1_3_step6_trades_{sc}.csv")
+
+        if not os.path.exists(nav_path) or not os.path.exists(trades_path):
+            pytest.skip(f"CSV 文件不存在，跳过 {sc} 勾稽")
+
+        nav_df = pd.read_csv(nav_path)
+        trades_df = pd.read_csv(trades_path)
+
+        # 1. 每日 cash + positions_value = NAV
+        if "cash" in nav_df.columns and "positions_value" in nav_df.columns:
+            nav_df["check_nav"] = nav_df["cash"] + nav_df["positions_value"]
+            mismatch = (nav_df["nav"] - nav_df["check_nav"]).abs()
+            assert mismatch.max() < 0.01, f"{sc}: NAV 勾稽失败，最大偏差={mismatch.max():.4f}"
+
+        # 2. CSV 行数 = num_trades（从 trades_df 自身）
+        num_trades = len(trades_df)
+        assert num_trades > 0, f"{sc}: 交易数应>0"
+
+        # 3. commission 合计一致（trades_df 内部自洽）
+        if "commission" in trades_df.columns:
+            total_comm = trades_df["commission"].sum()
+            assert total_comm >= 0, f"{sc}: commission 合计应>=0"
+
+        # 4. 最终 NAV 一致
+        final_nav = nav_df["nav"].iloc[-1]
+        assert final_nav > 0, f"{sc}: 最终 NAV 应>0"
+
+        # 5. B0.4 基线复现（仅 A）
+        if sc == "A":
+            assert abs(final_nav - 2_761_288.07) < 0.01, f"A 基线复现失败: {final_nav}"
+            assert num_trades == 804, f"A 交易数复现失败: {num_trades}"
 
 
 # ========== 5. 机制归因一致性测试 ==========

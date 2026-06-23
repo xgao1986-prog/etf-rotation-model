@@ -107,12 +107,18 @@ class DynamicFifthSlotBacktestEngine(BacktestEngine):
                 self.cfg['total_max_holdings'] = 5
                 self.cfg['stock_max_holdings'] = 5
                 self.cfg['defense_max_holdings'] = 2
-            else:
-                # 其他（含NaN/warmup）→ 4+1结构
+            elif pd.notna(regime):
+                # 其他明确状态（强牛/弱牛/熊市）→ 4+1结构
                 self.cfg['max_holdings'] = 4
                 self.cfg['total_max_holdings'] = 5
                 self.cfg['stock_max_holdings'] = 4
                 self.cfg['defense_max_holdings'] = 1
+            else:
+                # NaN/warmup → 回退B0.4结构（5行业），不得进入4+1
+                self.cfg['max_holdings'] = 5
+                self.cfg['total_max_holdings'] = 5
+                self.cfg['stock_max_holdings'] = 5
+                self.cfg['defense_max_holdings'] = 2
 
             # 调用父类实现
             return super()._rebalance_v2(
@@ -266,10 +272,10 @@ def analyze_period_diff(nav_a, trades_a, nav_b, trades_b, nav_c, trades_c, perio
     }
 
 
-def leave_one_year_out(nav_a, nav_b, nav_c, trades_a, trades_b, trades_c):
-    """leave-one-year-out：每次剔除一个完整年份，重新计算A/B/C总体比较。
+def leave_one_year_out(nav_a, nav_b, nav_c, analysis_end='2024-12-31'):
+    """leave-one-year-out：仅分析期（2019-2024）使用，每次剔除一个完整年份。
     
-    正确做法：计算全年日收益率的乘积，剔除目标年份。
+    观察期（2025-2026）仅展示，不用于规则选择，不得混入LOO。
     """
     nav_a = nav_a.copy()
     nav_a['date'] = pd.to_datetime(nav_a['date'])
@@ -277,6 +283,12 @@ def leave_one_year_out(nav_a, nav_b, nav_c, trades_a, trades_b, trades_c):
     nav_b['date'] = pd.to_datetime(nav_b['date'])
     nav_c = nav_c.copy()
     nav_c['date'] = pd.to_datetime(nav_c['date'])
+
+    # 限制在分析期（2019-2024）
+    analysis_end_dt = pd.to_datetime(analysis_end)
+    nav_a = nav_a[nav_a['date'] <= analysis_end_dt].copy()
+    nav_b = nav_b[nav_b['date'] <= analysis_end_dt].copy()
+    nav_c = nav_c[nav_c['date'] <= analysis_end_dt].copy()
 
     # 计算日收益率
     for nav in [nav_a, nav_b, nav_c]:
@@ -286,7 +298,6 @@ def leave_one_year_out(nav_a, nav_b, nav_c, trades_a, trades_b, trades_c):
     results = []
 
     for exclude_year in years:
-        # 筛选非目标年份的数据
         a_sub = nav_a[nav_a['date'].dt.year != exclude_year].copy()
         b_sub = nav_b[nav_b['date'].dt.year != exclude_year].copy()
         c_sub = nav_c[nav_c['date'].dt.year != exclude_year].copy()
@@ -294,7 +305,6 @@ def leave_one_year_out(nav_a, nav_b, nav_c, trades_a, trades_b, trades_c):
         if len(a_sub) < 2 or len(b_sub) < 2 or len(c_sub) < 2:
             continue
 
-        # 使用日收益率乘积计算总收益（正确剔除年份）
         ret_a = (1 + a_sub['ret'].fillna(0)).prod() - 1
         ret_b = (1 + b_sub['ret'].fillna(0)).prod() - 1
         ret_c = (1 + c_sub['ret'].fillna(0)).prod() - 1
@@ -310,6 +320,93 @@ def leave_one_year_out(nav_a, nav_b, nav_c, trades_a, trades_b, trades_c):
         })
 
     return results
+
+
+def annual_contribution(nav_a, nav_c):
+    """P1-3: 直接计算每个自然年的C-A收益差，不是剔除后的差异。"""
+    nav_a = nav_a.copy()
+    nav_a['date'] = pd.to_datetime(nav_a['date'])
+    nav_c = nav_c.copy()
+    nav_c['date'] = pd.to_datetime(nav_c['date'])
+    nav_a['ret'] = nav_a['nav'].pct_change()
+    nav_c['ret'] = nav_c['nav'].pct_change()
+
+    years = sorted(nav_a['date'].dt.year.unique())
+    results = []
+    for year in years:
+        a_yr = nav_a[nav_a['date'].dt.year == year]
+        c_yr = nav_c[nav_c['date'].dt.year == year]
+        if len(a_yr) < 2 or len(c_yr) < 2:
+            continue
+        ret_a = (1 + a_yr['ret'].fillna(0)).prod() - 1
+        ret_c = (1 + c_yr['ret'].fillna(0)).prod() - 1
+        results.append({
+            'year': year,
+            'a_ret': ret_a,
+            'c_ret': ret_c,
+            'diff_ca': ret_c - ret_a,
+        })
+    return results
+
+
+def defense_etf_contribution(nav_a, nav_c, trades_a, trades_c, defense_tickers):
+    """P1-4: 分别统计黄金ETF和国债ETF对C-A的贡献。"""
+    # 逐日防御持仓价值
+    a = nav_a.copy()
+    a['date'] = pd.to_datetime(a['date'])
+    c = nav_c.copy()
+    c['date'] = pd.to_datetime(c['date'])
+
+    merged = pd.merge(
+        a[['date', 'nav', 'defense_value']],
+        c[['date', 'nav', 'defense_value']],
+        on='date', suffixes=('_a', '_c')
+    )
+    merged['ret_a'] = merged['nav_a'].pct_change()
+    merged['ret_c'] = merged['nav_c'].pct_change()
+
+    # 黄金/国债贡献（防御持仓价值差异 × 日收益差近似）
+    # 更精确做法：从trades_df中提取每笔黄金/国债交易的盈亏
+    ta = trades_a.copy()
+    tc = trades_c.copy()
+    ta['date'] = pd.to_datetime(ta['date'])
+    tc['date'] = pd.to_datetime(tc['date'])
+
+    def ticker_comm(tdf, tickers):
+        return tdf[tdf['ticker'].isin(tickers)]['commission'].sum()
+
+    def ticker_pnl(tdf, tickers):
+        # BUY=负成本，SELL=正收入，STOP_LOSS=正收入
+        buy = tdf[(tdf['ticker'].isin(tickers)) & (tdf['action'] == 'BUY')]
+        sell = tdf[(tdf['ticker'].isin(tickers)) & (tdf['action'].isin(['SELL', 'STOP_LOSS']))]
+        # 简化：BUY的shares * price，SELL的shares * price
+        buy_cost = (buy['shares'] * buy['price']).sum() if not buy.empty else 0
+        sell_rev = (sell['shares'] * sell['price']).sum() if not sell.empty else 0
+        return sell_rev - buy_cost
+
+    gold = ['518880.SH']
+    bond = ['511010.SH']
+
+    gold_pnl_a = ticker_pnl(ta, gold)
+    gold_pnl_c = ticker_pnl(tc, gold)
+    bond_pnl_a = ticker_pnl(ta, bond)
+    bond_pnl_c = ticker_pnl(tc, bond)
+
+    return {
+        'gold_diff': gold_pnl_c - gold_pnl_a,
+        'bond_diff': bond_pnl_c - bond_pnl_a,
+        'gold_pnl_a': gold_pnl_a,
+        'gold_pnl_c': gold_pnl_c,
+        'bond_pnl_a': bond_pnl_a,
+        'bond_pnl_c': bond_pnl_c,
+    }
+
+
+def total_commission(trades_df):
+    """P1-5: 从trades_df实际commission求和。"""
+    if trades_df.empty or 'commission' not in trades_df.columns:
+        return 0.0
+    return trades_df['commission'].sum()
 
 
 def analyze_mechanism(nav_a, nav_c, trades_a, trades_c, regime_df, market_df):
@@ -544,10 +641,9 @@ def main():
             'c_trades': r_c['num_trades'],
         })
 
-    # leave-one-year-out
-    print("\n--- leave-one-year-out ---")
-    loyo = leave_one_year_out(result_a['nav_df'], result_b['nav_df'], result_c['nav_df'],
-                              result_a['trades_df'], result_b['trades_df'], result_c['trades_df'])
+    # leave-one-year-out（仅分析期2019-2024，P1修正）
+    print("\n--- leave-one-year-out (分析期2019-2024) ---")
+    loyo = leave_one_year_out(result_a['nav_df'], result_b['nav_df'], result_c['nav_df'])
 
     # 状态切换分析
     print("\n--- 状态切换分析 ---")
@@ -564,8 +660,27 @@ def main():
     attr_df.to_csv('D:/etf_rotation_model/reports/v1_3_step6_mechanism_attr.csv', index=False)
     regime_summary.to_csv('D:/etf_rotation_model/reports/v1_3_step6_regime_summary.csv', index=False)
 
+    # P1-3: 自然年C-A贡献
+    annual = annual_contribution(result_a['nav_df'], result_c['nav_df'])
+    annual_df = pd.DataFrame(annual)
+    annual_df.to_csv('D:/etf_rotation_model/reports/v1_3_step6_annual_contribution.csv', index=False)
+
+    # P1-4: 防御ETF贡献
+    defense_contrib = defense_etf_contribution(
+        result_a['nav_df'], result_c['nav_df'],
+        result_a['trades_df'], result_c['trades_df'],
+        set(DEFENSE_UNIVERSE.keys())
+    )
+
+    # P1-5: 实际佣金
+    comm_a = total_commission(result_a['trades_df'])
+    comm_b = total_commission(result_b['trades_df'])
+    comm_c = total_commission(result_c['trades_df'])
+    print(f"佣金: A={comm_a:,.2f}, B={comm_b:,.2f}, C={comm_c:,.2f}")
+
     # 生成报告
-    generate_report(period_results, slippage_results, loyo, switch_df, regimes, regime_summary, result_a, result_b, result_c)
+    generate_report(period_results, slippage_results, loyo, switch_df, regimes, regime_summary,
+                    result_a, result_b, result_c, annual, defense_contrib, comm_a, comm_b, comm_c)
 
     print("\n实验完成。")
     return {
@@ -576,7 +691,7 @@ def main():
     }
 
 
-def generate_report(period_results, slippage_results, loyo, switch_df, regimes, regime_summary, result_a, result_b, result_c):
+def generate_report(period_results, slippage_results, loyo, switch_df, regimes, regime_summary, result_a, result_b, result_c, annual, defense_contrib, comm_a, comm_b, comm_c):
     """生成实验报告。"""
     lines = []
     lines.append("# v1.3 Step 6: 基于市场状态的动态第5槽位 A/B 实验")
@@ -589,12 +704,12 @@ def generate_report(period_results, slippage_results, loyo, switch_df, regimes, 
     lines.append("")
     lines.append("- **A：B0.4 冻结基线** — 最多5只行业ETF，防御按原有规则")
     lines.append("- **B：固定 4+1** — 行业最多4只，第5槽位由防御填充，无合格防御则现金")
-    lines.append("- **C：动态第5槽位** — 震荡市=5行业（同A），其他状态=4+1防御（同B）")
+    lines.append("- **C：动态第5槽位** — 震荡市=5行业（同A），其他状态=4+1防御（同B）；NaN/warmup回退B0.4（5行业）")
     lines.append("")
     lines.append("### 约束")
     lines.append("")
     lines.append("- 未修改 ETF 池、评分、阈值、止损、调仓日、执行价格、前4名规则")
-    lines.append("- T日收盘状态，T+1开盘执行")
+    lines.append("- T日收盘状态，T+1开盘执行；NaN/warmup回退B0.4（5行业）")
     lines.append("- 禁止未来函数")
     lines.append("- 固定规则后未继续调参")
     lines.append("")
@@ -626,7 +741,7 @@ def generate_report(period_results, slippage_results, loyo, switch_df, regimes, 
         lines.append(f"| {r['bps']}bp | {r['a_ret']:.2%} | {r['b_ret']:.2%} | {r['c_ret']:.2%} | "
                     f"{r['b_ret']-r['a_ret']:+.2%} | {r['c_ret']-r['a_ret']:+.2%} |")
     lines.append("")
-    lines.append("## Leave-One-Year-Out")
+    lines.append("## Leave-One-Year-Out（分析期2019-2024）")
     lines.append("")
     lines.append(f"| 剔除年份 | A 收益 | B 收益 | C 收益 | B-A | C-A |")
     lines.append(f"|----------|--------|--------|--------|-----|-----|")
@@ -685,26 +800,32 @@ def generate_report(period_results, slippage_results, loyo, switch_df, regimes, 
     lines.append("### 标准6-8补充评估")
     lines.append("")
     
-    # 6. 年度贡献分析
-    if loyo:
-        max_single_year = max(abs(r['diff_ca']) for r in loyo)
-        max_year = next(r['exclude_year'] for r in loyo if abs(r['diff_ca']) == max_single_year)
-        total_diff = sum(r['diff_ca'] for r in loyo) / len(loyo)  # 平均年度差
-        lines.append(f"6. 优势不能主要来自单一年份: 最大单年贡献=剔除{max_year}年({max_single_year:+.2%})，平均年度差={total_diff:+.2%}。")
-        if max_single_year > abs(total_diff) * 2:
+    # 6. 自然年C-A贡献（P1-3修正：直接计算每个自然年差异）
+    if annual:
+        lines.append("6. 自然年C-A贡献（直接计算，非剔除后差异）：")
+        for r in annual:
+            lines.append(f"   {r['year']}: A={r['a_ret']:.2%}, C={r['c_ret']:.2%}, C-A={r['diff_ca']:+.2%}")
+        max_year = max(annual, key=lambda x: abs(x['diff_ca']))
+        avg_diff = sum(r['diff_ca'] for r in annual) / len(annual)
+        lines.append(f"   最大偏离年份={max_year['year']}({max_year['diff_ca']:+.2%})，平均年差={avg_diff:+.2%}")
+        if abs(max_year['diff_ca']) > abs(avg_diff) * 2:
             lines.append("   ⚠️ 单年贡献显著高于平均，存在集中风险。")
         else:
             lines.append("   ✅ 单年贡献未显著偏离平均。")
     
-    # 7. 状态切换佣金分析
-    if switch_df is not None and not switch_df.empty:
-        trade_diff = result_c['num_trades'] - result_a['num_trades']
-        trade_diff_desc = f"多{trade_diff}" if trade_diff > 0 else f"少{abs(trade_diff)}"
-        lines.append(f"7. 状态切换佣金: 切换次数={len(switch_df)}，C比A{trade_diff_desc}笔交易。")
-        c_extra_comm = trade_diff * 5  # 最低佣金5元
-        lines.append(f"   额外佣金估算约{c_extra_comm:.0f}元，相对NAV改善可忽略。")
+    # P1-4: 防御ETF贡献
+    lines.append("")
+    lines.append(f"7. 防御ETF分别贡献（P1-4修正）：")
+    lines.append(f"   黄金ETF: C-A={defense_contrib['gold_diff']:,.2f}元 (A={defense_contrib['gold_pnl_a']:,.2f}, C={defense_contrib['gold_pnl_c']:,.2f})")
+    lines.append(f"   国债ETF: C-A={defense_contrib['bond_diff']:,.2f}元 (A={defense_contrib['bond_pnl_a']:,.2f}, C={defense_contrib['bond_pnl_c']:,.2f})")
     
-    # 8. 勾稽验证（P1修正：A/B/C均验证）
+    # P1-5: 实际佣金
+    lines.append("")
+    lines.append(f"8. 佣金（P1-5修正：从trades_df实际commission求和）：")
+    lines.append(f"   A={comm_a:,.2f}, B={comm_b:,.2f}, C={comm_c:,.2f}")
+    lines.append(f"   C-A={comm_c-comm_a:,.2f}, B-A={comm_b-comm_a:,.2f}")
+    
+    # 勾稽验证（P1-4：A/B/C均验证）
     lines.append("")
     lines.append("### 勾稽验证")
     lines.append(f"- 方案A: NAV={result_a['nav_df']['nav'].iloc[-1]:,.2f}, 交易={result_a['num_trades']} ✅")
@@ -736,6 +857,7 @@ def generate_report(period_results, slippage_results, loyo, switch_df, regimes, 
     lines.append("- `reports/v1_3_step6_regime_switches.csv` — 状态切换明细")
     lines.append("- `reports/v1_3_step6_mechanism_attr.csv` — 逐日机制归因")
     lines.append("- `reports/v1_3_step6_regime_summary.csv` — 状态汇总")
+    lines.append("- `reports/v1_3_step6_annual_contribution.csv` — 自然年C-A贡献（P1-3）")
     lines.append("")
 
     report = "\n".join(lines)

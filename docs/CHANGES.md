@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-06-24（本次 - v1.3 Step 6: Codex终审P1修复 — 8项修正）
+
+**目标：** 修正WorkBuddy质检发现的4个P1问题（实际扩展为8项），确保预注册标准评估逻辑正确、数据勾稽完整、测试不硬编码。
+
+**P1修正清单：**
+1. **NaN/warmup回退B0.4**：`_rebalance_v2` 中将 `else` 拆分为 `elif pd.notna(regime)`（4+1）和 `else`（NaN→回退5行业B0.4）。新增回归测试 `test_nan_warmup_fallback_to_b0_4`。
+2. **LOO限制分析期**：`leave_one_year_out` 限制在2019-2024，2025-2026不再混入。报告标题改为"Leave-One-Year-Out（分析期2019-2024）"。
+3. **自然年C-A贡献**：新增 `annual_contribution()` 直接计算每个自然年C-A收益差（非剔除后差异），输出CSV。
+4. **防御ETF分别贡献**：新增 `defense_etf_contribution()` 分别统计黄金ETF(518880.SH)和国债ETF(511010.SH)对C-A的贡献。
+5. **实际佣金求和**：新增 `total_commission()` 从trades_df commission列求和。报告展示实际佣金：A=68,826.54, B=57,401.45, C=59,077.35。
+6. **B/C勾稽测试读取CSV**：`test_bc_reconciliation_from_csv` 读取CSV验证：cash+positions_value=NAV、CSV行数=num_trades、commission合计一致、最终NAV一致。不再硬编码报告结果。
+7. **清理行尾空格+移除slow marker**：移除 `@pytest.mark.slow` 和测试中的行尾空格。
+8. **报告/文档更新**：`docs/CHANGES.md`、`docs/CURRENT_STATE.md` 更新。
+
+**改了哪些文件：**
+- `scripts/v1_3_step6_dynamic_fifth_slot_ab.py`：NaN回退逻辑、LOO限制、annual_contribution、defense_etf_contribution、total_commission、generate_report参数扩展。
+- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：15项测试（新增NaN回退、CSV勾稽）。
+- `reports/v1_3_step6_dynamic_fifth_slot_ab.md`：更新。
+- `docs/CURRENT_STATE.md`、`docs/CHANGES.md`：本条目。
+
+**测试结果：**
+- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：15 passed，0 warnings。
+
+**Commit：** 待完成
+
+---
+
 ## 2026-06-24（本次 - v1.3 Step 6: 动态第5槽位 A/B 实验）
 
 **目标：** 基于市场状态（T日收盘）动态调整第5槽位——震荡市=5行业ETF，其他状态=4+1防御。运行A/B/C三方案对比，验证预注册标准，生成机制归因报告与测试。

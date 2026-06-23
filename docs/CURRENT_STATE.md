@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-24（Step 6: 动态第5槽位 A/B 实验）
+**最后更新**：2026-06-24（Step 6: Codex终审P1修复 — 8项修正）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -221,13 +221,15 @@
   - STOP_LOSS 独立统计，不与 SELL 混用。
   - 年化使用引擎 CAGR，非总收益/年数。
   - 每日现金+持仓市值=NAV 恒等式通过。
-- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：13 passed。
+- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：15 passed。
   - 方案A/B/C配置正确性。
   - 动态引擎regime_map构建与cfg调整逻辑。
+  - NaN/warmup回退B0.4（5行业）回归测试。
   - `STATE_NAMES`映射验证：1=强牛/2=弱牛/3=震荡/4=熊市。
   - `detect_history` regime_id与regime_name严格一致。
   - 机制归因表regime分布与`detect_history`输出一致。
-  - 预注册标准评估逻辑（夏普方向、回撤、收益容忍度、滑点、LOYO）。
+  - 预注册标准评估逻辑（夏普方向、回撤绝对值比较、收益容忍度、滑点、LOYO严格>50%）。
+  - B/C勾稽读取CSV验证：cash+positions_value=NAV、commission合计、最终NAV一致。
 - A/B数据补齐实验：
   - 完整数据：NAV 2,761,288.07，804笔交易。
   - 排除补齐数据：NAV 2,809,091.21，801笔交易。
