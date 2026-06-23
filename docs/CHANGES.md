@@ -5,6 +5,46 @@
 
 ---
 
+## 2026-06-24（本次 - v1.3 Step 7: 组合集中度与资金去向正交拆解）
+
+**目标：** 固定组合结构比较：A(5×20%)、B(4×20%+现金)、C(4×20%+防御)、D(4×25%)，不引入市场状态切换，不制定动态规则。
+
+**核心结果：**
+- 全期间：A=176.13%, B=152.97%, C=180.91%, D=203.08%
+- D-A = +26.96%, D-B = +50.12%, D-C = +22.17%
+- 研究期：A=34.69%, B=31.61%, C=34.94%, D=39.24%
+- 验证期：A=27.67%, B=22.50%, C=25.06%, D=27.52%
+- LOO(分析期2019-2024): D>A 5/6=83.3% > 50% ✅
+
+**预注册验收标准评估：**
+1. 夏普方向一致：研究期D>A(0.62 vs 0.60)，验证期D<A(0.71 vs 0.75) → ❌ 不一致
+2. 验证期收益D-A=-0.15% ≥ -2% → ✅
+3. 验证期回撤：D绝对回撤-20.00% vs A-17.75%，恶化+2.25pp → ❌
+4. 滑点方向：所有滑点下D>A → ✅
+5. LOO严格多数：D>A 5/6=83.3% > 50% → ✅
+6. 单年驱动：2020年D<A(-8.24%)，其他5年D>A，存在集中风险 ⚠️
+7. 实际Top4权重：D的max_position_per_etf=25% vs A=20%，但需验证实际权重是否提升
+
+**结论：预注册标准未全部通过，D只能判定为机制观察候选，不得升级B0.4。**
+
+**改了哪些文件：**
+- `scripts/v1_3_step7_portfolio_orthogonal_ab.py`：实验脚本（含四个方案、LOO、annual、defense贡献、--output-dir）
+- `scripts/validate_v1_3_step7_artifacts.py`：验证器（勾稽、佣金、shares、LOO年份、reconciliation）
+- `tests/test_v1_3_step7_portfolio_orthogonal.py`：8项测试（配置、LOO、勾稽、CSV存在）
+- `reports/v1_3_step7_portfolio_orthogonal.md`：实验报告
+- 12份CSV数据文件（nav/trades A/B/C/D、loyo、annual、defense、reconciliation）
+- `docs/CURRENT_STATE.md`、`docs/CHANGES.md`：本条目
+
+**测试结果：**
+- `scripts/v1_3_step7_portfolio_orthogonal_ab.py`：py_compile passed，运行成功
+- `scripts/validate_v1_3_step7_artifacts.py`：全部验证通过
+- `tests/test_v1_3_step7_portfolio_orthogonal.py`：8 passed
+- `tests/test_b0_4_slippage.py`：8 passed（A基线复现NAV=2,761,288.07, 804笔）
+
+**Commit：** 待完成
+
+---
+
 ## 2026-06-24（本次 - v1.3 Step 6: Codex终审最小修复 — LOO真实数据+证据收口）
 
 **目标：** 修复唯一真实P1：LOO测试必须读取新鲜回测结果，不得硬编码。新增loyo.csv，强化证据验证，明确annual_contribution与LOO定义差异。

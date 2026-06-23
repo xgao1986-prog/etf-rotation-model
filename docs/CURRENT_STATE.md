@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-24（Step 6: Codex终审最小修复 — LOO真实数据+证据收口）
+**最后更新**：2026-06-24（Step 7: 组合集中度与资金去向正交拆解）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -111,6 +111,29 @@
   - **结论**：C只能判定为机制观察候选，不得升级B0.4。
   - **LOO与annual定义区分**：`annual_contribution`是每个自然年的C-A收益差；`loyo`是剔除某年后其余年份组合的总收益差。两者定义不同，不要求正负方向逐年一致。详见 `reports/v1_3_step6_annual_contribution.csv` 和 `reports/v1_3_step6_loyo.csv`。
   - 交付物：`scripts/v1_3_step6_dynamic_fifth_slot_ab.py`（含NaN回退、mark-to-market防御贡献、--output-dir参数）、`reports/v1_3_step6_dynamic_fifth_slot_ab.md`（新鲜重新运行）、12份CSV数据文件（含loyo、annual_contribution、defense_contribution、reconciliation）、`tests/test_v1_3_step6_dynamic_fifth_slot.py`（16项全部通过，含CSV勾稽FAIL不skip、生产佣金公式验证、LOO读取CSV调用生产函数）。
+  - 不修改B0.4策略、参数或冻结基线。
+- **v1.3 Step 7: 组合集中度与资金去向正交拆解 已完成**：
+  - 四个方案：A(5×20% B0.4对照)、B(4×20%+现金 关闭防御)、C(4×20%+防御 防御填充)、D(4×25% 集中度提升)。
+  - 全期间：A=176.13%, B=152.97%, C=180.91%, D=203.08%。
+  - 研究期(2019-2022)：A=34.69%, B=31.61%, C=34.94%, D=39.24%。
+  - 验证期(2023-2024)：A=27.67%, B=22.50%, C=25.06%, D=27.52%。
+  - 观察期(2025-2026)：A=64.19%, B=60.46%, C=70.19%, D=75.53%。仅展示，不参与PASS/FAIL判断。
+  - **预注册验收标准未全部通过**：
+    - 夏普方向不一致（研究期D>A 0.62 vs 0.60，验证期D<A 0.71 vs 0.75）❌
+    - 验证期收益D-A=-0.15% ≥ -2% → ✅
+    - 验证期回撤：D绝对回撤-20.00% vs A-17.75%，恶化+2.25pp → ❌
+    - 滑点方向：所有滑点下D>A → ✅
+    - leave-one-year-out(分析期2019-2024): D>A 5/6=83.3% > 50% → ✅
+    - 单年驱动：2020年D<A(-8.24%)，其他5年D>A，存在集中风险 ⚠️
+  - **归因关系**：
+    - B-A：删除第5名行业+降低敞口 → -23.16%（全期间）
+    - C-B：防御资产相对现金 → +27.94%（全期间）
+    - D-B：集中度价值（4×25% vs 4×20%+现金）→ +50.12%（全期间）
+    - D-A：删除第5名并集中Top4 → +26.96%（全期间）
+  - **防御ETF贡献（C-B，mark-to-market）**：详见 `reports/v1_3_step7_defense_contribution.csv`。
+  - **佣金（截止2024-12-31）**：A=49,409.20, B=33,780.86, C=40,620.21, D=44,083.02
+  - **结论**：预注册标准未全部通过，D只能判定为机制观察候选，不得升级B0.4。
+  - 交付物：`scripts/v1_3_step7_portfolio_orthogonal_ab.py`（含--output-dir）、`scripts/validate_v1_3_step7_artifacts.py`、`tests/test_v1_3_step7_portfolio_orthogonal.py`（8 passed）、`reports/v1_3_step7_portfolio_orthogonal.md`、12份CSV数据文件。
   - 不修改B0.4策略、参数或冻结基线。
 - **v1.3 Step 5: 动态组合广度与集中度可行性诊断 已完成（observer-only）**：
   - **只做observer诊断**：不修改交易规则、不制定动态参数、不回测动态仓位策略。不修改B0.4、生产策略、ETF池、数据库或调仓引擎。
