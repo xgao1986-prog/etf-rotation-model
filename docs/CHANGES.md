@@ -5,6 +5,44 @@
 
 ---
 
+## 2026-06-24（本次 - v1.3 Step 6: 动态第5槽位 A/B 实验）
+
+**目标：** 基于市场状态（T日收盘）动态调整第5槽位——震荡市=5行业ETF，其他状态=4+1防御。运行A/B/C三方案对比，验证预注册标准，生成机制归因报告与测试。
+
+**约束：** 不修改B0.4策略、参数或冻结基线；实验使用独立脚本/开关；2025-2026仅展示不用于规则修改。
+
+**核心实验：**
+1. **三个方案**：A=B0.4冻结基线（5行业），B=固定4+1（行业4+防御1），C=动态第5槽位（震荡=5行业，其他=4+1防御）。
+2. **全期间表现**：A=176.13%, B=180.91%, C=176.45%。C介于A和B之间，更接近A。
+3. **预注册标准评估**：
+   - 夏普方向不一致（研究期C>A 0.63 vs 0.60，验证期C<A 0.74 vs 0.75）❌
+   - 验证期收益C-A=-3.35%，低于-2%容忍度 ❌
+   - 回撤评估逻辑有歧义（C绝对回撤更小但数值差为正）
+   - leave-one-year-out: C>A 4/8=50% ✅
+   - 滑点方向不反转：所有滑点下C>A ✅
+4. **机制归因**：C在震荡市+0.75%（301天），在熊市-6.97%（826天）。熊市拖累超过震荡增益。
+5. **regime标签验证**：`STATE_NAMES`映射为1=强牛/2=弱牛/3=震荡/4=熊市，机制归因表与`detect_history`一致，标签未互换。
+6. **结论**：预注册标准未全部通过，C只能判定为机制观察候选，不得升级B0.4。
+
+**改了哪些文件：**
+- `scripts/v1_3_step6_dynamic_fifth_slot_ab.py`：实验脚本（含DynamicFifthSlotBacktestEngine）。
+- `reports/v1_3_step6_dynamic_fifth_slot_ab.md`：实验报告。
+- `reports/v1_3_step6_nav_*.csv`（A/B/C）：逐日NAV数据。
+- `reports/v1_3_step6_trades_*.csv`（A/B/C）：交易明细。
+- `reports/v1_3_step6_regime_switches.csv`：状态切换明细。
+- `reports/v1_3_step6_mechanism_attr.csv`：逐日机制归因。
+- `reports/v1_3_step6_regime_summary.csv`：状态汇总。
+- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：13项测试。
+- `docs/CURRENT_STATE.md`：更新Step 6结论与状态。
+- `docs/CHANGES.md`：本条目。
+
+**测试结果：**
+- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：13 passed，1 warning（pytest.mark.slow未注册）。
+
+**Commit：** 待完成
+
+---
+
 ## 2026-06-24（本次 - v1.3 Step 5补充: 防御总开关工程修复 + 三维归因分析）
 
 **目标：** 修复 app.py 配置签名缺失字段，补全 backtest.py/rebalance_planner.py 防御模块总开关（defense_enabled），新增三维归因分析回答用户问题，并确保所有测试通过。

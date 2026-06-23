@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-24（Step 5补充: Codex 终审 P1 修复 — cfg_signature 提取 + trailing_stop=None 修复）
+**最后更新**：2026-06-24（Step 6: 动态第5槽位 A/B 实验）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -92,7 +92,23 @@
   - **结论降级**：方案B是**有经济逻辑的后续稳健性候选**，但不能升级基线或认定为候选增强。B在夏普和回撤上有改善，但分析期总收益未超过B0.4，且验证期收益未持续领先。
   - **交付物**：scripts/v1_3_step4_portfolio_structure_ab.py、reports/v1_3_step4_portfolio_structure_ab.md（修正版）、reports/v1_3_step4_portfolio_metrics.csv、reports/v1_3_step4_portfolio_daily_attribution.csv、reports/v1_3_step4_slippage_test.md、scripts/v1_3_step4_slippage_test.py。
   - **不修改 B0.4 策略、参数或冻结基线。不进入任何参数调优或增强实施。**
-- **下一阶段唯一任务**：Step 4 修正已完成。方案B未通过全部预注册验收标准，不升级基线，不进入增强实施。等待用户决定下一步研究方向。
+- **v1.3 Step 6: 基于市场状态的动态第5槽位 A/B 实验已完成**：
+  - 三个方案：A(B0.4)、B(固定4+1)、C(动态第5槽位：震荡=5行业，其他=4+1防御)。
+  - 全期间：A=176.13%, B=180.91%, C=176.45%。C介于A和B之间，更接近A。
+  - 研究期(2019-2022)：A=34.69%, B=34.94%, C=33.73%。
+  - 验证期(2023-2024)：A=27.67%, B=25.06%, C=24.32%。
+  - 观察期(2025-2026)：A=64.19%, B=70.19%, C=70.02%。
+  - **预注册验收标准未全部通过**：
+    - 夏普方向不一致（研究期C>A 0.63 vs 0.60，验证期C<A 0.74 vs 0.75）❌
+    - 验证期回撤差值+1.45%，但C绝对回撤更小（-16.30% vs -17.75%），评估逻辑有歧义
+    - 验证期收益C-A=-3.35%，低于-2%容忍度 ❌
+    - leave-one-year-out: C>A 4/8=50%，刚好过半 ✅
+    - 滑点方向不反转：所有滑点下C>A ✅
+  - **机制归因**：C在震荡市+0.75%（301天），在熊市-6.97%（826天）。熊市拖累超过震荡增益。
+  - **regime标签验证**：经代码核查，`STATE_NAMES`映射为1=强牛/2=弱牛/3=震荡/4=熊市。机制归因表regime分布与`detect_history`一致（震荡=301天，熊市=826天），标签**未互换**。
+  - **结论**：C只能判定为机制观察候选，不得升级B0.4。
+  - 交付物：`scripts/v1_3_step6_dynamic_fifth_slot_ab.py`、`reports/v1_3_step6_dynamic_fifth_slot_ab.md`、8份CSV数据文件、`tests/test_v1_3_step6_dynamic_fifth_slot.py`（13项全部通过）。
+  - 不修改B0.4策略、参数或冻结基线。
 - **v1.3 Step 5: 动态组合广度与集中度可行性诊断 已完成（observer-only）**：
   - **只做observer诊断**：不修改交易规则、不制定动态参数、不回测动态仓位策略。不修改B0.4、生产策略、ETF池、数据库或调仓引擎。
   - **数据收集**：271个调仓日，每个调仓日记录所有16只行业ETF的total_score、signal_type、排名、候选数量、质量分位、市场状态。
@@ -205,7 +221,13 @@
   - STOP_LOSS 独立统计，不与 SELL 混用。
   - 年化使用引擎 CAGR，非总收益/年数。
   - 每日现金+持仓市值=NAV 恒等式通过。
-- `python -m py_compile app.py`：通过。
+- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：13 passed。
+  - 方案A/B/C配置正确性。
+  - 动态引擎regime_map构建与cfg调整逻辑。
+  - `STATE_NAMES`映射验证：1=强牛/2=弱牛/3=震荡/4=熊市。
+  - `detect_history` regime_id与regime_name严格一致。
+  - 机制归因表regime分布与`detect_history`输出一致。
+  - 预注册标准评估逻辑（夏普方向、回撤、收益容忍度、滑点、LOYO）。
 - A/B数据补齐实验：
   - 完整数据：NAV 2,761,288.07，804笔交易。
   - 排除补齐数据：NAV 2,809,091.21，801笔交易。
@@ -218,15 +240,17 @@
 当前分支已同步远端，但工作区不是干净状态：
 
 - 已修改：`docs/CURRENT_STATE.md`
-  - 本次 Step 5 更新，尚未提交。
+  - 本次 Step 6 更新，尚未提交。
 - 已修改：`docs/CHANGES.md`
-  - Step 5 记录，尚未提交。
+  - Step 6 记录，尚未提交。
 - 已修改：`src/backtest.py`
   - nav_records 增加 `industry_value` / `defense_value`（不改变交易逻辑）。
 - 已修改：`reports/ab_test_data_fill_impact.md`
   - 仅文件末尾换行差异；不要在无关任务中处理。
 - 未跟踪：`reports/etf_rotation_public_resources_research.md`
 - 未跟踪：`scripts/phase7_1_survivorship_bias_audit_v2.py`
+- 未跟踪：`reports/b0_2_vs_b0_3_20260622_111239.md`
+- 未跟踪：`reports/baseline_B0.3_20260622_111239.md`
 - 新增：`scripts/v1_3_step4_portfolio_structure_ab.py`
 - 新增：`reports/v1_3_step4_portfolio_structure_ab.md`
 - 新增：`reports/v1_3_step4_portfolio_metrics.csv`
@@ -241,6 +265,19 @@
 - 新增：`reports/v1_3_step5_fifth_candidate_events.csv`
 - 新增：`reports/v1_3_step5_concentration_counterfactual.csv`
 - 新增：`reports/v1_3_step5_summary.csv`
+
+- 新增：`scripts/v1_3_step6_dynamic_fifth_slot_ab.py`
+- 新增：`reports/v1_3_step6_dynamic_fifth_slot_ab.md`
+- 新增：`reports/v1_3_step6_nav_A.csv`
+- 新增：`reports/v1_3_step6_nav_B.csv`
+- 新增：`reports/v1_3_step6_nav_C.csv`
+- 新增：`reports/v1_3_step6_trades_A.csv`
+- 新增：`reports/v1_3_step6_trades_B.csv`
+- 新增：`reports/v1_3_step6_trades_C.csv`
+- 新增：`reports/v1_3_step6_regime_switches.csv`
+- 新增：`reports/v1_3_step6_mechanism_attr.csv`
+- 新增：`reports/v1_3_step6_regime_summary.csv`
+- 新增：`tests/test_v1_3_step6_dynamic_fifth_slot.py`
 
 这些文件均视为用户已有研究材料。不得删除、移动、覆盖、暂存或提交，除非当前任务明确要求。
 
@@ -258,7 +295,7 @@
 
 ## 7. 下一步唯一任务
 
-Step 5 已完成。动态组合广度observer诊断结论：**当前证据不足，继续使用固定B0.4结构**。不存在可解释、可预注册的动态宽度信号。等待用户决定下一步研究方向。
+Step 6 已完成。动态第5槽位实验结论：**预注册标准未全部通过，C只能判定为机制观察候选，不得升级B0.4**。等待用户决定下一步研究方向。
 
 ---
 
@@ -288,4 +325,4 @@ Step 5 已完成。动态组合广度observer诊断结论：**当前证据不足
 3. `docs/DECISIONS.md`
 4. `git status --short --branch`
 
-恢复后只继续"v1.3 Step 4 修正完成，等待用户决定下一步研究方向"，不要重新展开历史研究。
+恢复后只继续"v1.3 Step 6 完成，预注册标准未通过，等待用户决定下一步研究方向"，不要重新展开历史研究。
