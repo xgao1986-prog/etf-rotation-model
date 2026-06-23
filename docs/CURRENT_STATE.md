@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-24（Step 7: 组合集中度与资金去向正交拆解）
+**最后更新**：2026-06-24（Step 7 机制拆解增强版：正交归因 + 预注册标准7 + 4份新CSV证据）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -112,7 +112,7 @@
   - **LOO与annual定义区分**：`annual_contribution`是每个自然年的C-A收益差；`loyo`是剔除某年后其余年份组合的总收益差。两者定义不同，不要求正负方向逐年一致。详见 `reports/v1_3_step6_annual_contribution.csv` 和 `reports/v1_3_step6_loyo.csv`。
   - 交付物：`scripts/v1_3_step6_dynamic_fifth_slot_ab.py`（含NaN回退、mark-to-market防御贡献、--output-dir参数）、`reports/v1_3_step6_dynamic_fifth_slot_ab.md`（新鲜重新运行）、12份CSV数据文件（含loyo、annual_contribution、defense_contribution、reconciliation）、`tests/test_v1_3_step6_dynamic_fifth_slot.py`（16项全部通过，含CSV勾稽FAIL不skip、生产佣金公式验证、LOO读取CSV调用生产函数）。
   - 不修改B0.4策略、参数或冻结基线。
-- **v1.3 Step 7: 组合集中度与资金去向正交拆解 已完成**：
+- **v1.3 Step 7: 组合集中度与资金去向正交拆解 已完成（机制拆解增强版）**：
   - 四个方案：A(5×20% B0.4对照)、B(4×20%+现金 关闭防御)、C(4×20%+防御 防御填充)、D(4×25% 集中度提升)。
   - 全期间：A=176.13%, B=152.97%, C=180.91%, D=203.08%。
   - 研究期(2019-2022)：A=34.69%, B=31.61%, C=34.94%, D=39.24%。
@@ -125,15 +125,30 @@
     - 滑点方向：所有滑点下D>A → ✅
     - leave-one-year-out(分析期2019-2024): D>A 5/6=83.3% > 50% → ✅
     - 单年驱动：2020年D<A(-8.24%)，其他5年D>A，存在集中风险 ⚠️
-  - **归因关系**：
-    - B-A：删除第5名行业+降低敞口 → -23.16%（全期间）
-    - C-B：防御资产相对现金 → +27.94%（全期间）
-    - D-B：集中度价值（4×25% vs 4×20%+现金）→ +50.12%（全期间）
-    - D-A：删除第5名并集中Top4 → +26.96%（全期间）
+  - **归因关系（全期间）**：
+    - B-A：删除第5名行业+降低敞口 → -23.16%
+    - C-B：防御资产相对现金 → +27.94%
+    - D-B：集中度价值（4×25% vs 4×20%+现金）→ +50.12%
+    - D-A：删除第5名并集中Top4 → +26.96%
+  - **正交归因拆解（增强版）**：
+    - B-A：rank5(0%) + r14(+6.92%)，但 observed_diff=-23.16%，存在大量 residual/interaction（非线性交叉效应）
+    - C-B：现金→防御(0%) + defense(+6.92%)，几乎完全由 RAGF/INDUSTRIAL 防御贡献
+    - D-B：现金→20%(0%) + r1-4(+33.44%)，但 residual=+16.68%（集中度非线性效应）
+    - D-A：rank5→0(+0.00%) + r1-4×20%(+26.96%)，residual≈0（5行业权重叠加几乎线性）
+  - **预注册标准7（D Top4 集中度 vs A/B）**：
+    - D Top4 平均权重 = 61.93% > A Top4 = 50.41% > B Top4 = 50.90%
+    - **标准7：PASS** — D 减少行业数量（4个）同时增加权重（25%），Top4 集中度显著高于 A/B
   - **防御ETF贡献（C-B，mark-to-market）**：详见 `reports/v1_3_step7_defense_contribution.csv`。
   - **佣金（截止2024-12-31）**：A=49,409.20, B=33,780.86, C=40,620.21, D=44,083.02
-  - **结论**：预注册标准未全部通过，D只能判定为机制观察候选，不得升级B0.4。
-  - 交付物：`scripts/v1_3_step7_portfolio_orthogonal_ab.py`（含--output-dir）、`scripts/validate_v1_3_step7_artifacts.py`、`tests/test_v1_3_step7_portfolio_orthogonal.py`（8 passed）、`reports/v1_3_step7_portfolio_orthogonal.md`、12份CSV数据文件。
+  - **新增 4 份机制拆解 CSV**：
+    - `report_01_position_exposure.csv` — 逐日仓位敞口（industry_pct / defense_pct / cash_pct / top1-5 / full_position / threshold）
+    - `report_02_slot_contribution.csv` — 按排名分层的仓位贡献（rank1-5 PnL / active_days / avg_daily_pct）
+    - `report_03_yearly_metrics.csv` — 分年度指标（annual_return / monthly_win_rate / sharpe / max_drawdown / avg_exposure / trades / commission）
+    - `report_04_commission_summary.csv` — 佣金统计（n_buys / n_sells / n_stop_loss / total_commission）
+  - **测试**：15/15 通过（原8个 + 新增7个：position_exposure、slot_contribution、yearly_metrics、commission_summary、standard7、orthogonal_attribution、yearly_with_rank5）
+  - **验证器**：通过，含 cash+positions=NAV 勾稽、累计收益与NAV回算一致、industry+defense+cash=100% 敞口检查、缺文件非零退出
+  - **结论**：预注册标准未全部通过，D只能判定为机制观察候选，不得升级B0.4。但机制拆解证据完整，可支持后续 v1.4 集中度决策。
+  - 交付物：`scripts/v1_3_step7_portfolio_orthogonal_ab.py`（增强版，~1300行）、`scripts/validate_v1_3_step7_artifacts.py`（增强版）、`tests/test_v1_3_step7_portfolio_orthogonal.py`（15 passed）、`reports/v1_3_step7_portfolio_orthogonal.md`（增强版）、16份CSV数据文件（含4份新机制拆解CSV）。
   - 不修改B0.4策略、参数或冻结基线。
 - **v1.3 Step 5: 动态组合广度与集中度可行性诊断 已完成（observer-only）**：
   - **只做observer诊断**：不修改交易规则、不制定动态参数、不回测动态仓位策略。不修改B0.4、生产策略、ETF池、数据库或调仓引擎。

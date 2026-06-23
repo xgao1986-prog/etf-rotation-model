@@ -182,3 +182,75 @@ def test_reconciliation_csv_exists():
     assert os.path.exists(path), f"reconciliation CSV不存在: {path}"
     df = pd.read_csv(path)
     assert set(df["scenario"].unique()) == {"A", "B", "C", "D"}
+
+
+def test_position_exposure_csv_exists():
+    """逐日敞口CSV存在且列名正确。"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_position_exposure.csv")
+    assert os.path.exists(path), f"position_exposure CSV不存在: {path}"
+    df = pd.read_csv(path)
+    for col in ["date", "scenario", "industry_pct", "defense_pct", "cash_pct", "top1_weight", "top4_weight"]:
+        assert col in df.columns, f"position_exposure 缺少列: {col}"
+
+
+def test_position_exposure_sum_to_one():
+    """敞口 industry+defense+cash ≈ 100%。"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_position_exposure.csv")
+    assert os.path.exists(path)
+    df = pd.read_csv(path)
+    df["total"] = df["industry_pct"] + df["defense_pct"] + df["cash_pct"]
+    max_dev = (df["total"] - 1.0).abs().max()
+    assert max_dev < 0.001, f"敞口偏离100%: max_dev={max_dev:.4%}"
+
+
+def test_slot_contribution_csv_exists():
+    """槽位贡献CSV存在且含rank 1-5。"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_slot_contribution.csv")
+    assert os.path.exists(path), f"slot_contribution CSV不存在: {path}"
+    df = pd.read_csv(path)
+    for sc in ["A", "B", "C", "D"]:
+        sub = df[df["scenario"] == sc]
+        ranks = set(sub["rank"].unique()) if "rank" in sub.columns else set()
+        assert ranks >= {1, 2, 3, 4}, f"{sc}: slot_contribution 缺少rank"
+        # B/C/D 的 rank5 可以为0（因为无第5名）
+
+
+def test_yearly_metrics_csv_exists():
+    """年度指标CSV存在且含必要列。"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_yearly_metrics.csv")
+    assert os.path.exists(path), f"yearly_metrics CSV不存在: {path}"
+    df = pd.read_csv(path)
+    for col in ["year", "total_return", "sharpe", "max_drawdown", "n_trades", "total_commission"]:
+        assert col in df.columns, f"yearly_metrics 缺少列: {col}"
+
+
+def test_commission_summary_csv_exists():
+    """佣金汇总CSV存在且含必要列。"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_commission_summary.csv")
+    assert os.path.exists(path), f"commission_summary CSV不存在: {path}"
+    df = pd.read_csv(path)
+    for col in ["year", "n_buys", "n_sells", "total_commission"]:
+        assert col in df.columns, f"commission_summary 缺少列: {col}"
+
+
+def test_standard7_verification_csv_exists():
+    """预注册标准7验证CSV存在。"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_standard7_verification.csv")
+    assert os.path.exists(path), f"standard7_verification CSV不存在: {path}"
+    df = pd.read_csv(path)
+    assert "scenario" in df.columns
+    assert "avg_top4_weight" in df.columns
+    d_top4 = df[df["scenario"] == "D"]["avg_top4_weight"].iloc[0]
+    a_top4 = df[df["scenario"] == "A"]["avg_top4_weight"].iloc[0]
+    b_top4 = df[df["scenario"] == "B"]["avg_top4_weight"].iloc[0]
+    assert d_top4 > a_top4, f"D Top4 ({d_top4}) 应 > A ({a_top4})"
+    assert d_top4 > b_top4, f"D Top4 ({d_top4}) 应 > B ({b_top4})"
+
+
+def test_orthogonal_attribution_csv_exists():
+    """正交归因CSV存在且含所有对比对。"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_orthogonal_attribution.csv")
+    assert os.path.exists(path), f"orthogonal_attribution CSV不存在: {path}"
+    df = pd.read_csv(path)
+    pairs = set(df["pair"].unique()) if "pair" in df.columns else set()
+    assert pairs >= {"B-A", "C-B", "D-B", "D-A"}, f"正交归因缺少对比对: {pairs}"

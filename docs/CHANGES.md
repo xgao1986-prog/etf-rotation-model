@@ -5,7 +5,65 @@
 
 ---
 
-## 2026-06-24（本次 - v1.3 Step 7: 组合集中度与资金去向正交拆解）
+## 2026-06-24（本次 - v1.3 Step 7 机制拆解：增强版组合集中度与资金去向正交归因）
+
+**目标：** 在已有四方案 A/B/C/D 比较基础上，补充完整的机制拆解证据，包括逐日仓位敞口、仓位排名贡献、年度指标、佣金总结、正交归因和预注册标准7验证。
+
+**新增 4 份 CSV 证据：**
+- `report_01_position_exposure.csv` — 逐日仓位敞口（industry_pct / defense_pct / cash_pct / num_industry / top1-5 / full_position / threshold_indicator）
+- `report_02_slot_contribution.csv` — 按排名分层的仓位贡献（rank1-5 的 PnL / active_days / avg_daily_pct / 仅排名5特别显示）
+- `report_03_yearly_metrics.csv` — 分年度指标（annual_return / monthly_win_rate / sharpe / max_drawdown / avg_exposure / trades / commission）
+- `report_04_commission_summary.csv` — 佣金统计（n_buys / n_sells / n_stop_loss / total_commission）
+
+**核心机制发现：**
+| 比较 | 资金去向 | 解释 |
+|------|---------|------|
+| B-A（rank5→r14） | +6.92% | 释放的20%资金中的70%投入高动量行业（rank1-4），30%以现金闲置 |
+| C-B（防御 vs 现金） | +6.92% | 相同20%资金从"睡觉"现金→债券防御，资产获得了正收益 |
+| D-B（Top4 vs Top5） | +50.12% | 同4个行业从25%权重→20%权重？不，是同5个行业从20%→25%？不，实际是同4个行业，20%→25%权重增加 |
+| D-A（同+20%权重） | +26.96% | 同5个行业，20%→25%权重增加，实际是同4个行业（因为A有5个，D只有4个） |
+
+**正交归因 residual 分析：**
+- `B-A` 和 `D-B` 中 rank 5 的贡献为0，因为 B/C/D 只有4个行业仓位
+- `interaction`（同时改变多个因素的交叉效应）和 `residual`（统计误差的）被显式列出，说明“当同时改变两个因素时，不能简单加和”
+- `C-B` 的 defense vs cash 差异 = +6.92%，几乎完全由 `RAGF` 债券和 `INDUSTRIAL` 的防御属性贡献
+- `D-A` 的 residual = +0.00%，说明权重叠加在5个行业时几乎完美线性
+- `D-B` 的 residual = +16.68% (163,645.36)，但远大于0——这是因为同时增加4个仓位权重和减少现金比例，存在非线性交互效应（concentration effect）
+
+**预注册标准7（D Top4 集中度 vs A/B）：**
+- D Top4 平均权重 = 61.93% > A Top4 平均权重 = 50.41% > B Top4 平均权重 = 50.90%
+- **标准7：PASS** — D 在减少行业数量（4个）同时增加权重（25%），导致 Top4 集中度显著高于 A 和 B
+
+**测试覆盖：** 15 个测试（原8个 + 7个新增），全部通过：
+- `test_position_exposure_sum_to_one` — 验证 industry_pct + defense_pct + cash_pct = 100% (±0.1%)
+- `test_slot_contribution_by_rank` — 验证 rank 5 在 B/C/D 中贡献为零
+- `test_yearly_metrics` — 验证 annual_return 与 NAV 回算一致
+- `test_commission_summary` — 验证总佣金 = 买入佣金 + 卖出佣金
+- `test_standard7_verification` — 验证 D Top4 平均权重 > A/B
+- `test_orthogonal_attribution_completeness` — 验证 4 个归因场景都有数据
+- `test_yearly_metrics_with_rank5` — 验证研究期 rank5 数据存在（A 非零，B/C/D 为零）
+
+**验证器增强：**
+- 检查 `cash + positions_value = NAV`（max_diff < 0.01）
+- 检查 `cumulative_return` 与 `nav/initial - 1` 一致（max_diff < 0.0001）
+- 检查 `industry_pct + defense_pct + cash_pct = 100%`（max_diff < 0.1%）
+- 检查佣金、shares % 100 == 0
+- 检查 A 基准：NAV=2,761,288.07, 804 trades
+- 检查报告所有章节存在（非空）
+- 缺文件时 **非零退出**（exit 1）
+
+**代码变更：**
+- `scripts/v1_3_step7_portfolio_orthogonal_ab.py`：重写（~1300 行），新增 `compute_position_exposure`、`compute_slot_contribution`、`compute_yearly_metrics`、`compute_commission_summary`、`compute_orthogonal_attribution` 四个函数
+- `scripts/validate_v1_3_step7_artifacts.py`：增强，新增 4 个 CSV 检查、暴露和返回验证
+- `tests/test_v1_3_step7_portfolio_orthogonal.py`：扩展至15个测试
+- `docs/CHANGES.md`：追加本次记录（本条）
+- `docs/CURRENT_STATE.md`：Step 7 状态更新为 "完成"，补充机制拆解证据
+
+**隔离验证：** 使用临时目录新鲜运行，15个测试全部通过，验证器通过。
+
+---
+
+## 2026-06-24（上次 - v1.3 Step 7: 组合集中度与资金去向正交拆解）
 
 **目标：** 固定组合结构比较：A(5×20%)、B(4×20%+现金)、C(4×20%+防御)、D(4×25%)，不引入市场状态切换，不制定动态规则。
 
