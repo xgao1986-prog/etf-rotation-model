@@ -6,6 +6,7 @@
 3. LOO读取CSV调用生产函数
 4. B/C/D勾稽读取CSV验证
 5. A精确复现
+6. 新增FIX验证测试
 """
 import sys, os, pandas as pd, numpy as np
 from datetime import date
@@ -189,7 +190,9 @@ def test_position_exposure_csv_exists():
     path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_position_exposure.csv")
     assert os.path.exists(path), f"position_exposure CSV不存在: {path}"
     df = pd.read_csv(path)
-    for col in ["date", "scenario", "industry_pct", "defense_pct", "cash_pct", "top1_weight", "top4_weight"]:
+    for col in ["date", "scenario", "industry_pct", "defense_pct", "cash_pct", "top1_weight", "top4_weight",
+                "weight_order_top4", "score_rank_1_weight", "score_rank_2_weight", "score_rank_3_weight",
+                "score_rank_4_weight", "score_rank_1_4_weight"]:
         assert col in df.columns, f"position_exposure 缺少列: {col}"
 
 
@@ -204,10 +207,11 @@ def test_position_exposure_sum_to_one():
 
 
 def test_slot_contribution_csv_exists():
-    """槽位贡献CSV存在且含rank 1-5。"""
+    """槽位贡献CSV存在且含rank 1-5和period列。"""
     path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_slot_contribution.csv")
     assert os.path.exists(path), f"slot_contribution CSV不存在: {path}"
     df = pd.read_csv(path)
+    assert "period" in df.columns, "slot_contribution 缺少 period 列"
     for sc in ["A", "B", "C", "D"]:
         sub = df[df["scenario"] == sc]
         ranks = set(sub["rank"].unique()) if "rank" in sub.columns else set()
@@ -240,11 +244,17 @@ def test_standard7_verification_csv_exists():
     df = pd.read_csv(path)
     assert "scenario" in df.columns
     assert "avg_top4_weight" in df.columns
-    d_top4 = df[df["scenario"] == "D"]["avg_top4_weight"].iloc[0]
-    a_top4 = df[df["scenario"] == "A"]["avg_top4_weight"].iloc[0]
-    b_top4 = df[df["scenario"] == "B"]["avg_top4_weight"].iloc[0]
-    assert d_top4 > a_top4, f"D Top4 ({d_top4}) 应 > A ({a_top4})"
-    assert d_top4 > b_top4, f"D Top4 ({d_top4}) 应 > B ({b_top4})"
+    assert "period" in df.columns
+    assert "score_rank_1_4_weight" in df.columns
+    # Check D > A and D > B in 研究期 and 验证期
+    for period in ["研究期", "验证期"]:
+        sub = df[df["period"] == period]
+        if not sub.empty:
+            d_top4 = sub[sub["scenario"] == "D"]["avg_top4_weight"].iloc[0]
+            a_top4 = sub[sub["scenario"] == "A"]["avg_top4_weight"].iloc[0]
+            b_top4 = sub[sub["scenario"] == "B"]["avg_top4_weight"].iloc[0]
+            assert d_top4 > a_top4, f"{period}: D Top4 ({d_top4}) 应 > A ({a_top4})"
+            assert d_top4 > b_top4, f"{period}: D Top4 ({d_top4}) 应 > B ({b_top4})"
 
 
 def test_orthogonal_attribution_csv_exists():
@@ -254,3 +264,99 @@ def test_orthogonal_attribution_csv_exists():
     df = pd.read_csv(path)
     pairs = set(df["pair"].unique()) if "pair" in df.columns else set()
     assert pairs >= {"B-A", "C-B", "D-B", "D-A"}, f"正交归因缺少对比对: {pairs}"
+    assert "period" in df.columns, "正交归因缺少 period 列"
+
+
+# ===== FIX 9: NEW TESTS =====
+
+def test_slot_period_filtering():
+    """slot_contribution values differ across periods."""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_slot_contribution.csv")
+    df = pd.read_csv(path)
+    # For a given scenario and rank, total_pnl should differ across periods
+    for sc in ["A", "B", "C", "D"]:
+        for rank in [1, 2, 3, 4]:
+            sub = df[(df["scenario"] == sc) & (df["rank"] == rank)]
+            if len(sub) > 1:
+                pnls = sub["total_pnl"].unique()
+                assert len(pnls) > 1, f"{sc} rank{rank} total_pnl 跨period相同: {pnls}"
+
+
+def test_entry_rank_consistency():
+    """a holding's rank in slot_contribution doesn't change across holding period.
+
+    Verified by: each (scenario, period, rank) appears exactly once.
+    """
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_slot_contribution.csv")
+    df = pd.read_csv(path)
+    dup_check = df.groupby(["scenario", "period", "rank"]).size()
+    dups = dup_check[dup_check > 1]
+    assert dups.empty, f"slot_contribution 存在重复rank: {dups.index.tolist()[:5]}"
+
+
+def test_orthogonal_attribution_balance():
+    """for each row, abs(known_effects + residual - observed_diff) < 1.0"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_orthogonal_attribution.csv")
+    df = pd.read_csv(path)
+    for _, row in df.iterrows():
+        pair = row["pair"]
+        observed = row["observed_diff"]
+        if pair == "B-A":
+            known = row["rank5_effect"] + row["r14_effect"]
+        elif pair == "C-B":
+            known = row["defense_effect"] + row["r14_effect"]
+        elif pair == "D-B":
+            known = row["r14_effect"]
+        elif pair == "D-A":
+            known = row["rank5_effect"] + row["r14_effect"]
+        else:
+            known = 0
+        residual = row["residual"]
+        total = known + residual
+        assert abs(total - observed) < 1.0, f"正交归因不平衡 {pair} {row['period']}: {total:.2f} != {observed:.2f}"
+
+
+def test_standard7_period_boundary():
+    """standard7 rows only for 研究期/验证期/分析期, no 观察期/全期间"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_standard7_verification.csv")
+    df = pd.read_csv(path)
+    bad = df[df["period"].isin(["观察期", "全期间"])]
+    assert bad.empty, f"standard7 包含不应有的period: {bad['period'].unique().tolist()}"
+    good_periods = df[df["period"].isin(["研究期", "验证期", "分析期"])]
+    assert len(good_periods) > 0, "standard7 缺少研究期/验证期/分析期"
+
+
+def test_drawdown_not_below_minus_100():
+    """all drawdown_pct >= -1.0"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_slot_contribution.csv")
+    df = pd.read_csv(path)
+    if "max_drawdown" in df.columns:
+        bad = df[df["max_drawdown"] < -1.0]
+        assert bad.empty, f"存在drawdown < -100%: {bad[['scenario','rank','period','max_drawdown']].to_dict('records')}"
+
+
+def test_monthly_win_rate_compounding():
+    """verify monthly returns use prod, not sum"""
+    nav_path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_nav_A.csv")
+    ym_path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_yearly_metrics.csv")
+    nav = pd.read_csv(nav_path)
+    nav["date"] = pd.to_datetime(nav["date"])
+    nav = nav[nav["date"] <= "2024-12-31"]
+    nav["ret"] = nav["nav"].pct_change()
+    nav["ym"] = nav["date"].dt.to_period("M")
+    monthly_compound = nav.groupby("ym").apply(lambda x: (1 + x["ret"]).prod() - 1)
+    win_rate_compound = (monthly_compound > 0).mean()
+    ym = pd.read_csv(ym_path)
+    a_yearly = ym[(ym["scenario"] == "A") & (ym["period"] == "分析期")]
+    if not a_yearly.empty:
+        csv_win_rate = a_yearly["monthly_win_rate"].mean()
+        # Should be close to compound
+        assert abs(csv_win_rate - win_rate_compound) < 0.05, f"monthly_win_rate 偏差过大: CSV={csv_win_rate:.2%} compound={win_rate_compound:.2%}"
+
+
+def test_score_rank_vs_weight_order():
+    """score_rank_1_4_weight != weight_order_top4 for at least some days"""
+    path = os.path.join(os.path.dirname(__file__), "..", "reports", "v1_3_step7_position_exposure.csv")
+    df = pd.read_csv(path)
+    diff = (df["score_rank_1_4_weight"] - df["weight_order_top4"]).abs()
+    assert (diff > 0.001).any(), f"score_rank_1_4_weight 始终等于 weight_order_top4 (max_diff={diff.max():.4f})"

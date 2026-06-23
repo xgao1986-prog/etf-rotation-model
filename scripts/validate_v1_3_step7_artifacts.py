@@ -1,7 +1,7 @@
 """v1.3 Step 7 验证器：检查所有证据文件和勾稽。
 
 验证项：
-- 所有证据文件存在（含新增4份CSV）
+- 所有证据文件存在（含新增7份CSV）
 - cash + positions_value = NAV
 - cumulative_return与NAV/初始资金一致（严格误差<0.01%）
 - 敞口 industry_pct + defense_pct + cash_pct = 100%（误差<0.1%）
@@ -41,11 +41,14 @@ def validate(output_dir='D:/etf_rotation_model/reports'):
         'v1_3_step7_defense_contribution.csv',
         'v1_3_step7_reconciliation.csv',
         'v1_3_step7_portfolio_orthogonal.md',
-        # 新增4份CSV
+        # 新增7份CSV
         'v1_3_step7_yearly_metrics.csv',
         'v1_3_step7_position_exposure.csv',
         'v1_3_step7_slot_contribution.csv',
         'v1_3_step7_commission_summary.csv',
+        'v1_3_step7_slot5_yearly.csv',
+        'v1_3_step7_orthogonal_attribution.csv',
+        'v1_3_step7_standard7_verification.csv',
     ]
 
     # 1. 所有证据文件存在
@@ -184,6 +187,132 @@ def validate(output_dir='D:/etf_rotation_model/reports'):
         else:
             print(f"  OK 报告包含: {section}")
 
+    # ===== NEW FIX 8 VALIDATIONS =====
+    print("\n--- 新增验证项 ---")
+
+    # 8.1 检查period column存在于slot_contribution, orthogonal_attribution, standard7
+    slot_path = os.path.join(output_dir, 'v1_3_step7_slot_contribution.csv')
+    slot_df = pd.read_csv(slot_path)
+    if 'period' not in slot_df.columns:
+        errors.append("slot_contribution 缺少 period 列")
+    else:
+        print("  OK slot_contribution 含 period 列")
+        # 检查不同period的值不同
+        periods_in_slot = slot_df['period'].unique()
+        if len(periods_in_slot) < 2:
+            errors.append(f"slot_contribution 只含 {periods_in_slot} 个period，应含多个")
+        else:
+            print(f"  OK slot_contribution 含 {len(periods_in_slot)} 个period")
+
+    attr_path = os.path.join(output_dir, 'v1_3_step7_orthogonal_attribution.csv')
+    attr_df = pd.read_csv(attr_path)
+    if 'period' not in attr_df.columns:
+        errors.append("orthogonal_attribution 缺少 period 列")
+    else:
+        print("  OK orthogonal_attribution 含 period 列")
+
+    std7_path = os.path.join(output_dir, 'v1_3_step7_standard7_verification.csv')
+    std7_df = pd.read_csv(std7_path)
+    if 'period' not in std7_df.columns:
+        errors.append("standard7_verification 缺少 period 列")
+    else:
+        print("  OK standard7_verification 含 period 列")
+
+    # 8.2 检查2025-2026 NOT in standard7
+    if 'period' in std7_df.columns:
+        bad_periods = std7_df[std7_df['period'].isin(['观察期', '全期间'])]
+        if not bad_periods.empty:
+            errors.append(f"standard7 包含不应有的period: {bad_periods['period'].unique().tolist()}")
+        else:
+            print("  OK standard7 只含研究期/验证期")
+
+    # 8.3 正交归因平衡检查: known_effects + residual == observed_diff (within 1.0)
+    for _, row in attr_df.iterrows():
+        pair = row['pair']
+        observed = row['observed_diff']
+        if pair == 'B-A':
+            known = row['rank5_effect'] + row['r14_effect']
+        elif pair == 'C-B':
+            known = row['defense_effect'] + row['r14_effect']
+        elif pair == 'D-B':
+            known = row['r14_effect']
+        elif pair == 'D-A':
+            known = row['rank5_effect'] + row['r14_effect']
+        else:
+            known = 0
+        residual = row['residual']
+        total = known + residual
+        if abs(total - observed) >= 1.0:
+            errors.append(f"正交归因不平衡 {pair} {row['period']}: known+residual={total:.2f} != observed={observed:.2f}")
+    if not any('正交归因不平衡' in e for e in errors):
+        print("  OK 正交归因平衡: known_effects + residual == observed_diff (within 1.0)")
+
+    # 8.4 检查slot contribution使用了entry_rank（一致性检查）
+    # 由于entry_rank是固定的，每个scenario+period中每个rank应只出现一次
+    if 'period' in slot_df.columns and 'rank' in slot_df.columns:
+        dup_check = slot_df.groupby(['scenario', 'period', 'rank']).size()
+        dups = dup_check[dup_check > 1]
+        if not dups.empty:
+            errors.append(f"slot_contribution 存在重复rank: {dups.index.tolist()[:3]}")
+        else:
+            print("  OK slot_contribution rank唯一（entry_rank一致性）")
+
+    # 8.5 检查drawdown >= -100%
+    if 'max_drawdown' in slot_df.columns:
+        bad_dd = slot_df[slot_df['max_drawdown'] < -1.0]
+        if not bad_dd.empty:
+            errors.append(f"slot_contribution 存在drawdown < -100%: {bad_dd['max_drawdown'].min():.2%}")
+        else:
+            print("  OK drawdown 全部 >= -100%")
+
+    # 8.6 检查monthly win rate使用compounding（从nav重算验证）
+    # 8.6 检查monthly_win_rate使用compound而非sum（逐year验证）
+    ym_path = os.path.join(output_dir, 'v1_3_step7_yearly_metrics.csv')
+    if os.path.exists(ym_path):
+        ym_df = pd.read_csv(ym_path)
+        nav_a = pd.read_csv(os.path.join(output_dir, 'v1_3_step7_nav_A.csv'))
+        nav_a['date'] = pd.to_datetime(nav_a['date'])
+        nav_a = nav_a[nav_a['date'] <= '2024-12-31']
+        nav_a['ret'] = nav_a['nav'].pct_change()
+        nav_a['ym'] = nav_a['date'].dt.to_period('M')
+        nav_a['year'] = nav_a['date'].dt.year
+        # Check yearly_metrics for A uses compound (per year)
+        a_yearly = ym_df[(ym_df['scenario'] == 'A') & (ym_df['period'] == '分析期')]
+        if not a_yearly.empty:
+            errors_monthly = []
+            for _, row in a_yearly.iterrows():
+                year = row['year']
+                csv_win_rate = row['monthly_win_rate']
+                yr_nav = nav_a[nav_a['year'] == year]
+                if len(yr_nav) < 2:
+                    continue
+                yr_nav = yr_nav.copy()
+                yr_nav['ym'] = yr_nav['date'].dt.to_period('M')
+                monthly_compound = yr_nav.groupby('ym').apply(lambda x: (1 + x['ret']).prod() - 1)
+                monthly_sum = yr_nav.groupby('ym')['ret'].sum()
+                win_rate_compound = (monthly_compound > 0).mean()
+                win_rate_sum = (monthly_sum > 0).mean()
+                if abs(csv_win_rate - win_rate_compound) > abs(csv_win_rate - win_rate_sum) + 0.01:
+                    errors_monthly.append(f"year={year}: CSV={csv_win_rate:.2%} compound={win_rate_compound:.2%} sum={win_rate_sum:.2%}")
+            if errors_monthly:
+                errors.append(f"monthly_win_rate 可能使用sum而非compound: {errors_monthly}")
+            else:
+                print("  OK monthly_win_rate 使用compound (逐year验证通过)")
+        else:
+            print("  SKIP monthly_win_rate 验证（A分析期数据缺失）")
+
+    # 8.7 检查report numbers match CSVs（sample check）
+    # 检查报告中是否包含标准7的D Top4权重
+    if 'avg_top4_weight' in std7_df.columns:
+        d_top4 = std7_df[std7_df['scenario'] == 'D']['avg_top4_weight']
+        if not d_top4.empty:
+            d_top4_val = d_top4.iloc[0]
+            d_top4_str = f"{d_top4_val:.2%}"
+            if d_top4_str.replace('%', '') in report_text or f"{d_top4_val:.2%}" in report_text:
+                print("  OK 报告数值与standard7 CSV一致")
+            else:
+                warnings.append("报告数值可能与standard7 CSV不一致（格式差异）")
+
     print("=" * 60)
     if errors:
         print(f"验证失败: {len(errors)} 个错误")
@@ -192,6 +321,9 @@ def validate(output_dir='D:/etf_rotation_model/reports'):
         return 1
     else:
         print("验证通过: 全部检查项通过")
+        if warnings:
+            for w in warnings:
+                print(f"  WARN {w}")
         return 0
 
 

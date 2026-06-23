@@ -5,7 +5,60 @@
 
 ---
 
-## 2026-06-24（本次 - v1.3 Step 7 机制拆解：增强版组合集中度与资金去向正交归因）
+## 2026-06-24（本次 - v1.3 Step 7 P1修复：统计口径与证据完整性）
+
+**目标：** 修复Codex发现的P1统计和证据口径问题，不修改A/B/C/D方案、B0.4或生产代码。
+
+**修复项：**
+
+1. **证据文件强制纳入Git**：7份CSV从.gitignore排除并强制add
+   - `v1_3_step7_position_exposure.csv`
+   - `v1_3_step7_slot_contribution.csv`
+   - `v1_3_step7_slot5_yearly.csv`
+   - `v1_3_step7_yearly_metrics.csv`
+   - `v1_3_step7_commission_summary.csv`
+   - `v1_3_step7_orthogonal_attribution.csv`
+   - `v1_3_step7_standard7_verification.csv`
+
+2. **槽位贡献时间口径修复**：slot_contribution按期间（研究期/验证期/分析期/全期间）分别筛选后独立汇总，CSV含period列
+
+3. **entry_rank定义**：使用买入信号日（T-day）的模型评分排名作为entry_rank，持有期间固定归属该rank，不每日重新排名。支持T/T+1和FIFO lot逻辑。
+
+4. **正交归因符号统一**：observed_diff = target - reference，各因素方向按target-reference定义。每行精确勾稽：known_effects + residual = observed_diff（容差1.0元）
+   - B-A: rank5_effect = B_rank5 - A_rank5 = 0 - a_r5 = -a_r5
+   - C-B: defense_effect = C_defense - B_defense
+   - D-B: r14_effect = D_r14 - B_r14
+   - D-A: rank5_effect = D_rank5 - A_rank5 = 0 - a_r5 = -a_r5
+
+5. **归因单位统一（RMB）**：observed_diff = target_period_pnl - reference_period_pnl，period_pnl = nav_end - nav_start。槽位PnL、防御PnL、佣金、residual统一使用人民币（元）
+
+6. **标准7样本边界修复**：仅使用2019-2024分析期，标准7 CSV含period列（研究期/验证期），分别输出。PASS要求研究期与验证期方向均一致。
+
+7. **Top4权重定义区分**：
+   - `weight_order_top4`：按实际持仓权重从大到小排序的Top4合计
+   - `score_rank_1_4_weight`：按买入时模型评分排名的Top4合计
+   - 预注册标准7验证score_rank_1_4_weight（模型Top4实际权重）
+
+8. **回撤修复**：slot最大回撤使用分配资本基数（avg_weight * 1,000,000），drawdown_pct有下界-100%，同时输出max_drawdown_rmb
+
+9. **月度胜率修复**：使用 `prod(1+daily_return) - 1` 而非 `sum(daily_return)`，逐year验证通过
+
+10. **验证器增强**：新增7份CSV检查、period字段检查、2025-2026排除、正交归因平衡、entry_rank一致性、drawdown >= -100%、monthly_win_rate compound验证、report-CSV一致性
+
+11. **B0文件恢复**：`docs/B0_DATA_ADMISSION_CHECK_v1.md` 恢复为Base 1268f95状态
+
+12. **脚本支持--use-cached**：从现有nav/trades CSV快速重新分析，跳过耗时回测
+
+**测试**：22/22 通过（含7个新增FIX验证测试）
+**验证器**：通过（全部检查项通过）
+**隔离运行**：通过（临时目录完整运行并验证）
+**B0.4 slippage**：8/8 通过
+
+**不修改**：B0.4生产代码、A/B/C/D四方案规则、回测引擎、调仓逻辑
+
+---
+
+## 2026-06-24（上次 - v1.3 Step 7 机制拆解：增强版组合集中度与资金去向正交归因）
 
 **目标：** 在已有四方案 A/B/C/D 比较基础上，补充完整的机制拆解证据，包括逐日仓位敞口、仓位排名贡献、年度指标、佣金总结、正交归因和预注册标准7验证。
 

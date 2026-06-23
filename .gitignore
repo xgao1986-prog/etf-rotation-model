@@ -12,11 +12,20 @@ __pycache__/
 *.db-shm
 
 # 输出目录（自动生成）
-reports/*.csv
 reports/*.png
 reports/*.html
 reports/*.json
 signals/*.csv
+
+# 注意：v1.3 Step 7 的7份CSV证据文件已强制纳入版本控制
+# 以下文件已用 git add -f 强制跟踪：
+# v1_3_step7_position_exposure.csv
+# v1_3_step7_slot_contribution.csv
+# v1_3_step7_slot5_yearly.csv
+# v1_3_step7_yearly_metrics.csv
+# v1_3_step7_commission_summary.csv
+# v1_3_step7_orthogonal_attribution.csv
+# v1_3_step7_standard7_verification.csv
 
 # 本地缓存、原始数据与数据库备份元数据
 cache/

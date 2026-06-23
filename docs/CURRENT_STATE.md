@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-24（Step 7 机制拆解增强版：正交归因 + 预注册标准7 + 4份新CSV证据）
+**最后更新**：2026-06-24（Step 7 P1修复：统计口径与证据完整性）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -112,7 +112,7 @@
   - **LOO与annual定义区分**：`annual_contribution`是每个自然年的C-A收益差；`loyo`是剔除某年后其余年份组合的总收益差。两者定义不同，不要求正负方向逐年一致。详见 `reports/v1_3_step6_annual_contribution.csv` 和 `reports/v1_3_step6_loyo.csv`。
   - 交付物：`scripts/v1_3_step6_dynamic_fifth_slot_ab.py`（含NaN回退、mark-to-market防御贡献、--output-dir参数）、`reports/v1_3_step6_dynamic_fifth_slot_ab.md`（新鲜重新运行）、12份CSV数据文件（含loyo、annual_contribution、defense_contribution、reconciliation）、`tests/test_v1_3_step6_dynamic_fifth_slot.py`（16项全部通过，含CSV勾稽FAIL不skip、生产佣金公式验证、LOO读取CSV调用生产函数）。
   - 不修改B0.4策略、参数或冻结基线。
-- **v1.3 Step 7: 组合集中度与资金去向正交拆解 已完成（机制拆解增强版）**：
+- **v1.3 Step 7: 组合集中度与资金去向正交拆解 已完成（P1修复版 — 统计口径与证据完整性）**：
   - 四个方案：A(5×20% B0.4对照)、B(4×20%+现金 关闭防御)、C(4×20%+防御 防御填充)、D(4×25% 集中度提升)。
   - 全期间：A=176.13%, B=152.97%, C=180.91%, D=203.08%。
   - 研究期(2019-2022)：A=34.69%, B=31.61%, C=34.94%, D=39.24%。
@@ -125,30 +125,41 @@
     - 滑点方向：所有滑点下D>A → ✅
     - leave-one-year-out(分析期2019-2024): D>A 5/6=83.3% > 50% → ✅
     - 单年驱动：2020年D<A(-8.24%)，其他5年D>A，存在集中风险 ⚠️
-  - **归因关系（全期间）**：
-    - B-A：删除第5名行业+降低敞口 → -23.16%
-    - C-B：防御资产相对现金 → +27.94%
-    - D-B：集中度价值（4×25% vs 4×20%+现金）→ +50.12%
-    - D-A：删除第5名并集中Top4 → +26.96%
-  - **正交归因拆解（增强版）**：
-    - B-A：rank5(0%) + r14(+6.92%)，但 observed_diff=-23.16%，存在大量 residual/interaction（非线性交叉效应）
-    - C-B：现金→防御(0%) + defense(+6.92%)，几乎完全由 RAGF/INDUSTRIAL 防御贡献
-    - D-B：现金→20%(0%) + r1-4(+33.44%)，但 residual=+16.68%（集中度非线性效应）
-    - D-A：rank5→0(+0.00%) + r1-4×20%(+26.96%)，residual≈0（5行业权重叠加几乎线性）
-  - **预注册标准7（D Top4 集中度 vs A/B）**：
-    - D Top4 平均权重 = 61.93% > A Top4 = 50.41% > B Top4 = 50.90%
-    - **标准7：PASS** — D 减少行业数量（4个）同时增加权重（25%），Top4 集中度显著高于 A/B
+  - **P1修复（本次）**：
+    - **entry_rank**：使用买入信号日（T-day）模型评分排名作为固定rank，持有期间不重新排名。支持T/T+1和FIFO lot逻辑。
+    - **时间口径**：slot_contribution按期间（研究期/验证期/分析期/全期间）独立筛选汇总，CSV含period列。
+    - **符号统一**：observed_diff = target - reference，rank5_effect = target_rank5 - reference_rank5（B-A = 0 - a_r5 = -a_r5）。每行精确勾稽：known_effects + residual = observed_diff（容差1.0元）。
+    - **单位统一**：全部使用RMB（元），observed_diff = target_period_pnl - reference_period_pnl，period_pnl = nav_end - nav_start。
+    - **标准7边界**：仅使用2019-2024分析期，分别输出研究期/验证期，PASS要求两期方向均一致。
+    - **Top4权重区分**：`weight_order_top4`（按实际权重排序）与 `score_rank_1_4_weight`（按买入时模型评分排名）。标准7验证后者。
+    - **回撤修复**：slot drawdown使用分配资本基数（avg_weight * 1,000,000），drawdown_pct有下界-100%，同时输出max_drawdown_rmb。
+    - **月度胜率**：使用 `prod(1+daily_return) - 1` 而非 `sum(daily_return)`，逐year验证。
+  - **正交归因（RMB，entry_rank，period-specific）**：
+    - 研究期 B-A: observed=-30,804.73, rank5=-142,595.51, r14=-25,237.80, residual=137,028.58
+    - 研究期 C-B: observed=+33,283.13, defense=+64,181.80, r14=+97,808.47, residual=-128,707.14
+    - 研究期 D-B: observed=+76,241.89, r14=+572,494.27, residual=-496,252.39
+    - 研究期 D-A: observed=+45,437.16, rank5=-142,595.51, r14=+547,256.48, residual=-359,223.81
+    - 所有行均满足 known_effects + residual = observed_diff（容差1.0元）
+  - **预注册标准7（D score_rank_1_4 vs A/B）**：
+    - 研究期 D=60.89% > A=49.54% > B=49.82% → PASS
+    - 验证期 D=56.46% > A=45.82% > B=46.19% → PASS
+    - **标准7：PASS**（研究期与验证期方向一致）
   - **防御ETF贡献（C-B，mark-to-market）**：详见 `reports/v1_3_step7_defense_contribution.csv`。
   - **佣金（截止2024-12-31）**：A=49,409.20, B=33,780.86, C=40,620.21, D=44,083.02
-  - **新增 4 份机制拆解 CSV**：
-    - `report_01_position_exposure.csv` — 逐日仓位敞口（industry_pct / defense_pct / cash_pct / top1-5 / full_position / threshold）
-    - `report_02_slot_contribution.csv` — 按排名分层的仓位贡献（rank1-5 PnL / active_days / avg_daily_pct）
-    - `report_03_yearly_metrics.csv` — 分年度指标（annual_return / monthly_win_rate / sharpe / max_drawdown / avg_exposure / trades / commission）
-    - `report_04_commission_summary.csv` — 佣金统计（n_buys / n_sells / n_stop_loss / total_commission）
-  - **测试**：15/15 通过（原8个 + 新增7个：position_exposure、slot_contribution、yearly_metrics、commission_summary、standard7、orthogonal_attribution、yearly_with_rank5）
-  - **验证器**：通过，含 cash+positions=NAV 勾稽、累计收益与NAV回算一致、industry+defense+cash=100% 敞口检查、缺文件非零退出
+  - **新增 7 份机制拆解 CSV（全部纳入Git）**：
+    - `v1_3_step7_position_exposure.csv` — 逐日仓位敞口（industry_pct / defense_pct / cash_pct / top1-5 / weight_order_top4 / score_rank_1-4）
+    - `v1_3_step7_slot_contribution.csv` — 按entry_rank分层的仓位贡献（rank1-5 PnL / active_days / avg_daily_pnl / max_drawdown_pct / max_drawdown_rmb / avg_weight），含period列
+    - `v1_3_step7_slot5_yearly.csv` — 第5名行业ETF逐年
+    - `v1_3_step7_yearly_metrics.csv` — 分年度指标（annual_return / monthly_win_rate / sharpe / max_drawdown / avg_exposure / trades / commission），含period列
+    - `v1_3_step7_commission_summary.csv` — 佣金统计（n_buys / n_sells / n_stop_loss / total_commission），含period列
+    - `v1_3_step7_orthogonal_attribution.csv` — 正交归因（observed_diff / rank5_effect / defense_effect / r14_effect / residual），含period列
+    - `v1_3_step7_standard7_verification.csv` — 预注册标准7验证（period / scenario / avg_top4_weight / weight_order_top4 / score_rank_1_4_weight）
+  - **测试**：22/22 通过（原8个 + 新增14个，含P1 FIX验证：slot_period_filtering、entry_rank_consistency、orthogonal_attribution_balance、standard7_period_boundary、drawdown_not_below_minus_100、monthly_win_rate_compounding、score_rank_vs_weight_order）
+  - **验证器**：通过（全部检查项通过，含新增：period字段、2025-2026排除、正交归因平衡、entry_rank一致性、drawdown>=-100%、monthly_win_rate compound、report-CSV一致性）
+  - **隔离运行**：通过（临时目录完整运行并验证）
+  - **B0.4 slippage**：8/8 通过
   - **结论**：预注册标准未全部通过，D只能判定为机制观察候选，不得升级B0.4。但机制拆解证据完整，可支持后续 v1.4 集中度决策。
-  - 交付物：`scripts/v1_3_step7_portfolio_orthogonal_ab.py`（增强版，~1300行）、`scripts/validate_v1_3_step7_artifacts.py`（增强版）、`tests/test_v1_3_step7_portfolio_orthogonal.py`（15 passed）、`reports/v1_3_step7_portfolio_orthogonal.md`（增强版）、16份CSV数据文件（含4份新机制拆解CSV）。
+  - 交付物：`scripts/v1_3_step7_portfolio_orthogonal_ab.py`（P1修复版，~1430行，含--use-cached）、`scripts/validate_v1_3_step7_artifacts.py`（P1修复版，~328行）、`tests/test_v1_3_step7_portfolio_orthogonal.py`（22 passed）、`reports/v1_3_step7_portfolio_orthogonal.md`（P1修复版）、20份CSV数据文件（含7份新机制拆解CSV）。
   - 不修改B0.4策略、参数或冻结基线。
 - **v1.3 Step 5: 动态组合广度与集中度可行性诊断 已完成（observer-only）**：
   - **只做observer诊断**：不修改交易规则、不制定动态参数、不回测动态仓位策略。不修改B0.4、生产策略、ETF池、数据库或调仓引擎。

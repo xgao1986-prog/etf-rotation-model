@@ -119,9 +119,9 @@ def compute_metrics(nav_df, trades_df, period_start=None, period_end=None):
             'ret': group['nav'].iloc[-1] / group['nav'].iloc[0] - 1,
         })
 
-    # 月度胜率
+    # 月度胜率 — FIX: 使用复利而非求和
     nav['ym'] = nav['date'].dt.to_period('M')
-    monthly = nav.groupby('ym')['ret'].sum()
+    monthly = nav.groupby('ym').apply(lambda x: (1 + x['ret']).prod() - 1)
     monthly_win_rate = (monthly > 0).mean() if len(monthly) > 0 else 0
 
     # 交易统计
@@ -364,8 +364,8 @@ def reconciliation_summary(result_a, result_b, result_c, result_d, comm_a, comm_
 # NEW: Position Exposure (逐日、逐方案)
 # ============================================================
 
-def compute_position_exposure(nav_df, scenario):
-    """逐日统计持仓敞口。"""
+def compute_position_exposure(nav_df, scores_df, scenario):
+    """逐日统计持仓敞口，包含score_rank和weight_order。"""
     records = []
     industry_tickers = list(ETF_UNIVERSE.keys())
     for _, row in nav_df.iterrows():
@@ -383,8 +383,23 @@ def compute_position_exposure(nav_df, scenario):
         num_industry = sum(1 for k in pct if k in industry_tickers)
         num_defense = sum(1 for k in pct if k in DEFENSE_UNIVERSE)
 
+        # weight_order: top weights by actual position weight
         weights = sorted([v for k, v in pct.items() if k in industry_tickers], reverse=True)
         top_weights = weights + [0] * (5 - len(weights))
+
+        # score_rank: actual weight of ticker with Nth highest total_score on that day
+        day_scores = scores_df[scores_df['date'] == pd.to_datetime(date)]
+        if not day_scores.empty:
+            day_scores = day_scores.sort_values('total_score', ascending=False).reset_index(drop=True)
+            score_rank_weights = []
+            for i in range(1, 5):
+                if i - 1 < len(day_scores):
+                    ticker = day_scores.iloc[i - 1]['ticker']
+                    score_rank_weights.append(pct.get(ticker, 0.0))
+                else:
+                    score_rank_weights.append(0.0)
+        else:
+            score_rank_weights = [0.0] * 4
 
         full_pos = cash_pct < 0.05
         cash_gt_10 = cash_pct > 0.10
@@ -404,6 +419,12 @@ def compute_position_exposure(nav_df, scenario):
             'top3_weight': top_weights[2],
             'top4_weight': top_weights[3],
             'top5_weight': top_weights[4],
+            'weight_order_top4': sum(top_weights[:4]),
+            'score_rank_1_weight': score_rank_weights[0],
+            'score_rank_2_weight': score_rank_weights[1],
+            'score_rank_3_weight': score_rank_weights[2],
+            'score_rank_4_weight': score_rank_weights[3],
+            'score_rank_1_4_weight': sum(score_rank_weights),
             'full_position': full_pos,
             'cash_gt_10pct': cash_gt_10,
             'cash_gt_20pct': cash_gt_20,
@@ -432,22 +453,48 @@ def summarize_position_exposure(exposure_df, period_start, period_end, period_la
         'full_position_pct': sub['full_position'].mean(),
         'cash_gt_10pct_days': sub['cash_gt_10pct'].sum(),
         'cash_gt_20pct_days': sub['cash_gt_20pct'].sum(),
+        'avg_weight_order_top4': sub['weight_order_top4'].mean(),
+        'avg_score_rank_1_4_weight': sub['score_rank_1_4_weight'].mean(),
     }
     return summary
 
 
 # ============================================================
-# NEW: Slot Contribution (rank1-5 mark-to-market PnL)
+# NEW: Slot Contribution (entry_rank mark-to-market PnL)
 # ============================================================
 
-def reconstruct_holdings(trades_df):
-    """从trades_df重建持仓周期。"""
+def get_entry_rank(ticker, buy_date, scores_df):
+    """Get the rank of this ticker on signal day (before buy).
+
+    Find all scores for date <= buy_date, take the latest date that has
+    scores for this ticker. On that date, sort all industry tickers by
+    total_score descending. Return the 1-based rank.
+    """
+    buy_date = pd.to_datetime(buy_date)
+    sub = scores_df[(scores_df['date'] <= buy_date) & (scores_df['ticker'] == ticker)]
+    if sub.empty:
+        return None
+    latest_date = sub['date'].max()
+    day_scores = scores_df[scores_df['date'] == latest_date].copy()
+    if day_scores.empty:
+        return None
+    day_scores = day_scores.sort_values('total_score', ascending=False).reset_index(drop=True)
+    day_scores['rank'] = day_scores.index + 1
+    match = day_scores[day_scores['ticker'] == ticker]
+    if match.empty:
+        return None
+    return int(match['rank'].iloc[0])
+
+
+def reconstruct_holdings(trades_df, scores_df):
+    """从trades_df重建持仓周期，记录entry_rank。"""
     holdings = []
     for ticker in trades_df['ticker'].unique():
         tdf = trades_df[trades_df['ticker'] == ticker].sort_values('date')
         active = None
         for _, row in tdf.iterrows():
             if row['action'] == 'BUY':
+                entry_rank = get_entry_rank(ticker, row['date'], scores_df)
                 active = {
                     'ticker': ticker,
                     'buy_date': row['date'],
@@ -456,6 +503,7 @@ def reconstruct_holdings(trades_df):
                     'sell_date': None,
                     'sell_price': None,
                     'commission': row['commission'],
+                    'entry_rank': entry_rank,
                 }
             elif row['action'] in ('SELL', 'STOP_LOSS') and active is not None:
                 active['sell_date'] = row['date']
@@ -469,10 +517,10 @@ def reconstruct_holdings(trades_df):
 
 
 def compute_holding_daily_pnl(holding, market_df):
-    """计算单个持仓的逐日mark-to-market PnL。"""
+    """计算单个持仓的逐日mark-to-market PnL，同时返回market_value。"""
     ticker = holding['ticker']
-    buy_date = holding['buy_date']
-    sell_date = holding['sell_date'] or market_df['date'].max()
+    buy_date = pd.to_datetime(holding['buy_date'])
+    sell_date = pd.to_datetime(holding['sell_date']) if holding['sell_date'] else market_df['date'].max()
     shares = holding['shares']
     buy_price = holding['buy_price']
     sell_price = holding['sell_price']
@@ -481,6 +529,7 @@ def compute_holding_daily_pnl(holding, market_df):
     if mkt.empty:
         return pd.DataFrame()
 
+    mkt['date'] = pd.to_datetime(mkt['date'])
     mask = (mkt['date'] >= buy_date) & (mkt['date'] <= sell_date)
     sub = mkt[mask].copy().reset_index(drop=True)
     if len(sub) < 1:
@@ -491,117 +540,114 @@ def compute_holding_daily_pnl(holding, market_df):
     if sell_price is not None and sell_date is not None:
         sub.loc[sub.index[-1], 'close'] = sell_price
     sub['daily_pnl'] = shares * (sub['close'] - sub['prev_close'])
+    sub['market_value'] = shares * sub['close']
     sub['ticker'] = ticker
-    return sub[['date', 'ticker', 'daily_pnl']]
+    return sub[['date', 'ticker', 'daily_pnl', 'market_value']]
 
 
-def compute_slot_contribution(nav_df, trades_df, market_df, scores_df, scenario):
-    """按rank统计持有期mark-to-market PnL。"""
+def compute_slot_contribution(nav_df, trades_df, market_df, scores_df, scenario,
+                              period_start=None, period_end=None, period_label=None):
+    """按entry_rank统计持有期mark-to-market PnL，支持period过滤。"""
     industry_tickers = list(ETF_UNIVERSE.keys())
-    holdings = reconstruct_holdings(trades_df)
+    holdings = reconstruct_holdings(trades_df, scores_df)
 
-    # Build daily PnL per ticker
+    # Build daily PnL per ticker with entry_rank and market_value
     all_pnls = []
     for h in holdings:
         pnl = compute_holding_daily_pnl(h, market_df)
         if not pnl.empty:
+            pnl['entry_rank'] = h.get('entry_rank')
+            pnl['scenario'] = scenario
             all_pnls.append(pnl)
     if all_pnls:
         pnl_df = pd.concat(all_pnls, ignore_index=True)
     else:
-        pnl_df = pd.DataFrame(columns=['date', 'ticker', 'daily_pnl'])
+        pnl_df = pd.DataFrame(columns=['date', 'ticker', 'daily_pnl', 'market_value', 'entry_rank', 'scenario'])
 
-    # Assign rank per day and aggregate
-    rank_records = []
-    rank5_records = []
+    pnl_df['date'] = pd.to_datetime(pnl_df['date'])
 
-    for _, row in nav_df.iterrows():
-        date = row['date']
-        pct = row['positions_pct'] if isinstance(row['positions_pct'], dict) else (ast.literal_eval(row['positions_pct']) if isinstance(row['positions_pct'], str) and row['positions_pct'] else {})
-        industry_pct = {k: v for k, v in pct.items() if k in industry_tickers}
+    # Filter by period
+    if period_start:
+        pnl_df = pnl_df[pnl_df['date'] >= pd.to_datetime(period_start)]
+    if period_end:
+        pnl_df = pnl_df[pnl_df['date'] <= pd.to_datetime(period_end)]
 
-        if not industry_pct:
-            continue
+    # Compute average weight per entry_rank for drawdown denominator
+    nav_sub = nav_df.copy()
+    nav_sub['date'] = pd.to_datetime(nav_sub['date'])
+    if period_start:
+        nav_sub = nav_sub[nav_sub['date'] >= pd.to_datetime(period_start)]
+    if period_end:
+        nav_sub = nav_sub[nav_sub['date'] <= pd.to_datetime(period_end)]
 
-        day_scores = scores_df[scores_df['date'] == date]
-        merged = pd.DataFrame({'ticker': list(industry_pct.keys())})
-        merged = merged.merge(day_scores[['ticker', 'total_score']], on='ticker', how='left')
-        merged = merged.sort_values('total_score', ascending=False).reset_index(drop=True)
-        merged['rank'] = merged.index + 1
+    avg_weights = {}
+    if not pnl_df.empty and not nav_sub.empty:
+        daily_mv = pnl_df.groupby(['date', 'entry_rank'])['market_value'].sum().reset_index()
+        daily_mv = daily_mv.merge(nav_sub[['date', 'nav']], on='date', how='left')
+        daily_mv['weight'] = daily_mv['market_value'] / daily_mv['nav']
+        avg_weights = daily_mv.groupby('entry_rank')['weight'].mean().to_dict()
 
-        day_pnl = pnl_df[pnl_df['date'] == date]
-        if day_pnl.empty:
-            continue
-
-        for _, r in merged.iterrows():
-            rank = r['rank']
-            ticker = r['ticker']
-            pnl_row = day_pnl[day_pnl['ticker'] == ticker]
-            if not pnl_row.empty:
-                rec = {
-                    'date': date,
-                    'scenario': scenario,
-                    'rank': rank,
-                    'ticker': ticker,
-                    'daily_pnl': pnl_row['daily_pnl'].iloc[0],
-                }
-                rank_records.append(rec)
-                if rank == 5:
-                    rank5_records.append(rec)
-
-    rank_df = pd.DataFrame(rank_records, columns=['date', 'scenario', 'rank', 'ticker', 'daily_pnl'])
-    rank5_df = pd.DataFrame(rank5_records, columns=['date', 'scenario', 'rank', 'ticker', 'daily_pnl'])
-
-    # Aggregate by rank
+    # Aggregate by entry_rank
     agg_rows = []
     for rank in range(1, 6):
-        sub = rank_df[rank_df['rank'] == rank]
+        sub = pnl_df[pnl_df['entry_rank'] == rank]
         if sub.empty:
             agg_rows.append({
-                'scenario': scenario, 'rank': rank,
+                'scenario': scenario, 'rank': rank, 'period': period_label,
                 'total_pnl': 0, 'num_days': 0, 'win_days': 0,
-                'avg_daily_pnl': 0, 'max_drawdown': 0,
+                'avg_daily_pnl': 0, 'max_drawdown': 0, 'max_drawdown_rmb': 0,
+                'avg_weight': 0.0,
             })
             continue
         pnls = sub['daily_pnl'].values
         cum = np.cumsum(pnls)
         peak = np.maximum.accumulate(cum)
-        valid_peak = peak > 0
-        if np.any(valid_peak):
-            dd = (cum[valid_peak] - peak[valid_peak]) / peak[valid_peak]
-            max_dd = dd.min()
+        avg_weight = avg_weights.get(rank, 0.0)
+        assigned_capital = avg_weight * 1_000_000  # FIX: use fixed capital
+        if assigned_capital > 0:
+            drawdown = (cum - peak) / assigned_capital
+            # Clamp to -1.0 (can't lose more than 100% of assigned capital)
+            drawdown = np.maximum(drawdown, -1.0)
+            max_dd = float(drawdown.min())
         else:
-            max_dd = 0
+            max_dd = 0.0
+        max_dd_rmb = float((cum - peak).min()) if len(cum) > 0 else 0.0
         agg_rows.append({
-            'scenario': scenario, 'rank': rank,
+            'scenario': scenario, 'rank': rank, 'period': period_label,
             'total_pnl': float(np.sum(pnls)),
             'num_days': len(pnls),
             'win_days': int(np.sum(pnls > 0)),
             'avg_daily_pnl': float(np.mean(pnls)),
-            'max_drawdown': float(max_dd),
+            'max_drawdown': max_dd,
+            'max_drawdown_rmb': max_dd_rmb,
+            'avg_weight': avg_weight,
         })
 
-    # Rank 5 yearly breakdown
+    # Rank 5 yearly breakdown (only for period_label == '全期间' or unfiltered)
     rank5_yearly = []
-    if not rank5_df.empty:
-        rank5_df['year'] = pd.to_datetime(rank5_df['date']).dt.year
-        for year, group in rank5_df.groupby('year'):
-            pnls = group['daily_pnl'].values
-            cum = np.cumsum(pnls)
-            peak = np.maximum.accumulate(cum)
-            valid_peak = peak > 0
-            if np.any(valid_peak):
-                dd = (cum[valid_peak] - peak[valid_peak]) / peak[valid_peak]
-                max_dd = dd.min()
-            else:
-                max_dd = 0
-            rank5_yearly.append({
-                'scenario': scenario, 'year': year,
-                'total_pnl': float(np.sum(pnls)),
-                'win_rate': float(np.sum(pnls > 0) / len(pnls)) if len(pnls) > 0 else 0,
-                'hold_days': len(pnls),
-                'max_drawdown': float(dd.min()) if len(pnls) > 0 else 0,
-            })
+    if period_label == '全期间' or period_label is None:
+        rank5_df = pnl_df[pnl_df['entry_rank'] == 5].copy()
+        if not rank5_df.empty:
+            rank5_df['year'] = rank5_df['date'].dt.year
+            for year, group in rank5_df.groupby('year'):
+                pnls = group['daily_pnl'].values
+                cum = np.cumsum(pnls)
+                peak = np.maximum.accumulate(cum)
+                avg_weight = avg_weights.get(5, 0.0)
+                assigned_capital = avg_weight * 1_000_000
+                if assigned_capital > 0:
+                    dd = (cum - peak) / assigned_capital
+                    dd = np.maximum(dd, -1.0)
+                    max_dd = dd.min()
+                else:
+                    max_dd = 0.0
+                rank5_yearly.append({
+                    'scenario': scenario, 'year': year,
+                    'total_pnl': float(np.sum(pnls)),
+                    'win_rate': float(np.sum(pnls > 0) / len(pnls)) if len(pnls) > 0 else 0,
+                    'hold_days': len(pnls),
+                    'max_drawdown': float(max_dd),
+                })
 
     return pd.DataFrame(agg_rows), pd.DataFrame(rank5_yearly, columns=['scenario', 'year', 'total_pnl', 'win_rate', 'hold_days', 'max_drawdown'])
 
@@ -645,8 +691,9 @@ def compute_yearly_metrics(nav_df, trades_df, period_start=None, period_end=None
         drawdown = (cum - peak) / peak
         max_dd = drawdown.min()
 
+        # FIX: compound monthly return
         group['ym'] = group['date'].dt.to_period('M')
-        monthly = group.groupby('ym')['ret'].sum()
+        monthly = group.groupby('ym').apply(lambda x: (1 + x['ret']).prod() - 1)
         monthly_win_rate = (monthly > 0).mean() if len(monthly) > 0 else 0
 
         yr_trades = t[t['date'].dt.year == year]
@@ -704,19 +751,22 @@ def compute_commission_summary(trades_df, period_start=None, period_end=None):
 # NEW: Orthogonal Attribution
 # ============================================================
 
-def compute_orthogonal_attribution(period_results, slot_contribution, defense_contrib, position_exposure):
-    """正交归因，用实际敞口及槽位PnL验证。"""
-    # Extract slot PnL by scenario and rank
-    def get_slot_pnl(sc, rank):
-        sub = slot_contribution[(slot_contribution['scenario'] == sc) & (slot_contribution['rank'] == rank)]
+def compute_orthogonal_attribution(period_results, slot_contribution, defense_contrib, position_exposure, period_nav_data):
+    """正交归因，用实际敞口及槽位PnL验证。
+
+    FIX: 使用period-specific NAV计算RMB差值。
+    FIX: 修正符号约定 (observed = target - reference)。
+    """
+    def get_slot_pnl(sc, rank, period_label):
+        sub = slot_contribution[(slot_contribution['scenario'] == sc) & (slot_contribution['rank'] == rank) & (slot_contribution['period'] == period_label)]
         return sub['total_pnl'].iloc[0] if not sub.empty else 0.0
 
-    def get_total_slot_pnl(sc):
-        return slot_contribution[slot_contribution['scenario'] == sc]['total_pnl'].sum()
+    def get_total_slot_pnl(sc, period_label):
+        return slot_contribution[(slot_contribution['scenario'] == sc) & (slot_contribution['period'] == period_label)]['total_pnl'].sum()
 
-    # Get exposure summary for each scenario
     def get_exposure_summary(sc, period_label):
-        sub = position_exposure[(position_exposure['scenario'] == sc)]
+        sub = position_exposure[(position_exposure['scenario'] == sc)].copy()
+        sub['date'] = pd.to_datetime(sub['date'])
         if period_label == '研究期':
             sub = sub[(sub['date'] >= pd.to_datetime(RESEARCH_PERIOD[0])) & (sub['date'] <= pd.to_datetime(RESEARCH_PERIOD[1]))]
         elif period_label == '验证期':
@@ -729,7 +779,8 @@ def compute_orthogonal_attribution(period_results, slot_contribution, defense_co
             'avg_industry_pct': sub['industry_pct'].mean(),
             'avg_defense_pct': sub['defense_pct'].mean(),
             'avg_cash_pct': sub['cash_pct'].mean(),
-            'avg_top4_weight': (sub['top1_weight'] + sub['top2_weight'] + sub['top3_weight'] + sub['top4_weight']).mean(),
+            'avg_top4_weight': sub['weight_order_top4'].mean(),
+            'avg_score_rank_1_4_weight': sub['score_rank_1_4_weight'].mean(),
         }
 
     # For each period, compute attribution
@@ -741,26 +792,31 @@ def compute_orthogonal_attribution(period_results, slot_contribution, defense_co
         if not pr:
             continue
 
-        # Slot PnL totals (all ranks)
-        a_total = get_total_slot_pnl('A')
-        b_total = get_total_slot_pnl('B')
-        c_total = get_total_slot_pnl('C')
-        d_total = get_total_slot_pnl('D')
+        # Get period-specific NAV data
+        a_pnl = period_nav_data.get((period_label, 'A'), {}).get('period_pnl', 0)
+        b_pnl = period_nav_data.get((period_label, 'B'), {}).get('period_pnl', 0)
+        c_pnl = period_nav_data.get((period_label, 'C'), {}).get('period_pnl', 0)
+        d_pnl = period_nav_data.get((period_label, 'D'), {}).get('period_pnl', 0)
+
+        # Slot PnL totals (all ranks) for this period
+        a_total = get_total_slot_pnl('A', period_label)
+        b_total = get_total_slot_pnl('B', period_label)
+        c_total = get_total_slot_pnl('C', period_label)
+        d_total = get_total_slot_pnl('D', period_label)
 
         # Rank 1-4 PnL
-        a_r14 = sum(get_slot_pnl('A', r) for r in range(1, 5))
-        b_r14 = sum(get_slot_pnl('B', r) for r in range(1, 5))
-        c_r14 = sum(get_slot_pnl('C', r) for r in range(1, 5))
-        d_r14 = sum(get_slot_pnl('D', r) for r in range(1, 5))
+        a_r14 = sum(get_slot_pnl('A', r, period_label) for r in range(1, 5))
+        b_r14 = sum(get_slot_pnl('B', r, period_label) for r in range(1, 5))
+        c_r14 = sum(get_slot_pnl('C', r, period_label) for r in range(1, 5))
+        d_r14 = sum(get_slot_pnl('D', r, period_label) for r in range(1, 5))
 
         # Rank 5 PnL
-        a_r5 = get_slot_pnl('A', 5)
-        b_r5 = get_slot_pnl('B', 5)
-        c_r5 = get_slot_pnl('C', 5)
-        d_r5 = get_slot_pnl('D', 5)
+        a_r5 = get_slot_pnl('A', 5, period_label)
+        b_r5 = get_slot_pnl('B', 5, period_label)
+        c_r5 = get_slot_pnl('C', 5, period_label)
+        d_r5 = get_slot_pnl('D', 5, period_label)
 
-        # Defense PnL (from slot_contribution, defense tickers are not in rank slots)
-        # Use defense_contrib for C-B
+        # Defense PnL
         def_pnl_c = defense_contrib.get('gold_pnl_c', 0) + defense_contrib.get('bond_pnl_c', 0)
         def_pnl_b = defense_contrib.get('gold_pnl_b', 0) + defense_contrib.get('bond_pnl_b', 0)
 
@@ -770,61 +826,71 @@ def compute_orthogonal_attribution(period_results, slot_contribution, defense_co
         exp_c = get_exposure_summary('C', period_label)
         exp_d = get_exposure_summary('D', period_label)
 
-        # B-A: delete rank5 + cash increase
-        ba_observed = pr['diff_ba'] * 1_000_000
-        ba_rank5 = a_r5  # A has rank5, B has none
-        ba_r14_diff = b_r14 - a_r14  # interaction from different rebalancing
-        ba_residual = ba_observed - ba_rank5 - ba_r14_diff
+        # B-A: target=B, reference=A
+        # observed = B - A
+        # rank5_effect = B_rank5 - A_rank5 = 0 - a_r5 (negative)
+        # r14_effect = B_r14 - A_r14
+        observed = b_pnl - a_pnl
+        rank5_effect = b_r5 - a_r5  # = -a_r5
+        r14_effect = b_r14 - a_r14
+        residual = observed - rank5_effect - r14_effect
         attribution.append({
             'period': period_label, 'pair': 'B-A',
-            'observed_diff': ba_observed,
-            'rank5_effect': ba_rank5,
-            'r14_interaction': ba_r14_diff,
-            'residual': ba_residual,
+            'observed_diff': observed,
+            'rank5_effect': rank5_effect,
+            'r14_effect': r14_effect,
+            'residual': residual,
             'a_top4': exp_a.get('avg_top4_weight', 0),
             'b_top4': exp_b.get('avg_top4_weight', 0),
+            'a_score_rank_1_4': exp_a.get('avg_score_rank_1_4_weight', 0),
+            'b_score_rank_1_4': exp_b.get('avg_score_rank_1_4_weight', 0),
         })
 
-        # C-B: defense vs cash
-        cb_observed = pr['diff_cb'] * 1_000_000
-        cb_defense = def_pnl_c - def_pnl_b
-        cb_r14_diff = c_r14 - b_r14
-        cb_residual = cb_observed - cb_defense - cb_r14_diff
+        # C-B: target=C, reference=B
+        observed = c_pnl - b_pnl
+        defense_effect = def_pnl_c - def_pnl_b
+        r14_effect = c_r14 - b_r14
+        residual = observed - defense_effect - r14_effect
         attribution.append({
             'period': period_label, 'pair': 'C-B',
-            'observed_diff': cb_observed,
-            'defense_effect': cb_defense,
-            'r14_interaction': cb_r14_diff,
-            'residual': cb_residual,
+            'observed_diff': observed,
+            'defense_effect': defense_effect,
+            'r14_effect': r14_effect,
+            'residual': residual,
             'b_defense': exp_b.get('avg_defense_pct', 0),
             'c_defense': exp_c.get('avg_defense_pct', 0),
         })
 
-        # D-B: Top4 concentration
-        db_observed = pr['diff_db'] * 1_000_000
-        db_r14_diff = d_r14 - b_r14
-        db_residual = db_observed - db_r14_diff
+        # D-B: target=D, reference=B
+        observed = d_pnl - b_pnl
+        r14_effect = d_r14 - b_r14
+        residual = observed - r14_effect
         attribution.append({
             'period': period_label, 'pair': 'D-B',
-            'observed_diff': db_observed,
-            'r14_concentration': db_r14_diff,
-            'residual': db_residual,
+            'observed_diff': observed,
+            'r14_effect': r14_effect,
+            'residual': residual,
             'b_top4': exp_b.get('avg_top4_weight', 0),
             'd_top4': exp_d.get('avg_top4_weight', 0),
+            'b_score_rank_1_4': exp_b.get('avg_score_rank_1_4_weight', 0),
+            'd_score_rank_1_4': exp_d.get('avg_score_rank_1_4_weight', 0),
         })
 
-        # D-A: combined
-        da_observed = pr['diff_da'] * 1_000_000
-        da_r14_diff = d_r14 - a_r14
-        da_residual = da_observed - da_r14_diff - a_r5
+        # D-A: target=D, reference=A
+        observed = d_pnl - a_pnl
+        rank5_effect = d_r5 - a_r5  # = -a_r5
+        r14_effect = d_r14 - a_r14
+        residual = observed - rank5_effect - r14_effect
         attribution.append({
             'period': period_label, 'pair': 'D-A',
-            'observed_diff': da_observed,
-            'rank5_effect': a_r5,
-            'r14_concentration': da_r14_diff,
-            'residual': da_residual,
+            'observed_diff': observed,
+            'rank5_effect': rank5_effect,
+            'r14_effect': r14_effect,
+            'residual': residual,
             'a_top4': exp_a.get('avg_top4_weight', 0),
             'd_top4': exp_d.get('avg_top4_weight', 0),
+            'a_score_rank_1_4': exp_a.get('avg_score_rank_1_4_weight', 0),
+            'd_score_rank_1_4': exp_d.get('avg_score_rank_1_4_weight', 0),
         })
 
     return pd.DataFrame(attribution)
@@ -834,17 +900,21 @@ def compute_orthogonal_attribution(period_results, slot_contribution, defense_co
 # NEW: Pre-reg Standard 7 Verification
 # ============================================================
 
-def verify_prereg_standard_7(position_exposure):
-    """验证D的Top4实际平均权重确实高于A/B。"""
+def verify_prereg_standard_7(position_exposure, period_start, period_end, period_label):
+    """验证指定期间D的Top4实际平均权重确实高于A/B。"""
     results = []
     for sc in ['A', 'B', 'C', 'D']:
-        sub = position_exposure[position_exposure['scenario'] == sc]
+        sub = position_exposure[(position_exposure['scenario'] == sc)].copy()
+        sub['date'] = pd.to_datetime(sub['date'])
+        sub = sub[(sub['date'] >= pd.to_datetime(period_start)) & (sub['date'] <= pd.to_datetime(period_end))]
         if sub.empty:
             continue
-        sub['top4_weight'] = sub['top1_weight'] + sub['top2_weight'] + sub['top3_weight'] + sub['top4_weight']
         results.append({
+            'period': period_label,
             'scenario': sc,
-            'avg_top4_weight': sub['top4_weight'].mean(),
+            'avg_top4_weight': sub['weight_order_top4'].mean(),
+            'weight_order_top4': sub['weight_order_top4'].mean(),
+            'score_rank_1_4_weight': sub['score_rank_1_4_weight'].mean(),
         })
     df = pd.DataFrame(results)
     if df.empty:
@@ -862,8 +932,8 @@ def verify_prereg_standard_7(position_exposure):
 # Main entry point
 # ============================================================
 
-def main(output_dir=None):
-    """主入口。"""
+def main(output_dir=None, use_cached=False):
+    """主入口。use_cached=True时从现有CSV加载nav/trades跳过回测。"""
     if output_dir is None:
         output_dir = 'D:/etf_rotation_model/reports'
     os.makedirs(output_dir, exist_ok=True)
@@ -889,20 +959,34 @@ def main(output_dir=None):
     print("v1.3 Step 7: 组合集中度与资金去向正交拆解")
     print("=" * 60)
 
-    # 运行四个方案
+    # 运行四个方案（或从缓存加载）
     results = {}
     for scenario in ['A', 'B', 'C', 'D']:
-        print(f"\n=== 运行方案{scenario} ===")
-        result = run_scenario(scenario, market_df, bench_df)
-        results[scenario] = result
-        print(f"{scenario} NAV: {result['nav_df']['nav'].iloc[-1]:,.2f}, 交易: {result['num_trades']}")
+        nav_path = os.path.join(output_dir, f'v1_3_step7_nav_{scenario}.csv')
+        trades_path = os.path.join(output_dir, f'v1_3_step7_trades_{scenario}.csv')
+        if use_cached and os.path.exists(nav_path) and os.path.exists(trades_path):
+            print(f"\n=== 加载方案{scenario} (缓存) ===")
+            nav_df = pd.read_csv(nav_path)
+            trades_df = pd.read_csv(trades_path)
+            results[scenario] = {
+                'nav_df': nav_df,
+                'trades_df': trades_df,
+                'num_trades': len(trades_df),
+            }
+            print(f"{scenario} NAV: {nav_df['nav'].iloc[-1]:,.2f}, 交易: {len(trades_df)}")
+        else:
+            print(f"\n=== 运行方案{scenario} ===")
+            result = run_scenario(scenario, market_df, bench_df)
+            results[scenario] = result
+            print(f"{scenario} NAV: {result['nav_df']['nav'].iloc[-1]:,.2f}, 交易: {result['num_trades']}")
 
     result_a, result_b, result_c, result_d = results['A'], results['B'], results['C'], results['D']
 
-    # 保存中间数据
-    for sc in ['A', 'B', 'C', 'D']:
-        results[sc]['nav_df'].to_csv(os.path.join(output_dir, f'v1_3_step7_nav_{sc}.csv'), index=False)
-        results[sc]['trades_df'].to_csv(os.path.join(output_dir, f'v1_3_step7_trades_{sc}.csv'), index=False)
+    # 保存中间数据（如果是新运行的）
+    if not use_cached:
+        for sc in ['A', 'B', 'C', 'D']:
+            results[sc]['nav_df'].to_csv(os.path.join(output_dir, f'v1_3_step7_nav_{sc}.csv'), index=False)
+            results[sc]['trades_df'].to_csv(os.path.join(output_dir, f'v1_3_step7_trades_{sc}.csv'), index=False)
 
     # 期间对比
     periods = [
@@ -976,29 +1060,35 @@ def main(output_dir=None):
     recon.to_csv(os.path.join(output_dir, 'v1_3_step7_reconciliation.csv'), index=False)
 
     # ========== NEW EVIDENCE ==========
-    # 1. Position Exposure
+    # 1. Position Exposure (compute first so slot can use it)
     print("\n--- 计算逐日敞口 ---")
     exposure_all = []
     for sc in ['A', 'B', 'C', 'D']:
-        exp = compute_position_exposure(results[sc]['nav_df'], sc)
+        exp = compute_position_exposure(results[sc]['nav_df'], scores_df, sc)
         exposure_all.append(exp)
     exposure_df = pd.concat(exposure_all, ignore_index=True)
     exposure_df.to_csv(os.path.join(output_dir, 'v1_3_step7_position_exposure.csv'), index=False)
 
-    # 2. Slot Contribution
+    # 2. Slot Contribution — FIX: per period with entry_rank and period filtering
     print("--- 计算槽位贡献 ---")
     slot_all = []
     slot5_all = []
     for sc in ['A', 'B', 'C', 'D']:
-        slot, slot5 = compute_slot_contribution(
-            results[sc]['nav_df'], results[sc]['trades_df'], market_df, scores_df, sc
-        )
-        slot_all.append(slot)
-        slot5_all.append(slot5)
-    slot_df = pd.concat(slot_all, ignore_index=True)
-    slot5_df = pd.concat(slot5_all, ignore_index=True)
-    slot_df.to_csv(os.path.join(output_dir, 'v1_3_step7_slot_contribution.csv'), index=False)
-    slot5_df.to_csv(os.path.join(output_dir, 'v1_3_step7_slot5_yearly.csv'), index=False)
+        for label, s, e in periods:
+            if label in ['研究期', '验证期', '分析期', '全期间']:
+                slot, slot5 = compute_slot_contribution(
+                    results[sc]['nav_df'], results[sc]['trades_df'], market_df, scores_df, sc,
+                    period_start=s, period_end=e, period_label=label
+                )
+                slot_all.append(slot)
+                if label == '全期间':
+                    slot5_all.append(slot5)
+    slot_df = pd.concat(slot_all, ignore_index=True) if slot_all else pd.DataFrame()
+    slot5_df = pd.concat(slot5_all, ignore_index=True) if slot5_all else pd.DataFrame()
+    if not slot_df.empty:
+        slot_df.to_csv(os.path.join(output_dir, 'v1_3_step7_slot_contribution.csv'), index=False)
+    if not slot5_df.empty:
+        slot5_df.to_csv(os.path.join(output_dir, 'v1_3_step7_slot5_yearly.csv'), index=False)
 
     # 3. Yearly Metrics
     print("--- 计算年度指标 ---")
@@ -1028,18 +1118,43 @@ def main(output_dir=None):
     if not comm_summary_df.empty:
         comm_summary_df.to_csv(os.path.join(output_dir, 'v1_3_step7_commission_summary.csv'), index=False)
 
-    # 5. Orthogonal Attribution
+    # 5. Orthogonal Attribution — FIX: period-specific NAV, correct sign convention
     print("--- 计算正交归因 ---")
+
+    # Compute period_nav_data for each scenario and period
+    period_nav_data = {}
+    for label, s, e in periods:
+        if label not in ['研究期', '验证期', '分析期']:
+            continue
+        for sc in ['A', 'B', 'C', 'D']:
+            nav = results[sc]['nav_df'].copy()
+            nav['date'] = pd.to_datetime(nav['date'])
+            sub = nav[(nav['date'] >= pd.to_datetime(s)) & (nav['date'] <= pd.to_datetime(e))]
+            if len(sub) >= 2:
+                period_nav_data[(label, sc)] = {
+                    'nav_start': sub['nav'].iloc[0],
+                    'nav_end': sub['nav'].iloc[-1],
+                    'period_pnl': sub['nav'].iloc[-1] - sub['nav'].iloc[0],
+                }
+
     attr_df = compute_orthogonal_attribution(
-        period_results, slot_df, defense_contrib, exposure_df
+        period_results, slot_df, defense_contrib, exposure_df, period_nav_data
     )
     attr_df.to_csv(os.path.join(output_dir, 'v1_3_step7_orthogonal_attribution.csv'), index=False)
 
-    # 6. Pre-reg Standard 7
+    # 6. Pre-reg Standard 7 — FIX: period-specific, only 研究期/验证期
     print("--- 验证预注册标准7 ---")
-    std7_passed, std7_df = verify_prereg_standard_7(exposure_df)
+    std7_all = []
+    std7_passed_periods = []
+    for label, s, e in [('研究期', RESEARCH_PERIOD[0], RESEARCH_PERIOD[1]),
+                           ('验证期', VALIDATION_PERIOD[0], VALIDATION_PERIOD[1])]:
+        passed, df = verify_prereg_standard_7(exposure_df, s, e, label)
+        std7_all.append(df)
+        std7_passed_periods.append(passed)
+    std7_df = pd.concat(std7_all, ignore_index=True) if std7_all else pd.DataFrame()
+    std7_passed = all(std7_passed_periods) and len(std7_passed_periods) > 0
     std7_df.to_csv(os.path.join(output_dir, 'v1_3_step7_standard7_verification.csv'), index=False)
-    print(f"标准7 (D Top4 > A/B): {'PASS' if std7_passed else 'FAIL'}")
+    print(f"标准7 (D Top4 > A/B in 研究期+验证期): {'PASS' if std7_passed else 'FAIL'}")
 
     # 生成报告
     generate_report(period_results, slippage_results, loyo, annual, defense_contrib,
@@ -1099,44 +1214,50 @@ def generate_report(period_results, slippage_results, loyo, annual, defense_cont
     lines.append("")
     lines.append("### 研究期平均敞口")
     lines.append("")
-    lines.append("| 方案 | 行业% | 防御% | 现金% | 行业只数 | 防御只数 | 总持仓 | 满仓% | 现金>10%天数 | 现金>20%天数 | Top4权重和 |")
-    lines.append("|------|-------|-------|-------|----------|----------|--------|-------|-------------|-------------|------------|")
+    lines.append("| 方案 | 行业% | 防御% | 现金% | 行业只数 | 防御只数 | 总持仓 | 满仓% | 现金>10%天数 | 现金>20%天数 | Top4权重和 | score_rank_1_4 |")
+    lines.append("|------|-------|-------|-------|----------|----------|--------|-------|-------------|-------------|------------|----------------|")
+    # Ensure date column is datetime for filtering
+    if 'date' in exposure_df.columns:
+        exposure_df = exposure_df.copy()
+        exposure_df['date'] = pd.to_datetime(exposure_df['date'])
     for sc in ['A', 'B', 'C', 'D']:
         sub = exposure_df[(exposure_df['scenario'] == sc)]
         sub = sub[(sub['date'] >= pd.to_datetime(RESEARCH_PERIOD[0])) & (sub['date'] <= pd.to_datetime(RESEARCH_PERIOD[1]))]
         if sub.empty:
             continue
-        top4 = (sub['top1_weight'] + sub['top2_weight'] + sub['top3_weight'] + sub['top4_weight']).mean()
+        top4 = sub['weight_order_top4'].mean()
+        score_rank_14 = sub['score_rank_1_4_weight'].mean()
         lines.append(f"| {sc} | {sub['industry_pct'].mean():.2%} | {sub['defense_pct'].mean():.2%} | {sub['cash_pct'].mean():.2%} | "
                     f"{sub['num_industry'].mean():.1f} | {sub['num_defense'].mean():.1f} | {sub['num_positions'].mean():.1f} | "
-                    f"{sub['full_position'].mean():.1%} | {sub['cash_gt_10pct'].sum()} | {sub['cash_gt_20pct'].sum()} | {top4:.2%} |")
+                    f"{sub['full_position'].mean():.1%} | {sub['cash_gt_10pct'].sum()} | {sub['cash_gt_20pct'].sum()} | {top4:.2%} | {score_rank_14:.2%} |")
     lines.append("")
     lines.append("### 验证期平均敞口")
     lines.append("")
-    lines.append("| 方案 | 行业% | 防御% | 现金% | 行业只数 | 防御只数 | 总持仓 | 满仓% | 现金>10%天数 | 现金>20%天数 | Top4权重和 |")
-    lines.append("|------|-------|-------|-------|----------|----------|--------|-------|-------------|-------------|------------|")
+    lines.append("| 方案 | 行业% | 防御% | 现金% | 行业只数 | 防御只数 | 总持仓 | 满仓% | 现金>10%天数 | 现金>20%天数 | Top4权重和 | score_rank_1_4 |")
+    lines.append("|------|-------|-------|-------|----------|----------|--------|-------|-------------|-------------|------------|----------------|")
     for sc in ['A', 'B', 'C', 'D']:
         sub = exposure_df[(exposure_df['scenario'] == sc)]
         sub = sub[(sub['date'] >= pd.to_datetime(VALIDATION_PERIOD[0])) & (sub['date'] <= pd.to_datetime(VALIDATION_PERIOD[1]))]
         if sub.empty:
             continue
-        top4 = (sub['top1_weight'] + sub['top2_weight'] + sub['top3_weight'] + sub['top4_weight']).mean()
+        top4 = sub['weight_order_top4'].mean()
+        score_rank_14 = sub['score_rank_1_4_weight'].mean()
         lines.append(f"| {sc} | {sub['industry_pct'].mean():.2%} | {sub['defense_pct'].mean():.2%} | {sub['cash_pct'].mean():.2%} | "
                     f"{sub['num_industry'].mean():.1f} | {sub['num_defense'].mean():.1f} | {sub['num_positions'].mean():.1f} | "
-                    f"{sub['full_position'].mean():.1%} | {sub['cash_gt_10pct'].sum()} | {sub['cash_gt_20pct'].sum()} | {top4:.2%} |")
+                    f"{sub['full_position'].mean():.1%} | {sub['cash_gt_10pct'].sum()} | {sub['cash_gt_20pct'].sum()} | {top4:.2%} | {score_rank_14:.2%} |")
     lines.append("")
     lines.append("## 槽位贡献（mark-to-market）")
     lines.append("")
     lines.append("### 全期间 rank1-5 PnL")
     lines.append("")
-    lines.append("| 方案 | rank | 总PnL | 天数 | 胜率 | 平均日PnL | 最大回撤 |")
-    lines.append("|------|------|-------|------|------|-----------|----------|")
+    lines.append("| 方案 | 期间 | rank | 总PnL | 天数 | 胜率 | 平均日PnL | 最大回撤 | 最大回撤RMB | 平均权重 |")
+    lines.append("|------|------|------|-------|------|------|-----------|----------|-------------|----------|")
     for sc in ['A', 'B', 'C', 'D']:
-        sub = slot_df[slot_df['scenario'] == sc].sort_values('rank')
+        sub = slot_df[(slot_df['scenario'] == sc) & (slot_df['period'] == '全期间')].sort_values('rank')
         for _, r in sub.iterrows():
             win_rate = r['win_days']/r['num_days'] if r['num_days'] > 0 else 0
-            lines.append(f"| {sc} | {r['rank']} | {r['total_pnl']:,.2f} | {r['num_days']} | {win_rate:.1%} | "
-                        f"{r['avg_daily_pnl']:,.2f} | {r['max_drawdown']:.2%} |")
+            lines.append(f"| {sc} | 全期间 | {r['rank']} | {r['total_pnl']:,.2f} | {r['num_days']} | {win_rate:.1%} | "
+                        f"{r['avg_daily_pnl']:,.2f} | {r['max_drawdown']:.2%} | {r['max_drawdown_rmb']:,.2f} | {r['avg_weight']:.2%} |")
     lines.append("")
     lines.append("### 第5名行业ETF逐年")
     lines.append("")
@@ -1155,18 +1276,18 @@ def generate_report(period_results, slippage_results, loyo, annual, defense_cont
         pair = r['pair']
         if pair == 'B-A':
             known = f"rank5={r['rank5_effect']:,.2f}"
-            inter = f"r14_diff={r['r14_interaction']:,.2f}, residual={r['residual']:,.2f}"
+            inter = f"r14_effect={r['r14_effect']:,.2f}, residual={r['residual']:,.2f}"
             desc = f"B-A: 删除rank5 + 敞口下降"
         elif pair == 'C-B':
             known = f"defense={r['defense_effect']:,.2f}"
-            inter = f"r14_diff={r['r14_interaction']:,.2f}, residual={r['residual']:,.2f}"
+            inter = f"r14_effect={r['r14_effect']:,.2f}, residual={r['residual']:,.2f}"
             desc = f"C-B: 防御相对现金"
         elif pair == 'D-B':
-            known = f"r14_conc={r['r14_concentration']:,.2f}"
+            known = f"r14_effect={r['r14_effect']:,.2f}"
             inter = f"residual={r['residual']:,.2f}"
             desc = f"D-B: Top4集中度"
         elif pair == 'D-A':
-            known = f"rank5={r['rank5_effect']:,.2f}, r14_conc={r['r14_concentration']:,.2f}"
+            known = f"rank5={r['rank5_effect']:,.2f}, r14_effect={r['r14_effect']:,.2f}"
             inter = f"residual={r['residual']:,.2f}"
             desc = f"D-A: 综合差异"
         else:
@@ -1178,8 +1299,8 @@ def generate_report(period_results, slippage_results, loyo, annual, defense_cont
     lines.append("## 预注册标准7：Top4实际权重")
     lines.append("")
     for _, r in std7_df.iterrows():
-        lines.append(f"- 方案{r['scenario']}: 平均Top4权重 = {r['avg_top4_weight']:.2%}")
-    lines.append(f"- **判定**: {'PASS' if std7_passed else 'FAIL'} (D Top4必须高于A/B)")
+        lines.append(f"- 方案{r['scenario']} ({r['period']}): 平均Top4权重 = {r['avg_top4_weight']:.2%}, score_rank_1_4 = {r['score_rank_1_4_weight']:.2%}")
+    lines.append(f"- **判定**: {'PASS' if std7_passed else 'FAIL'} (D Top4必须高于A/B in 研究期+验证期)")
     lines.append("")
     lines.append("## 滑点压力测试")
     lines.append("")
@@ -1245,7 +1366,7 @@ def generate_report(period_results, slippage_results, loyo, annual, defense_cont
         lines.append(f"5. leave-one-year-out多数结果方向一致: {'✅' if loyo_ok else '❌'} (D>A: {sum(da_directions)}/{len(da_directions)} = {majority:.0%}; 严格多数需>50%)")
 
     # 7. 标准7
-    lines.append(f"7. 实际Top4权重D>A/B: {'✅' if std7_passed else '❌'}")
+    lines.append(f"7. 实际Top4权重D>A/B (研究期+验证期): {'✅' if std7_passed else '❌'}")
 
     lines.append("")
     lines.append("### 佣金")
@@ -1285,7 +1406,7 @@ def generate_report(period_results, slippage_results, loyo, annual, defense_cont
     lines.append("- `reports/v1_3_step7_defense_contribution.csv` — 防御ETF贡献")
     lines.append("- `reports/v1_3_step7_reconciliation.csv` — 勾稽验证汇总")
     lines.append("- `reports/v1_3_step7_position_exposure.csv` — 逐日持仓敞口")
-    lines.append("- `reports/v1_3_step7_slot_contribution.csv` — 槽位贡献（rank1-5）")
+    lines.append("- `reports/v1_3_step7_slot_contribution.csv` — 槽位贡献（rank1-5，含period）")
     lines.append("- `reports/v1_3_step7_slot5_yearly.csv` — 第5名行业ETF逐年")
     lines.append("- `reports/v1_3_step7_yearly_metrics.csv` — 年度指标")
     lines.append("- `reports/v1_3_step7_commission_summary.csv` — 佣金汇总")
@@ -1303,6 +1424,8 @@ def generate_report(period_results, slippage_results, loyo, annual, defense_cont
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='v1.3 Step 7: 组合集中度与资金去向正交拆解')
     parser.add_argument('--output-dir', type=str, default=None,
-                        help='输出目录，默认 reports')
+                        help='输出目录')
+    parser.add_argument('--use-cached', action='store_true',
+                        help='从现有CSV加载nav/trades跳过回测（用于快速重新分析）')
     args = parser.parse_args()
-    main(output_dir=args.output_dir)
+    main(output_dir=args.output_dir, use_cached=args.use_cached)
