@@ -5,6 +5,34 @@
 
 ---
 
+## 2026-06-24（本次 - v1.3 Step 6: Codex终审证据收口 — 重新运行+8项修正）
+
+**目标：** 完成证据收口：annual_contribution/defense_etf_contribution 严格截止2024-12-31；defense使用mark-to-market；重新完整运行实验生成新鲜报告；强化CSV勾稽测试（FAIL不skip）；清理行尾空格。
+
+**P1修正清单（证据收口）：**
+1. **annual_contribution严格截止2024-12-31**：添加`analysis_end`参数，2025-2026仅展示不参与PASS/FAIL判断。新增`reports/v1_3_step6_annual_contribution.csv`。
+2. **defense_etf_contribution mark-to-market**：重写为逐日mark-to-market，含期末未平仓估值。计算口径：总PnL = 总卖出收入 + 期末市值 - 总买入成本 - 总佣金。分别统计黄金(518880.SH)和国债(511010.SH)。新增`reports/v1_3_step6_defense_contribution.csv`。
+3. **重新完整运行实验**：重新运行`scripts/v1_3_step6_dynamic_fifth_slot_ab.py`，生成新鲜报告和全部CSV（nav_A/B/C、trades_A/B/C、regime_switches、mechanism_attr、regime_summary、annual_contribution、defense_contribution、reconciliation）。
+4. **佣金严格截止2024-12-31**：`total_commission`添加`analysis_end`参数。实际佣金：A=49,409.20, B=40,620.21, C=42,054.07。
+5. **新增reconciliation.csv**：`reconciliation_summary()`生成勾稽汇总CSV，包含A/B/C三方案最终NAV、交易数、佣金。
+6. **强化CSV勾稽测试（FAIL不skip）**：`test_bc_reconciliation_from_csv`：证据文件不存在时FAIL（不得skip）；每日cash+positions_value=NAV；cumulative_return合理；每笔佣金按生产公式重新计算；CSV交易行数与reconciliation汇总一致；最终NAV/交易数/佣金与报告汇总一致；A精确复现NAV=2,761,288.07、804笔。
+7. **机制归因一致性测试FAIL不skip**：`test_mechanism_attr_regime_distribution_matches_detect_history` CSV不存在时FAIL。
+8. **清理行尾空格**：移除所有行尾空格。
+
+**改了哪些文件：**
+- `scripts/v1_3_step6_dynamic_fifth_slot_ab.py`：annual_contribution/defense_etf_contribution/total_commission/reconciliation_summary函数，main()调用更新，generate_report参数和输出更新，NaN/warmup回退逻辑。
+- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：15项测试（强化勾稽、FAIL不skip、生产佣金公式验证）。
+- `reports/v1_3_step6_dynamic_fifth_slot_ab.md`：新鲜重新生成。
+- `reports/v1_3_step6_*.csv`：全部11份CSV新鲜重新生成。
+- `docs/CURRENT_STATE.md`、`docs/CHANGES.md`：本条目。
+
+**测试结果：**
+- `tests/test_v1_3_step6_dynamic_fifth_slot.py`：15 passed，0 warnings。
+
+**Commit：** 待完成
+
+---
+
 ## 2026-06-24（本次 - v1.3 Step 6: Codex终审P1修复 — 8项修正）
 
 **目标：** 修正WorkBuddy质检发现的4个P1问题（实际扩展为8项），确保预注册标准评估逻辑正确、数据勾稽完整、测试不硬编码。

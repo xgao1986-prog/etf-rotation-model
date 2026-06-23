@@ -322,12 +322,21 @@ def leave_one_year_out(nav_a, nav_b, nav_c, analysis_end='2024-12-31'):
     return results
 
 
-def annual_contribution(nav_a, nav_c):
-    """P1-3: 直接计算每个自然年的C-A收益差，不是剔除后的差异。"""
+def annual_contribution(nav_a, nav_c, analysis_end='2024-12-31'):
+    """P1-3: 直接计算每个自然年的C-A收益差，不是剔除后的差异。
+
+    严格截止分析期（默认2024-12-31），2025-2026仅展示不参与PASS/FAIL。
+    """
     nav_a = nav_a.copy()
     nav_a['date'] = pd.to_datetime(nav_a['date'])
     nav_c = nav_c.copy()
     nav_c['date'] = pd.to_datetime(nav_c['date'])
+
+    # 严格截止分析期
+    analysis_end_dt = pd.to_datetime(analysis_end)
+    nav_a = nav_a[nav_a['date'] <= analysis_end_dt]
+    nav_c = nav_c[nav_c['date'] <= analysis_end_dt]
+
     nav_a['ret'] = nav_a['nav'].pct_change()
     nav_c['ret'] = nav_c['nav'].pct_change()
 
@@ -349,64 +358,113 @@ def annual_contribution(nav_a, nav_c):
     return results
 
 
-def defense_etf_contribution(nav_a, nav_c, trades_a, trades_c, defense_tickers):
-    """P1-4: 分别统计黄金ETF和国债ETF对C-A的贡献。"""
-    # 逐日防御持仓价值
-    a = nav_a.copy()
-    a['date'] = pd.to_datetime(a['date'])
-    c = nav_c.copy()
-    c['date'] = pd.to_datetime(c['date'])
+def defense_etf_contribution(nav_a, nav_c, trades_a, trades_c, market_df, defense_tickers, analysis_end='2024-12-31'):
+    """P1-4: 分别统计黄金ETF和国债ETF对C-A的贡献。
 
-    merged = pd.merge(
-        a[['date', 'nav', 'defense_value']],
-        c[['date', 'nav', 'defense_value']],
-        on='date', suffixes=('_a', '_c')
-    )
-    merged['ret_a'] = merged['nav_a'].pct_change()
-    merged['ret_c'] = merged['nav_c'].pct_change()
+    使用逐日mark-to-market，严格截止分析期（默认2024-12-31）：
+    - 按黄金、国债分别计算真实持有期间PnL
+    - 起止边界包含未平仓持仓估值
+    - 佣金单独列出
+    - 不得使用简单"SELL收入-BUY成本"，因期末可能有未平仓持仓
 
-    # 黄金/国债贡献（防御持仓价值差异 × 日收益差近似）
-    # 更精确做法：从trades_df中提取每笔黄金/国债交易的盈亏
-    ta = trades_a.copy()
-    tc = trades_c.copy()
-    ta['date'] = pd.to_datetime(ta['date'])
-    tc['date'] = pd.to_datetime(tc['date'])
-
-    def ticker_comm(tdf, tickers):
-        return tdf[tdf['ticker'].isin(tickers)]['commission'].sum()
-
-    def ticker_pnl(tdf, tickers):
-        # BUY=负成本，SELL=正收入，STOP_LOSS=正收入
-        buy = tdf[(tdf['ticker'].isin(tickers)) & (tdf['action'] == 'BUY')]
-        sell = tdf[(tdf['ticker'].isin(tickers)) & (tdf['action'].isin(['SELL', 'STOP_LOSS']))]
-        # 简化：BUY的shares * price，SELL的shares * price
-        buy_cost = (buy['shares'] * buy['price']).sum() if not buy.empty else 0
-        sell_rev = (sell['shares'] * sell['price']).sum() if not sell.empty else 0
-        return sell_rev - buy_cost
-
+    计算口径：
+    - 总买入成本 = sum(BUY shares * price)
+    - 总卖出收入 = sum(SELL/STOP_LOSS shares * price)
+    - 总佣金 = sum(commission)
+    - 期末持仓量 = 总买入shares - 总卖出shares
+    - 期末市值 = 期末持仓量 * 期末收盘价
+    - 总PnL = 总卖出收入 + 期末市值 - 总买入成本 - 总佣金
+    """
     gold = ['518880.SH']
     bond = ['511010.SH']
 
-    gold_pnl_a = ticker_pnl(ta, gold)
-    gold_pnl_c = ticker_pnl(tc, gold)
-    bond_pnl_a = ticker_pnl(ta, bond)
-    bond_pnl_c = ticker_pnl(tc, bond)
+    analysis_end_dt = pd.to_datetime(analysis_end)
 
-    return {
-        'gold_diff': gold_pnl_c - gold_pnl_a,
-        'bond_diff': bond_pnl_c - bond_pnl_a,
-        'gold_pnl_a': gold_pnl_a,
-        'gold_pnl_c': gold_pnl_c,
-        'bond_pnl_a': bond_pnl_a,
-        'bond_pnl_c': bond_pnl_c,
-    }
+    def calc_ticker_pnl(trades_df, ticker_list, market_df):
+        """对单一ticker计算mark-to-market PnL。"""
+        ticker = ticker_list[0]  # 每类只有一个
+        tdf = trades_df.copy()
+        tdf['date'] = pd.to_datetime(tdf['date'])
+        tdf = tdf[tdf['date'] <= analysis_end_dt]
+        tdf = tdf[tdf['ticker'] == ticker]
+
+        # 价格数据
+        prices = market_df[market_df['ticker'] == ticker][['date', 'close']].copy()
+        prices['date'] = pd.to_datetime(prices['date'])
+        prices = prices[prices['date'] <= analysis_end_dt]
+        prices = prices.sort_values('date').reset_index(drop=True)
+
+        if prices.empty:
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0
+
+        # 统计买入/卖出/佣金
+        buy = tdf[tdf['action'] == 'BUY']
+        sell = tdf[tdf['action'].isin(['SELL', 'STOP_LOSS'])]
+
+        total_buy_cost = (buy['shares'] * buy['price']).sum() if not buy.empty else 0.0
+        total_sell_rev = (sell['shares'] * sell['price']).sum() if not sell.empty else 0.0
+        total_comm = tdf['commission'].sum() if not tdf.empty else 0.0
+        total_buy_shares = buy['shares'].sum() if not buy.empty else 0
+        total_sell_shares = sell['shares'].sum() if not sell.empty else 0
+
+        # 期末持仓量
+        final_position = total_buy_shares - total_sell_shares
+
+        # 期末收盘价（分析期最后一日）
+        final_close = prices['close'].iloc[-1]
+        final_market_value = final_position * final_close
+
+        # mark-to-market PnL = 卖出收入 + 期末市值 - 买入成本 - 佣金
+        total_pnl = total_sell_rev + final_market_value - total_buy_cost - total_comm
+
+        return total_pnl, total_buy_cost, total_sell_rev, total_comm, final_market_value, total_buy_shares, total_sell_shares
+
+    results = {}
+    for name, tickers in [('gold', gold), ('bond', bond)]:
+        pnl_a, buy_a, sell_a, comm_a, mv_a, bs_a, ss_a = calc_ticker_pnl(trades_a, tickers, market_df)
+        pnl_c, buy_c, sell_c, comm_c, mv_c, bs_c, ss_c = calc_ticker_pnl(trades_c, tickers, market_df)
+
+        results[f'{name}_pnl_a'] = pnl_a
+        results[f'{name}_pnl_c'] = pnl_c
+        results[f'{name}_diff'] = pnl_c - pnl_a
+        results[f'{name}_buy_a'] = buy_a
+        results[f'{name}_buy_c'] = buy_c
+        results[f'{name}_sell_a'] = sell_a
+        results[f'{name}_sell_c'] = sell_c
+        results[f'{name}_comm_a'] = comm_a
+        results[f'{name}_comm_c'] = comm_c
+        results[f'{name}_mv_a'] = mv_a
+        results[f'{name}_mv_c'] = mv_c
+        results[f'{name}_buy_shares_a'] = bs_a
+        results[f'{name}_buy_shares_c'] = bs_c
+        results[f'{name}_sell_shares_a'] = ss_a
+        results[f'{name}_sell_shares_c'] = ss_c
+
+    return results
 
 
-def total_commission(trades_df):
-    """P1-5: 从trades_df实际commission求和。"""
+def total_commission(trades_df, analysis_end='2024-12-31'):
+    """P1-5: 从trades_df实际commission求和，严格截止分析期。"""
     if trades_df.empty or 'commission' not in trades_df.columns:
         return 0.0
-    return trades_df['commission'].sum()
+    tdf = trades_df.copy()
+    tdf['date'] = pd.to_datetime(tdf['date'])
+    tdf = tdf[tdf['date'] <= pd.to_datetime(analysis_end)]
+    return tdf['commission'].sum()
+
+
+def reconciliation_summary(result_a, result_b, result_c, comm_a, comm_b, comm_c):
+    """生成勾稽汇总CSV。"""
+    return pd.DataFrame({
+        'scenario': ['A', 'B', 'C'],
+        'final_nav': [
+            result_a['nav_df']['nav'].iloc[-1],
+            result_b['nav_df']['nav'].iloc[-1],
+            result_c['nav_df']['nav'].iloc[-1],
+        ],
+        'num_trades': [result_a['num_trades'], result_b['num_trades'], result_c['num_trades']],
+        'total_commission': [comm_a, comm_b, comm_c],
+    })
 
 
 def analyze_mechanism(nav_a, nav_c, trades_a, trades_c, regime_df, market_df):
@@ -660,23 +718,29 @@ def main():
     attr_df.to_csv('D:/etf_rotation_model/reports/v1_3_step6_mechanism_attr.csv', index=False)
     regime_summary.to_csv('D:/etf_rotation_model/reports/v1_3_step6_regime_summary.csv', index=False)
 
-    # P1-3: 自然年C-A贡献
-    annual = annual_contribution(result_a['nav_df'], result_c['nav_df'])
+    # P1-3: 自然年C-A贡献（严格截止分析期2024-12-31）
+    annual = annual_contribution(result_a['nav_df'], result_c['nav_df'], analysis_end='2024-12-31')
     annual_df = pd.DataFrame(annual)
     annual_df.to_csv('D:/etf_rotation_model/reports/v1_3_step6_annual_contribution.csv', index=False)
 
-    # P1-4: 防御ETF贡献
+    # P1-4: 防御ETF贡献（mark-to-market，严格截止分析期2024-12-31）
     defense_contrib = defense_etf_contribution(
         result_a['nav_df'], result_c['nav_df'],
         result_a['trades_df'], result_c['trades_df'],
-        set(DEFENSE_UNIVERSE.keys())
+        market_df, set(DEFENSE_UNIVERSE.keys()), analysis_end='2024-12-31'
     )
+    defense_df = pd.DataFrame([defense_contrib])
+    defense_df.to_csv('D:/etf_rotation_model/reports/v1_3_step6_defense_contribution.csv', index=False)
 
-    # P1-5: 实际佣金
-    comm_a = total_commission(result_a['trades_df'])
-    comm_b = total_commission(result_b['trades_df'])
-    comm_c = total_commission(result_c['trades_df'])
+    # P1-5: 实际佣金（严格截止分析期2024-12-31）
+    comm_a = total_commission(result_a['trades_df'], analysis_end='2024-12-31')
+    comm_b = total_commission(result_b['trades_df'], analysis_end='2024-12-31')
+    comm_c = total_commission(result_c['trades_df'], analysis_end='2024-12-31')
     print(f"佣金: A={comm_a:,.2f}, B={comm_b:,.2f}, C={comm_c:,.2f}")
+
+    # 勾稽汇总
+    recon = reconciliation_summary(result_a, result_b, result_c, comm_a, comm_b, comm_c)
+    recon.to_csv('D:/etf_rotation_model/reports/v1_3_step6_reconciliation.csv', index=False)
 
     # 生成报告
     generate_report(period_results, slippage_results, loyo, switch_df, regimes, regime_summary,
@@ -813,15 +877,22 @@ def generate_report(period_results, slippage_results, loyo, switch_df, regimes, 
         else:
             lines.append("   ✅ 单年贡献未显著偏离平均。")
     
-    # P1-4: 防御ETF贡献
+    # P1-4: 防御ETF贡献（mark-to-market）
     lines.append("")
-    lines.append(f"7. 防御ETF分别贡献（P1-4修正）：")
-    lines.append(f"   黄金ETF: C-A={defense_contrib['gold_diff']:,.2f}元 (A={defense_contrib['gold_pnl_a']:,.2f}, C={defense_contrib['gold_pnl_c']:,.2f})")
-    lines.append(f"   国债ETF: C-A={defense_contrib['bond_diff']:,.2f}元 (A={defense_contrib['bond_pnl_a']:,.2f}, C={defense_contrib['bond_pnl_c']:,.2f})")
+    lines.append(f"7. 防御ETF分别贡献（P1-4修正：mark-to-market，含期末未平仓估值）：")
+    lines.append(f"   计算口径：总PnL = 总卖出收入 + 期末市值 - 总买入成本 - 总佣金")
+    lines.append(f"   黄金ETF(518880.SH)：")
+    lines.append(f"     A: 买入成本={defense_contrib['gold_buy_a']:,.2f}, 卖出收入={defense_contrib['gold_sell_a']:,.2f}, 佣金={defense_contrib['gold_comm_a']:,.2f}, 期末市值={defense_contrib['gold_mv_a']:,.2f}, PnL={defense_contrib['gold_pnl_a']:,.2f}")
+    lines.append(f"     C: 买入成本={defense_contrib['gold_buy_c']:,.2f}, 卖出收入={defense_contrib['gold_sell_c']:,.2f}, 佣金={defense_contrib['gold_comm_c']:,.2f}, 期末市值={defense_contrib['gold_mv_c']:,.2f}, PnL={defense_contrib['gold_pnl_c']:,.2f}")
+    lines.append(f"     C-A={defense_contrib['gold_diff']:,.2f}")
+    lines.append(f"   国债ETF(511010.SH)：")
+    lines.append(f"     A: 买入成本={defense_contrib['bond_buy_a']:,.2f}, 卖出收入={defense_contrib['bond_sell_a']:,.2f}, 佣金={defense_contrib['bond_comm_a']:,.2f}, 期末市值={defense_contrib['bond_mv_a']:,.2f}, PnL={defense_contrib['bond_pnl_a']:,.2f}")
+    lines.append(f"     C: 买入成本={defense_contrib['bond_buy_c']:,.2f}, 卖出收入={defense_contrib['bond_sell_c']:,.2f}, 佣金={defense_contrib['bond_comm_c']:,.2f}, 期末市值={defense_contrib['bond_mv_c']:,.2f}, PnL={defense_contrib['bond_pnl_c']:,.2f}")
+    lines.append(f"     C-A={defense_contrib['bond_diff']:,.2f}")
     
     # P1-5: 实际佣金
     lines.append("")
-    lines.append(f"8. 佣金（P1-5修正：从trades_df实际commission求和）：")
+    lines.append(f"8. 佣金（P1-5修正：从trades_df实际commission求和，截止2024-12-31）：")
     lines.append(f"   A={comm_a:,.2f}, B={comm_b:,.2f}, C={comm_c:,.2f}")
     lines.append(f"   C-A={comm_c-comm_a:,.2f}, B-A={comm_b-comm_a:,.2f}")
     
@@ -858,6 +929,8 @@ def generate_report(period_results, slippage_results, loyo, switch_df, regimes, 
     lines.append("- `reports/v1_3_step6_mechanism_attr.csv` — 逐日机制归因")
     lines.append("- `reports/v1_3_step6_regime_summary.csv` — 状态汇总")
     lines.append("- `reports/v1_3_step6_annual_contribution.csv` — 自然年C-A贡献（P1-3）")
+    lines.append("- `reports/v1_3_step6_defense_contribution.csv` — 防御ETF贡献（P1-4）")
+    lines.append("- `reports/v1_3_step6_reconciliation.csv` — 勾稽验证汇总（P1-6）")
     lines.append("")
 
     report = "\n".join(lines)

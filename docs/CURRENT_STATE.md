@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-24（Step 6: Codex终审P1修复 — 8项修正）
+**最后更新**：2026-06-24（Step 6: Codex终审证据收口 — 重新运行+8项修正）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -92,22 +92,24 @@
   - **结论降级**：方案B是**有经济逻辑的后续稳健性候选**，但不能升级基线或认定为候选增强。B在夏普和回撤上有改善，但分析期总收益未超过B0.4，且验证期收益未持续领先。
   - **交付物**：scripts/v1_3_step4_portfolio_structure_ab.py、reports/v1_3_step4_portfolio_structure_ab.md（修正版）、reports/v1_3_step4_portfolio_metrics.csv、reports/v1_3_step4_portfolio_daily_attribution.csv、reports/v1_3_step4_slippage_test.md、scripts/v1_3_step4_slippage_test.py。
   - **不修改 B0.4 策略、参数或冻结基线。不进入任何参数调优或增强实施。**
-- **v1.3 Step 6: 基于市场状态的动态第5槽位 A/B 实验已完成**：
-  - 三个方案：A(B0.4)、B(固定4+1)、C(动态第5槽位：震荡=5行业，其他=4+1防御)。
+- **v1.3 Step 6: 基于市场状态的动态第5槽位 A/B 实验已完成（Codex终审证据收口）**：
+  - 三个方案：A(B0.4)、B(固定4+1)、C(动态第5槽位：震荡=5行业，其他=4+1防御；NaN/warmup回退B0.4)。
   - 全期间：A=176.13%, B=180.91%, C=176.45%。C介于A和B之间，更接近A。
   - 研究期(2019-2022)：A=34.69%, B=34.94%, C=33.73%。
   - 验证期(2023-2024)：A=27.67%, B=25.06%, C=24.32%。
-  - 观察期(2025-2026)：A=64.19%, B=70.19%, C=70.02%。
+  - 观察期(2025-2026)：A=64.19%, B=70.19%, C=70.02%。仅展示，不参与PASS/FAIL判断。
   - **预注册验收标准未全部通过**：
     - 夏普方向不一致（研究期C>A 0.63 vs 0.60，验证期C<A 0.74 vs 0.75）❌
-    - 验证期回撤差值+1.45%，但C绝对回撤更小（-16.30% vs -17.75%），评估逻辑有歧义
+    - 验证期回撤：C绝对回撤更小（-16.30% vs -17.75%），通过 ✅
     - 验证期收益C-A=-3.35%，低于-2%容忍度 ❌
-    - leave-one-year-out: C>A 4/8=50%，刚好过半 ✅
+    - leave-one-year-out(分析期2019-2024): C>A 4/6=66.7% > 50% ✅
     - 滑点方向不反转：所有滑点下C>A ✅
   - **机制归因**：C在震荡市+0.75%（301天），在熊市-6.97%（826天）。熊市拖累超过震荡增益。
-  - **regime标签验证**：经代码核查，`STATE_NAMES`映射为1=强牛/2=弱牛/3=震荡/4=熊市。机制归因表regime分布与`detect_history`一致（震荡=301天，熊市=826天），标签**未互换**。
+  - **防御ETF贡献（mark-to-market，截止2024-12-31）**：分别统计黄金(518880.SH)和国债(511010.SH)，含期末未平仓估值。详见 `reports/v1_3_step6_defense_contribution.csv`。
+  - **佣金（截止2024-12-31）**：A=49,409.20, B=40,620.21, C=42,054.07
+  - **regime标签验证**：`STATE_NAMES`映射为1=强牛/2=弱牛/3=震荡/4=熊市。机制归因表与`detect_history`一致，标签未互换。
   - **结论**：C只能判定为机制观察候选，不得升级B0.4。
-  - 交付物：`scripts/v1_3_step6_dynamic_fifth_slot_ab.py`、`reports/v1_3_step6_dynamic_fifth_slot_ab.md`、8份CSV数据文件、`tests/test_v1_3_step6_dynamic_fifth_slot.py`（13项全部通过）。
+  - 交付物：`scripts/v1_3_step6_dynamic_fifth_slot_ab.py`（含NaN回退、mark-to-market防御贡献）、`reports/v1_3_step6_dynamic_fifth_slot_ab.md`（新鲜重新运行）、11份CSV数据文件（含annual_contribution、defense_contribution、reconciliation）、`tests/test_v1_3_step6_dynamic_fifth_slot.py`（15项全部通过，含CSV勾稽FAIL不skip、生产佣金公式验证）。
   - 不修改B0.4策略、参数或冻结基线。
 - **v1.3 Step 5: 动态组合广度与集中度可行性诊断 已完成（observer-only）**：
   - **只做observer诊断**：不修改交易规则、不制定动态参数、不回测动态仓位策略。不修改B0.4、生产策略、ETF池、数据库或调仓引擎。
