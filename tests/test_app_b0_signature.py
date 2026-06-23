@@ -26,15 +26,26 @@ def cfg_signature(cfg):
         round(cfg["max_position_per_etf"], 6),
         round(cfg["stop_loss"], 6),
         cfg.get("stop_loss_mode", "fixed"),
+        cfg.get("atr_stop_multiplier", 2.0),
         cfg["market_timing"],
         cfg.get("cooling_period", 0),
+        cfg.get("cooling_score_boost", 0),
         cfg.get("rebalance_freq", "weekly"),
         cfg.get("rebalance_weekday", 3),
         cfg.get("trailing_stop_mode", "none"),
+        round(cfg.get("trailing_stop", -0.1) or -0.1, 6) if "trailing_stop" in cfg else None,
+        cfg.get("tier_1_pnl", 0.05),
+        cfg.get("tier_1_drawdown", -0.05),
+        cfg.get("tier_2_pnl", 0.15),
+        cfg.get("tier_2_drawdown", -0.08),
+        cfg.get("tier_3_pnl", 0.30),
+        cfg.get("tier_3_drawdown", -0.12),
         cfg.get("defense_enabled", True),
+        cfg.get("fallback_equity_enabled", False),
         cfg.get("sector_boost_enabled", False),
         cfg.get("momentum_factor_enabled", True),
         cfg.get("volatility_factor_enabled", True),
+        round(cfg.get("initial_capital", 1_000_000), 6),
     )
     return weights + params
 
@@ -105,6 +116,30 @@ class TestB0Signature(unittest.TestCase):
         """修改最大持仓数 → 签名偏离 B0-18。"""
         cfg = build_config()
         cfg["max_holdings"] = 3
+        sig = cfg_signature(cfg)
+        b0_18_sig = cfg_signature(build_config())
+        self.assertNotEqual(sig, b0_18_sig)
+
+    def test_disable_defense_deviates(self):
+        """关闭防御模块 → 签名偏离 B0-18。"""
+        cfg = build_config()
+        cfg["defense_enabled"] = False
+        sig = cfg_signature(cfg)
+        b0_18_sig = cfg_signature(build_config())
+        self.assertNotEqual(sig, b0_18_sig)
+
+    def test_enable_fallback_equity_deviates(self):
+        """开启 fallback equity → 签名偏离 B0-18。"""
+        cfg = build_config()
+        cfg["fallback_equity_enabled"] = True
+        sig = cfg_signature(cfg)
+        b0_18_sig = cfg_signature(build_config())
+        self.assertNotEqual(sig, b0_18_sig)
+
+    def test_change_initial_capital_deviates(self):
+        """修改初始资金 → 签名偏离 B0-18。"""
+        cfg = build_config()
+        cfg["initial_capital"] = 500_000
         sig = cfg_signature(cfg)
         b0_18_sig = cfg_signature(build_config())
         self.assertNotEqual(sig, b0_18_sig)

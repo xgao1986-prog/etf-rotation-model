@@ -1,10 +1,10 @@
 # 当前工程现场
 
-**最后更新**：2026-06-24（Step 5: 动态组合广度与集中度可行性诊断）
+**最后更新**：2026-06-24（Step 5补充: 防御总开关工程修复 + 三维归因分析）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
-**当前研究提交**：`8201e5a`（v1.3 Step 4补充: 滑点压力测试与市场逻辑归因）
+**当前研究提交**：`46a8cc6`（v1.3 Step 5补充: B0.4 vs 方案B三维归因 + 防御开关修复）
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）
 **数据截止**：2026-06-18
@@ -15,7 +15,14 @@
 
 ## 1. 当前结论
 
-- B0.4 已正式冻结，取代已废止的 B0.3。
+- **App/防御总开关工程修复已完成**：
+  - `app.py` 配置签名补齐缺失字段（`fallback_equity_enabled`, `atr_stop_multiplier`, `cooling_score_boost`, `trailing_stop`, 动态止盈档位, `initial_capital`）。
+  - `backtest.py` 和 `rebalance_planner.py` 补全 `defense_enabled` 总开关逻辑。
+  - 默认 `defense_enabled=True`，B0.4 行为完全不变。
+  - 新增 `tests/test_defense_enabled_switch.py`（7个场景）全部通过。
+  - `tests/test_app_b0_signature.py` 扩展至9项全部通过。
+  - B0.4 滑点测试 v2 8项全部通过（155.94s），0bp 复现 NAV=2,761,288.07，交易804笔。
+- **v1.3 Step 5补充: B0.4 vs 方案B 三维归因分析已完成**：
 - B0.3 使用的尾部行情不完整：2026-06-08 至 2026-06-12 大部分 ETF 和沪深300数据缺失。
 - 受控 A/B 实验证明：排除补齐数据可复现 B0.3；使用完整数据得到 B0.4。差异来自数据补齐，不是策略或历史代码变化。
 - B0.4 与 B0.3 的策略规则完全相同，仅数据版本不同。

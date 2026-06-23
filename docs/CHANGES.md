@@ -5,6 +5,50 @@
 
 ---
 
+## 2026-06-24（本次 - v1.3 Step 5补充: 防御总开关工程修复 + 三维归因分析）
+
+**目标：** 修复 app.py 配置签名缺失字段，补全 backtest.py/rebalance_planner.py 防御模块总开关（defense_enabled），新增三维归因分析回答用户问题，并确保所有测试通过。
+
+**约束：** 默认 defense_enabled=True，B0.4 行为不变；不修改策略参数、交易规则或冻结基线。
+
+**核心修复：**
+1. **app.py 配置签名**：补齐 `fallback_equity_enabled`, `atr_stop_multiplier`, `cooling_score_boost`, `trailing_stop`, 动态止盈档位, `initial_capital` 等缺失字段，与 `build_config()` 输出保持一致。
+2. **backtest.py 防御总开关**：在 `BacktestEngine.__init__` 中检查 `cfg.get('defense_enabled', True)`，未启用时跳过防御资产候选初始化。
+3. **rebalance_planner.py 防御总开关**：`plan_rebalance_v2_5` 新增 `defense_enabled` 参数；关闭时强制卖出所有防御持仓、跳过防御填充。
+4. **三维归因分析**：逐日持仓归因拆解 B0.4 vs 方案B（4行业+1防御）的全期差异来源。
+   - 全期差异 +13.35%：第5名行业ETF替换贡献 95.5%（B0.4第5名 -8.99% vs B防御 +6.67%），交易成本节省 8.6%。
+   - 震荡市（826天）唯一 B0.4 领先状态（-1.02%）。
+   - 差异来自第5槽位分配，不是前4个共同行业（+0.60%）。
+
+**新增测试（6个场景全部通过）：**
+1. `test_defense_disabled_no_new_defense_buy` — defense_enabled=False 不得新买防御ETF
+2. `test_defense_disabled_sells_existing_defense` — 已持有防御，关闭后正确卖出全部，核对订单/持仓/NAV
+3. `test_defense_disabled_missing_price_no_illegal_sell` — 缺价但 last_prices 可用时，不非法卖出，持仓保留
+4. `test_defense_disabled_missing_price_and_last_prices_raises` — 无 last_prices 时 v2.5 安全报错
+5. `test_defense_disabled_cash_not_used_for_extra_industry` — 关闭后剩余现金不用行业违规填充
+6. `test_defense_enabled_true_backward_compatible` — defense_enabled=True 与修改前完全兼容（防御腾槽位、保留、填充）
+7. `test_defense_enabled_true_fills_new_defense` — 空仓时正确填充新防御ETF
+8. `test_disable_defense_deviates` / `test_enable_fallback_equity_deviates` / `test_change_initial_capital_deviates` — 签名偏离检测
+
+**B0.4 复现验证：**
+- `test_b0_4_slippage.py` 8项全部通过（155.94s），0bp 完美复现 B0.4（NAV=2,761,288.07，交易804笔）。
+- `test_app_b0_signature.py` 9项全部通过（含新增3项）。
+- `test_rebalance_planner.py` 25项全部通过。
+
+**修改文件：**
+- `app.py` — 修复配置签名（补齐缺失字段）
+- `src/backtest.py` — 防御模块总开关检查
+- `src/rebalance_planner.py` — 新增 defense_enabled 参数及逻辑
+- `tests/test_app_b0_signature.py` — 新增签名偏离测试（defense_enabled、fallback_equity_enabled、initial_capital）
+- `tests/test_defense_enabled_switch.py` — 新增（7个场景覆盖）
+- `reports/v1_3_step5_b0_4_vs_scheme_b_attribution.md` — 新增（三维归因报告）
+- `reports/v1_3_step5_b0_4_vs_scheme_b_attribution.csv` — 新增（逐日归因数据）
+- `reports/v1_3_step5_yearly_attribution.csv` — 新增（年度汇总）
+- `docs/CURRENT_STATE.md` — 更新当前状态
+- `docs/CHANGES.md` — 添加本条目
+
+---
+
 ## 2026-06-24（本次 - v1.3 Step 5: 动态组合广度与集中度可行性诊断）
 
 **目标：** 研究两个问题：①什么市场结构下第5只行业ETF值得持有？②只有3-4只ETF达标时，提高单只仓位是否有市场逻辑？
