@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-24（Step 7 P1修复：统计口径与证据完整性）
+**最后更新**：2026-06-24（Step 8：B0.4 vs D 市场状态分层诊断）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -112,6 +112,33 @@
   - **LOO与annual定义区分**：`annual_contribution`是每个自然年的C-A收益差；`loyo`是剔除某年后其余年份组合的总收益差。两者定义不同，不要求正负方向逐年一致。详见 `reports/v1_3_step6_annual_contribution.csv` 和 `reports/v1_3_step6_loyo.csv`。
   - 交付物：`scripts/v1_3_step6_dynamic_fifth_slot_ab.py`（含NaN回退、mark-to-market防御贡献、--output-dir参数）、`reports/v1_3_step6_dynamic_fifth_slot_ab.md`（新鲜重新运行）、12份CSV数据文件（含loyo、annual_contribution、defense_contribution、reconciliation）、`tests/test_v1_3_step6_dynamic_fifth_slot.py`（16项全部通过，含CSV勾稽FAIL不skip、生产佣金公式验证、LOO读取CSV调用生产函数）。
   - 不修改B0.4策略、参数或冻结基线。
+
+  - 不修改B0.4策略、参数或冻结基线。
+
+- **v1.3 Step 8: B0.4 vs D 市场状态分层诊断 已完成（Observer-only）**：
+  - **目标**：不修改B0.4，不合并规则，仅做诊断观察
+  - **对照组**：A=B0.4(5×20%)，D=4×25%行业集中，防御关闭
+  - **市场状态**：沿用已有regime检测结果（强牛/弱牛/震荡/熊市），不修改状态算法
+  - **核心发现**：
+    - 弱牛：研究期D-A=+2.20%，验证期D-A=-0.01% → ❌ 不稳定
+    - 强牛：研究期D-A=+0.91%，验证期D-A=-0.18% → ❌ 不稳定
+    - 熊市：研究期D-A=-2.73%，验证期D-A=-0.14% → ❌ D不优于A
+    - 震荡：研究期D-A=+2.70%，验证期D-A=+0.11% → ✅ **唯一跨期一致支持D**
+  - **关键结论**：
+    - D的优势主要来自**观察期（2025-2026）**，研究期和验证期并没有一致支持D
+    - 只有**震荡市**是跨期一致支持D的
+    - 熊市中D明显弱于A（研究期-2.73%），集中仓位在下跌市场更脆弱
+    - D在所有状态下都显示更高行业暴露、更少防御、更少持仓数量
+  - **预注册判断（Observer-only）**：
+    - 若D在研究期和验证期的同一状态下都优于A，才认为该状态支持D
+    - 若D只在研究期优于A、验证期不优于A，判为不稳定
+    - 若D收益更高但回撤显著恶化，判为风险换收益，不算明确改善
+    - 若D优势主要来自2025-2026，不能作为规则依据
+  - **交付物**：`scripts/v1_3_step8_regime_b0_4_vs_d.py`（~380行）、`reports/v1_3_step8_regime_b0_4_vs_d.md`、4份CSV（regime_summary、year_regime_matrix、exposure_by_regime、verdict）
+  - **测试**：12/12 通过
+  - **验证**：py_compile 通过
+  - **不修改**：B0.4生产代码、A/B/C/D四方案规则、回测引擎、市场状态算法
+
 - **v1.3 Step 7: 组合集中度与资金去向正交拆解 已完成（P1修复版 — 统计口径与证据完整性）**：
   - 四个方案：A(5×20% B0.4对照)、B(4×20%+现金 关闭防御)、C(4×20%+防御 防御填充)、D(4×25% 集中度提升)。
   - 全期间：A=176.13%, B=152.97%, C=180.91%, D=203.08%。
