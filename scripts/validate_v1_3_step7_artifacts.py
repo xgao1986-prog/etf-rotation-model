@@ -179,7 +179,7 @@ def validate(output_dir='D:/etf_rotation_model/reports'):
         '## 逐日持仓敞口',
         '## 槽位贡献（mark-to-market）',
         '## 正交归因（实际敞口+槽位PnL验证）',
-        '## 预注册标准7：Top4实际权重',
+        '## 预注册标准7：模型评分排名Top4权重（score_rank_1_4）',
     ]
     for section in required_sections:
         if section not in report_text:
