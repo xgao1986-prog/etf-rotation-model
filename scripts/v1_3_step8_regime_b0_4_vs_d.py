@@ -355,15 +355,28 @@ def _write_report(output_dir, regime_summary_df, year_matrix_df, exposure_df, ve
             continue
         lines.append(f"### {period}")
         lines.append("")
-        lines.append("| 状态 | 天数 | A收益 | D收益 | D-A | A回撤 | D回撤 | A夏普 | D夏普 | D优于A? |")
-        lines.append("|------|------|-------|-------|-----|-------|-------|-------|-------|---------|")
+        lines.append("| 状态 | 天数 | A收益 | D收益 | D-A | A回撤 | D回撤 | A夏普 | D夏普 | D相对A判定 |")
+        lines.append("|------|------|-------|-------|-----|-------|-------|-------|-------|------------|")
         for _, r in sub.iterrows():
-            d_better = "✅" if r['d_better'] == 1 else "❌"
+            # 使用 verdict 而不是简单的 ✅❌
+            # 只要D回撤比A差，就标为风险换收益
+            if r['d_better'] == 1:
+                if r['d_minus_a_mdd'] < 0:  # D回撤比A差（任何程度）
+                    verdict_icon = "⚠️ 风险换收益"
+                elif r['d_minus_a_sharpe'] < 0:
+                    verdict_icon = "⚠️ 收益改善但夏普未提升"
+                else:
+                    verdict_icon = "✅ 明确改善"
+            else:
+                if r['d_minus_a_mdd'] < 0:
+                    verdict_icon = "❌ 全面劣势"
+                else:
+                    verdict_icon = "❌ 无优势"
             lines.append(
                 f"| {r['regime']} | {r['days_a']} | "
                 f"{r['return_a']:.2%} | {r['return_d']:.2%} | {r['d_minus_a_return']:.2%} | "
                 f"{r['max_drawdown_a']:.2%} | {r['max_drawdown_d']:.2%} | "
-                f"{r['sharpe_a']:.2f} | {r['sharpe_d']:.2f} | {d_better} |"
+                f"{r['sharpe_a']:.2f} | {r['sharpe_d']:.2f} | {verdict_icon} |"
             )
         lines.append("")
 
@@ -457,8 +470,10 @@ def _write_report(output_dir, regime_summary_df, year_matrix_df, exposure_df, ve
         )
     lines.append("")
 
-    # 跨期一致性检查
+    # 跨期一致性检查（降级表述）
     lines.append("### 跨期一致性")
+    lines.append("")
+    lines.append("> **注意**：跨期收益方向一致 ≠ 风险通过。只有当收益方向一致且回撤未恶化时，才能视为支持D。")
     lines.append("")
     research = verdict_df[verdict_df['period'] == '研究期']
     validation = verdict_df[verdict_df['period'] == '验证期']
@@ -472,14 +487,19 @@ def _write_report(output_dir, regime_summary_df, year_matrix_df, exposure_df, ve
             v = v_row.iloc[0]
             r_better = r['d_return'] > r['a_return']
             v_better = v['d_return'] > v['a_return']
+            r_mdd_worse = r['d_mdd'] < r['a_mdd']  # D回撤比A差（任何程度）
+            v_mdd_worse = v['d_mdd'] < v['a_mdd']
             if r_better and v_better:
-                lines.append(f"- **{regime}**: 研究期✅ 验证期✅ → **跨期一致支持D**")
+                if r_mdd_worse or v_mdd_worse:
+                    lines.append(f"- **{regime}**: 研究期收益✅ 验证期收益✅，但研究期回撤{'恶化' if r_mdd_worse else '未恶化'}、验证期回撤{'恶化' if v_mdd_worse else '未恶化'} → **⚠️ 风险换收益型候选，不能视为明确改善**")
+                else:
+                    lines.append(f"- **{regime}**: 研究期✅ 验证期✅，回撤未恶化 → **跨期一致支持D**")
             elif r_better and not v_better:
-                lines.append(f"- **{regime}**: 研究期✅ 验证期❌ → **不稳定，验证期不支持**")
+                lines.append(f"- **{regime}**: 研究期收益✅ 验证期收益❌ → **不稳定，验证期不支持**")
             elif not r_better and v_better:
-                lines.append(f"- **{regime}**: 研究期❌ 验证期✅ → **验证期反超，研究期不支持**")
+                lines.append(f"- **{regime}**: 研究期收益❌ 验证期收益✅ → **验证期反超，研究期不支持**")
             else:
-                lines.append(f"- **{regime}**: 研究期❌ 验证期❌ → **D不优于A**")
+                lines.append(f"- **{regime}**: 研究期收益❌ 验证期收益❌ → **D不优于A**")
     lines.append("")
 
     # 结论
@@ -487,6 +507,20 @@ def _write_report(output_dir, regime_summary_df, year_matrix_df, exposure_df, ve
     lines.append("")
     lines.append("> **免责声明**：以下结论仅为诊断观察，不意味着D可以替代B0.4。")
     lines.append("> 不修改B0.4，不合并任何新规则。")
+    lines.append("")
+    lines.append("### 核心发现")
+    lines.append("")
+    lines.append("- **弱牛**：研究期D-A=+2.20%，验证期D-A=-0.01% → ❌ 不稳定，验证期不支持")
+    lines.append("- **强牛**：研究期D-A=+0.91%，验证期D-A=-0.18% → ❌ 不稳定，验证期不支持")
+    lines.append("- **熊市**：研究期D-A=-2.73%，验证期D-A=-0.14% → ❌ D不优于A，集中仓位在下跌市场更脆弱")
+    lines.append("- **震荡**：研究期D-A=+2.70%（回撤恶化），验证期D-A=+0.11%（回撤恶化） → ⚠️ 收益方向跨期一致，但风险未通过，只能视为**风险换收益型候选**，不能视为明确改善，也不能直接推出震荡市应用D")
+    lines.append("")
+    lines.append("### 预注册判断修正")
+    lines.append("")
+    lines.append("- 震荡市：收益方向跨期一致（研究期+2.70%，验证期+0.11%），但两期均伴随回撤恶化（研究期-15.58% vs -15.13%，验证期-3.65% vs -3.42%）")
+    lines.append("- 因此**不满足'明确改善'**标准（要求收益改善且回撤不恶化）")
+    lines.append("- 震荡市 D 只能进入下一步候选测试：震荡市 D 规则 + 风险约束（如止损收紧、仓位上限）")
+    lines.append("- **不能直接合并为策略规则**，需额外验证风险调整后是否仍有效")
     lines.append("")
     lines.append("### 交付物")
     lines.append("- `reports/v1_3_step8_regime_summary.csv` — 分状态收益对比")
