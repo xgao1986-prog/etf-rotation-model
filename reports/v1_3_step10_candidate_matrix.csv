@@ -1,0 +1,6 @@
+regime,research_days,validation_days,small_sample,candidate,reason
+弱牛,165,71,False,不建议切换,无方案跨期稳定优于A
+强牛,60,94,False,不建议切换,无方案跨期稳定优于A
+未知,2,0,True,不建议切换,无方案跨期稳定优于A
+熊市,427,274,False,不建议切换,无方案跨期稳定优于A
+震荡,169,45,True,D,D: 跨期稳定优于A

@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-24（Step 9：以夏普率为主KPI的 A/B/C/D 策略复核）
+**最后更新**：2026-06-26（Step 10：不同市场形态下 A/B/C/D 风险调整表现对比）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -15,7 +15,15 @@
 
 ## 1. 当前结论
 
-- **Codex 终审 P1 修复已完成（cfg_signature 提取 + trailing_stop=None 修复）**：
+- **v1.3 Step 10 已完成**：不同市场形态下 A/B/C/D 风险调整表现对比。
+  - 核心发现：仅震荡状态下 D 满足跨期夏普均优于A，但验证期仅45天（小样本）。
+  - 熊市状态下 A（B0.4）夏普在研究期和验证期均领先。
+  - 其他状态（强牛、弱牛）无明确候选。
+  - 结论：B0.4 仍是当前正式基线，不建议直接进入状态条件化组合规则测试。
+- **v1.3 Step 9 已完成（含P0修复）**：以夏普率为主KPI的 A/B/C/D 策略复核。
+  - 新增 `risk_free_rate` 参数（默认0），argparse 支持 `--risk-free-rate`。
+  - 新增 `tests/test_v1_3_step9_sharpe_first_strategy_review.py`（24 tests passed）。
+  - 确认报告 Markdown 无4/6节交错。
   - `app.py:465` 对默认配置 `trailing_stop=None` 执行 `round(None, 6)` 会导致 `TypeError`。
   - 修复：`None` 保持为 `None`；仅对非 `None` 数值执行 `round`。
   - 将 `cfg_signature` 从 `app.py` 提取到 `src/utils.py`，成为纯函数，供 `app.py` 和测试共同调用同一实现。
