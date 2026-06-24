@@ -60,7 +60,7 @@ def load_trades(path: str) -> pd.DataFrame:
     return df
 
 
-def compute_metrics(nav_df: pd.DataFrame, trades_df: pd.DataFrame, period_start: str, period_end: str) -> dict:
+def compute_metrics(nav_df: pd.DataFrame, trades_df: pd.DataFrame, period_start: str, period_end: str, risk_free_rate: float = 0.0) -> dict:
     """计算单个期间的所有指标。"""
     sub = nav_df[(nav_df['date'] >= period_start) & (nav_df['date'] <= period_end)]
     if sub.empty or len(sub) < 2:
@@ -80,8 +80,9 @@ def compute_metrics(nav_df: pd.DataFrame, trades_df: pd.DataFrame, period_start:
     dd = (sub['nav'].values - peak) / peak
     max_drawdown = dd.min()
 
-    # 夏普
-    sharpe = ret.mean() / ret.std() * np.sqrt(252) if ret.std() > 0 else 0
+    # 夏普（含无风险收益率调整）
+    rf_daily = risk_free_rate / 252
+    sharpe = ((ret.mean() - rf_daily) / ret.std() * np.sqrt(252)) if ret.std() > 0 else 0
 
     # Calmar
     calmar = cagr / abs(max_drawdown) if max_drawdown != 0 else 0
@@ -168,7 +169,7 @@ def leverage_equivalent(sharpe_d, ret_d, vol_d, sharpe_a, ret_a, vol_a):
     return theor_ret_vol, theor_ret_dd
 
 
-def main(output_dir='D:/etf_rotation_model/reports'):
+def main(output_dir='D:/etf_rotation_model/reports', risk_free_rate=0.0):
     os.makedirs(output_dir, exist_ok=True)
 
     scenarios = ['A', 'B', 'C', 'D']
@@ -181,7 +182,7 @@ def main(output_dir='D:/etf_rotation_model/reports'):
     period_rows = []
     for period_label, (p_start, p_end) in PERIOD_LABELS.items():
         for sc in scenarios:
-            m = compute_metrics(navs[sc], trades[sc], p_start, p_end)
+            m = compute_metrics(navs[sc], trades[sc], p_start, p_end, risk_free_rate=risk_free_rate)
             if not m:
                 continue
             m['period'] = period_label
@@ -202,7 +203,8 @@ def main(output_dir='D:/etf_rotation_model/reports'):
                 continue
             ret = group['daily_return']
             total_ret = (1 + ret).prod() - 1
-            sharpe = ret.mean() / ret.std() * np.sqrt(252) if ret.std() > 0 else 0
+            rf_daily = risk_free_rate / 252
+            sharpe = ((ret.mean() - rf_daily) / ret.std() * np.sqrt(252)) if ret.std() > 0 else 0
             peak = np.maximum.accumulate(group['nav'].values)
             dd = (group['nav'].values - peak) / peak
             mdd = dd.min()
@@ -232,7 +234,8 @@ def main(output_dir='D:/etf_rotation_model/reports'):
                     continue
                 ret = group['daily_return']
                 total_ret = (1 + ret).prod() - 1
-                sharpe = ret.mean() / ret.std() * np.sqrt(252) if ret.std() > 0 else 0
+                rf_daily = risk_free_rate / 252
+                sharpe = ((ret.mean() - rf_daily) / ret.std() * np.sqrt(252)) if ret.std() > 0 else 0
                 peak = np.maximum.accumulate(group['nav'].values)
                 dd = (group['nav'].values - peak) / peak
                 mdd = dd.min()
@@ -249,14 +252,14 @@ def main(output_dir='D:/etf_rotation_model/reports'):
     # ------------------------------------------------------------------
     # 4. 杠杆等效分析
     # ------------------------------------------------------------------
-    a_metrics = {p: compute_metrics(navs['A'], trades['A'], s, e) for p, (s, e) in PERIOD_LABELS.items()}
+    a_metrics = {p: compute_metrics(navs['A'], trades['A'], s, e, risk_free_rate=risk_free_rate) for p, (s, e) in PERIOD_LABELS.items()}
 
     lev_rows = []
     for sc in ['B', 'C', 'D']:
         for period_label, (p_start, p_end) in PERIOD_LABELS.items():
             if period_label == '观察期':
                 continue
-            m_sc = compute_metrics(navs[sc], trades[sc], p_start, p_end)
+            m_sc = compute_metrics(navs[sc], trades[sc], p_start, p_end, risk_free_rate=risk_free_rate)
             m_a = a_metrics[period_label]
             if not m_sc or not m_a:
                 continue
@@ -281,8 +284,8 @@ def main(output_dir='D:/etf_rotation_model/reports'):
     # ------------------------------------------------------------------
     verdict_rows = []
     for sc in ['B', 'C', 'D']:
-        m_research = compute_metrics(navs[sc], trades[sc], RESEARCH_PERIOD[0], RESEARCH_PERIOD[1])
-        m_validation = compute_metrics(navs[sc], trades[sc], VALIDATION_PERIOD[0], VALIDATION_PERIOD[1])
+        m_research = compute_metrics(navs[sc], trades[sc], RESEARCH_PERIOD[0], RESEARCH_PERIOD[1], risk_free_rate=risk_free_rate)
+        m_validation = compute_metrics(navs[sc], trades[sc], VALIDATION_PERIOD[0], VALIDATION_PERIOD[1], risk_free_rate=risk_free_rate)
         m_a_research = a_metrics['研究期']
         m_a_validation = a_metrics['验证期']
 
@@ -297,8 +300,6 @@ def main(output_dir='D:/etf_rotation_model/reports'):
         # 收益比较
         ret_not_sig_lower_research = m_research['cagr'] >= m_a_research['cagr'] - 0.01
         ret_not_sig_lower_validation = m_validation['cagr'] >= m_a_validation['cagr'] - 0.01
-
-        # 回撤比较
         mdd_diff_research = m_research['max_drawdown'] - m_a_research['max_drawdown']
         mdd_diff_validation = m_validation['max_drawdown'] - m_a_validation['max_drawdown']
         mdd_worse_research = mdd_diff_research < -0.02
@@ -337,7 +338,7 @@ def main(output_dir='D:/etf_rotation_model/reports'):
     # ------------------------------------------------------------------
     # 6. 生成 Markdown 报告
     # ------------------------------------------------------------------
-    _write_report(output_dir, period_df, year_df, regime_df, lev_df, verdict_df)
+    _write_report(output_dir, period_df, year_df, regime_df, lev_df, verdict_df, risk_free_rate=risk_free_rate)
 
     print(f"\nStep 9 完成。输出目录: {output_dir}")
     for fname in ['v1_3_step9_metrics_by_period.csv', 'v1_3_step9_metrics_by_year.csv',
@@ -346,13 +347,17 @@ def main(output_dir='D:/etf_rotation_model/reports'):
         print(f"  - {fname}")
 
 
-def _write_report(output_dir, period_df, year_df, regime_df, lev_df, verdict_df):
+def _write_report(output_dir, period_df, year_df, regime_df, lev_df, verdict_df, risk_free_rate=0.0):
     lines = []
     lines.append("# v1.3 Step 9: 以夏普率为主KPI的 A/B/C/D 策略复核")
     lines.append("")
     lines.append("> **Observer-only 诊断**。不修改 B0.4，不合并任何新规则。")
     lines.append("> 主KPI = 夏普率，最大回撤作为约束条件而非单独否决标准。")
     lines.append("> 2025-2026 仅展示，不用于制定规则。")
+    if risk_free_rate > 0:
+        lines.append(f"> 无风险收益率 = {risk_free_rate:.2%}（已纳入夏普计算）。")
+    else:
+        lines.append("> 无风险收益率 = 0%（默认，未纳入夏普计算）。")
     lines.append("")
 
     # 1. 按期间指标
@@ -554,5 +559,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='v1.3 Step 9: 以夏普率为主KPI的 A/B/C/D 策略复核')
     parser.add_argument('--output-dir', type=str, default='D:/etf_rotation_model/reports',
                         help='输出目录')
+    parser.add_argument('--risk-free-rate', type=float, default=0.0,
+                        help='无风险收益率（年化），默认0，不纳入夏普计算')
     args = parser.parse_args()
-    main(output_dir=args.output_dir)
+    main(output_dir=args.output_dir, risk_free_rate=args.risk_free_rate)
