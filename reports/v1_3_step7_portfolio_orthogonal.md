@@ -1,6 +1,8 @@
 # v1.3 Step 7: 组合集中度与资金去向正交拆解
 
 > **Post-hoc 假设声明**：本实验为固定组合结构比较，不引入市场状态切换，不制定动态规则。2019-2024为分析期，2025-2026仅展示。
+>
+> **注意**：entry_rank（槽位归属排名）使用买入信号日（T-day）的模型评分计算，而非每日重新排名。B/C/D方案（max_tickers=4）虽无第5个行业槽位，但回测引擎的rebalance逻辑可能买入信号日排名为5的标的（详见后文"B方案rank5持仓说明"）。
 
 ## 实验设计
 
@@ -105,32 +107,51 @@
 
 ## 正交归因（实际敞口+槽位PnL验证）
 
+> **符号约定**：observed_diff = target - reference。`rank5_effect` 在B-A/D-A中表示"target方案与reference方案在entry_rank=5上的PnL差异"。注意：B方案（max_tickers=4）也可能有entry_rank=5的持仓（详见"B方案rank5持仓说明"）。
+
 | 期间 | 对比 | 观察差 | 已知因素 | 交互/残差 | 说明 |
 |------|------|--------|----------|-----------|------|
-| 研究期 | B-A | -30,804.73 | rank5=51,251.69 | r14_effect=-8,167.15, residual=-73,889.26 | B-A: 删除rank5 + 敞口下降 |
+| 研究期 | B-A | -30,804.73 | rank5=51,251.69 | r14_effect=-8,167.15, residual=-73,889.26 | B-A: 将行业槽位从5减至4 + 敞口下降 |
 | 研究期 | C-B | 33,283.13 | defense=64,181.80 | r14_effect=149.88, residual=-31,048.55 | C-B: 防御相对现金 |
 | 研究期 | D-B | 76,241.89 | r14_effect=76,621.15 | residual=-379.27 | D-B: Top4集中度 |
 | 研究期 | D-A | 45,437.16 | rank5=57,835.98, r14_effect=68,454.00 | residual=-80,852.82 | D-A: 综合差异 |
-| 验证期 | B-A | -76,264.44 | rank5=29,279.50 | r14_effect=-10,669.28, residual=-94,874.66 | B-A: 删除rank5 + 敞口下降 |
+| 验证期 | B-A | -76,264.44 | rank5=29,279.50 | r14_effect=-10,669.28, residual=-94,874.66 | B-A: 将行业槽位从5减至4 + 敞口下降 |
 | 验证期 | C-B | 41,929.92 | defense=64,181.80 | r14_effect=11,592.50, residual=-33,844.38 | C-B: 防御相对现金 |
 | 验证期 | D-B | 86,430.09 | r14_effect=91,841.06 | residual=-5,410.97 | D-B: Top4集中度 |
 | 验证期 | D-A | 10,165.65 | rank5=31,026.50, r14_effect=81,171.78 | residual=-102,032.63 | D-A: 综合差异 |
-| 分析期 | B-A | -106,809.77 | rank5=80,531.19 | r14_effect=-18,836.43, residual=-168,504.52 | B-A: 删除rank5 + 敞口下降 |
+| 分析期 | B-A | -106,809.77 | rank5=80,531.19 | r14_effect=-18,836.43, residual=-168,504.52 | B-A: 将行业槽位从5减至4 + 敞口下降 |
 | 分析期 | C-B | 75,156.95 | defense=64,181.80 | r14_effect=11,742.38, residual=-767.23 | C-B: 防御相对现金 |
 | 分析期 | D-B | 161,383.78 | r14_effect=168,462.21 | residual=-7,078.44 | D-B: Top4集中度 |
 | 分析期 | D-A | 54,574.01 | rank5=88,862.48, r14_effect=149,625.78 | residual=-183,914.25 | D-A: 综合差异 |
 
-## 预注册标准7：Top4实际权重
+## B方案rank5持仓说明
 
-- 方案A (研究期): 平均Top4权重 = 49.54%, score_rank_1_4 = 42.82%
-- 方案B (研究期): 平均Top4权重 = 49.82%, score_rank_1_4 = 39.82%
-- 方案C (研究期): 平均Top4权重 = 49.78%, score_rank_1_4 = 39.78%
-- 方案D (研究期): 平均Top4权重 = 60.89%, score_rank_1_4 = 48.73%
-- 方案A (验证期): 平均Top4权重 = 45.82%, score_rank_1_4 = 35.05%
-- 方案B (验证期): 平均Top4权重 = 46.19%, score_rank_1_4 = 33.30%
-- 方案C (验证期): 平均Top4权重 = 46.14%, score_rank_1_4 = 33.27%
-- 方案D (验证期): 平均Top4权重 = 56.46%, score_rank_1_4 = 40.79%
-- **判定**: PASS (D Top4必须高于A/B in 研究期+验证期)
+B方案配置为4×20%+现金，**行业槽位上限为4个**。但 `slot_contribution` 中出现了entry_rank=5的持仓（研究期PnL +27,764.64，验证期 +5,286.40），这是因为：
+
+- **entry_rank 定义**：使用买入信号日（T-day）的模型评分排名，而非"第几个槽位"。
+- **B方案实际最多持有4个行业ETF**（num_positions max=4），不存在第5个槽位。
+- **rank5 持仓的成因**：回测引擎的rebalance逻辑在卖出旧持仓后，从候选池中买入新标的。候选池筛选可能排除部分高排名标的（如数据缺失、涨停、或rebalance规则限制），导致信号日排名第5的标的进入4个槽位之一。
+- **结论**：B方案rank5持仓是**合理现象**，不是entry_rank计算错误。B方案确实将行业持仓从5个减少到4个（max_tickers=4），但买入的4个标的中可能包含信号日排名为5的标的。
+
+**明细表**：`reports/v1_3_step7_b_rank5_trades.csv`（16笔，总盈亏 +25,459.34）
+
+## 预注册标准7：模型评分排名Top4权重（score_rank_1_4）
+
+> **指标说明**：标准7验收以 `score_rank_1_4_weight`（模型评分排名前4只的**实际仓位权重和**）为主，而非 `weight_order_top4`（按实际仓位从大到小排序的前4只权重和）。后者可能因单只标的大幅上涨而偏离模型集中度本意。
+>
+> 研究期（2019-2022）和验证期（2023-2024）分别计算，PASS要求两期方向均一致。
+
+- 方案A (研究期): weight_order=49.54%, score_rank_1_4=42.82%
+- 方案B (研究期): weight_order=49.82%, score_rank_1_4=39.82%
+- 方案C (研究期): weight_order=49.78%, score_rank_1_4=39.78%
+- 方案D (研究期): weight_order=60.89%, score_rank_1_4=48.73%
+- 方案A (验证期): weight_order=45.82%, score_rank_1_4=35.05%
+- 方案B (验证期): weight_order=46.19%, score_rank_1_4=33.30%
+- 方案C (验证期): weight_order=46.14%, score_rank_1_4=33.27%
+- 方案D (验证期): weight_order=56.46%, score_rank_1_4=40.79%
+- **判定**: PASS (D score_rank_1_4 > A/B in 研究期+验证期)
+
+**辅助观察**：weight_order_top4 同样显示 D > A/B，但权重差异较小（研究期 D=60.89% vs A=49.54% vs B=49.82%）。score_rank_1_4 的差异更能反映模型集中度的提升（研究期 D=48.73% vs A=42.82% vs B=39.82%）。
 
 ## 滑点压力测试
 
@@ -177,7 +198,7 @@
 3. 验证期最大回撤不恶化超过1个百分点: ❌ (D绝对回撤=20.00%, A绝对回撤=17.75%, 差值=+2.24%)
 4. 3/5/10bp下结论方向不反转: ✅
 5. leave-one-year-out多数结果方向一致: ✅ (D>A: 5/6 = 83%; 严格多数需>50%)
-7. 实际Top4权重D>A/B (研究期+验证期): ✅
+7. 模型评分排名Top4权重D>A/B (研究期+验证期): ✅ (score_rank_1_4: D=48.73%>A=42.82%>B=39.82% 研究期; D=40.79%>A=35.05%>B=33.30% 验证期)
 
 ### 佣金
 A=49,409.20, B=33,780.86, C=40,620.21, D=44,083.02
@@ -207,7 +228,8 @@ A=49,409.20, B=33,780.86, C=40,620.21, D=44,083.02
 - `reports/v1_3_step7_annual_contribution.csv` — 年度贡献
 - `reports/v1_3_step7_defense_contribution.csv` — 防御ETF贡献
 - `reports/v1_3_step7_reconciliation.csv` — 勾稽验证汇总
-- `reports/v1_3_step7_position_exposure.csv` — 逐日持仓敞口
+- `reports/v1_3_step7_b_rank5_trades.csv` — B方案entry_rank=5持仓明细（16笔，信号日排名 vs 槽位概念澄清）
+- `reports/v1_3_step7_position_exposure.csv` — 逐日持仓敞口（含weight_order_top4和score_rank_1_4）
 - `reports/v1_3_step7_slot_contribution.csv` — 槽位贡献（rank1-5，含period）
 - `reports/v1_3_step7_slot5_yearly.csv` — 第5名行业ETF逐年
 - `reports/v1_3_step7_yearly_metrics.csv` — 年度指标

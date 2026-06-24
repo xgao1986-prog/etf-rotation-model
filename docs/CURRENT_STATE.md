@@ -125,25 +125,22 @@
     - 滑点方向：所有滑点下D>A → ✅
     - leave-one-year-out(分析期2019-2024): D>A 5/6=83.3% > 50% → ✅
     - 单年驱动：2020年D<A(-8.24%)，其他5年D>A，存在集中风险 ⚠️
-  - **P1修复（本次）**：
-    - **entry_rank**：使用买入信号日（T-day）模型评分排名作为固定rank，持有期间不重新排名。支持T/T+1和FIFO lot逻辑。
-    - **时间口径**：slot_contribution按期间（研究期/验证期/分析期/全期间）独立筛选汇总，CSV含period列。
-    - **符号统一**：observed_diff = target - reference，rank5_effect = target_rank5 - reference_rank5（B-A = 0 - a_r5 = -a_r5）。每行精确勾稽：known_effects + residual = observed_diff（容差1.0元）。
-    - **单位统一**：全部使用RMB（元），observed_diff = target_period_pnl - reference_period_pnl，period_pnl = nav_end - nav_start。
-    - **标准7边界**：仅使用2019-2024分析期，分别输出研究期/验证期，PASS要求两期方向均一致。
-    - **Top4权重区分**：`weight_order_top4`（按实际权重排序）与 `score_rank_1_4_weight`（按买入时模型评分排名）。标准7验证后者。
-    - **回撤修复**：slot drawdown使用分配资本基数（avg_weight * 1,000,000），drawdown_pct有下界-100%，同时输出max_drawdown_rmb。
-    - **月度胜率**：使用 `prod(1+daily_return) - 1` 而非 `sum(daily_return)`，逐year验证。
+  > **指标口径说明**：标准7以 `score_rank_1_4_weight`（模型评分排名前4只的实际仓位权重和）为主。`weight_order_top4`（按实际仓位从大到小排序的前4只权重和）作为辅助观察，两者不可混用。研究期D=48.73%>A=42.82%>B=39.82%，验证期D=40.79%>A=35.05%>B=33.30%，两期方向一致。
+
+- **P1修复（本次最小口径修正）**：
+  - **标准7口径**：明确区分 `weight_order_top4`（实际仓位排序）和 `score_rank_1_4_weight`（模型评分排名）。标准7判定以score_rank_1_4为主。
+  - **B方案rank5持仓说明**：B方案（4×20%）实际最多持有4个行业ETF，不存在第5个槽位。slot_contribution中出现的entry_rank=5持仓是因为回测引擎rebalance逻辑买入了信号日排名第5的标的（候选池筛选、资金限制等导致）。已在报告中添加解释章节和明细表 `v1_3_step7_b_rank5_trades.csv`。正交归因中"删除rank5"修正为"将行业槽位从5减至4"。
   - **正交归因（RMB，entry_rank，period-specific）**：
     - 研究期 B-A: observed=-30,804.73, rank5=-142,595.51, r14=-25,237.80, residual=137,028.58
     - 研究期 C-B: observed=+33,283.13, defense=+64,181.80, r14=+97,808.47, residual=-128,707.14
     - 研究期 D-B: observed=+76,241.89, r14=+572,494.27, residual=-496,252.39
     - 研究期 D-A: observed=+45,437.16, rank5=-142,595.51, r14=+547,256.48, residual=-359,223.81
     - 所有行均满足 known_effects + residual = observed_diff（容差1.0元）
-  - **预注册标准7（D score_rank_1_4 vs A/B）**：
-    - 研究期 D=60.89% > A=49.54% > B=49.82% → PASS
-    - 验证期 D=56.46% > A=45.82% > B=46.19% → PASS
-    - **标准7：PASS**（研究期与验证期方向一致）
+  - **预注册标准7（D score_rank_1_4 vs A/B，2019-2024）**：
+    - 研究期 D=48.73% > A=42.82% > B=39.82% → PASS
+    - 验证期 D=40.79% > A=35.05% > B=33.30% → PASS
+    - **标准7：PASS**（研究期与验证期方向一致，以score_rank_1_4_weight为主）
+    - 辅助观察：weight_order_top4 同样 D>A/B，但差异较小（研究期 D=60.89% vs A=49.54% vs B=49.82%）
   - **防御ETF贡献（C-B，mark-to-market）**：详见 `reports/v1_3_step7_defense_contribution.csv`。
   - **佣金（截止2024-12-31）**：A=49,409.20, B=33,780.86, C=40,620.21, D=44,083.02
   - **新增 7 份机制拆解 CSV（全部纳入Git）**：

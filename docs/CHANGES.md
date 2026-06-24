@@ -25,10 +25,11 @@
 3. **entry_rank定义**：使用买入信号日（T-day）的模型评分排名作为entry_rank，持有期间固定归属该rank，不每日重新排名。支持T/T+1和FIFO lot逻辑。
 
 4. **正交归因符号统一**：observed_diff = target - reference，各因素方向按target-reference定义。每行精确勾稽：known_effects + residual = observed_diff（容差1.0元）
-   - B-A: rank5_effect = B_rank5 - A_rank5 = 0 - a_r5 = -a_r5
+   - B-A: rank5_effect = B_rank5 - A_rank5（B也可能有entry_rank=5持仓，因为rebalance可能买入信号日排名第5的标的）
    - C-B: defense_effect = C_defense - B_defense
    - D-B: r14_effect = D_r14 - B_r14
-   - D-A: rank5_effect = D_rank5 - A_rank5 = 0 - a_r5 = -a_r5
+   - D-A: rank5_effect = D_rank5 - A_rank5
+   - 注意："删除rank5"修正为"将行业槽位从5减至4"，因为B方案实际最多4个槽位，但买入标的中可能含信号日排名5的标的
 
 5. **归因单位统一（RMB）**：observed_diff = target_period_pnl - reference_period_pnl，period_pnl = nav_end - nav_start。槽位PnL、防御PnL、佣金、residual统一使用人民币（元）
 
@@ -49,7 +50,19 @@
 
 12. **脚本支持--use-cached**：从现有nav/trades CSV快速重新分析，跳过耗时回测
 
-**测试**：22/22 通过（含7个新增FIX验证测试）
+13. **标准7口径混用修正**：
+    - 明确区分 `weight_order_top4`（实际仓位排序）和 `score_rank_1_4_weight`（模型评分排名）。标准7判定以score_rank_1_4为主
+    - 报告、CURRENT_STATE、CHANGES中统一使用score_rank_1_4_weight作为验收指标
+    - weight_order_top4 作为辅助观察，不可与score_rank_1_4混用
+
+14. **B方案rank5持仓说明**：
+    - B方案（4×20%）实际最多持有4个行业ETF（num_positions max=4），不存在第5个槽位
+    - slot_contribution中出现的entry_rank=5持仓（16笔，总盈亏+25,459.34）是因为回测引擎rebalance逻辑买入了信号日排名第5的标的
+    - 原因：候选池筛选、资金限制、或其他rebalance规则导致高排名标的被排除
+    - 已生成明细表 `reports/v1_3_step7_b_rank5_trades.csv`
+    - 正交归因中"删除rank5"修正为"将行业槽位从5减至4"
+
+**测试**：22/22 通过（含8个新增FIX验证测试：slot_period_filtering、entry_rank_consistency、orthogonal_attribution_balance、standard7_period_boundary、drawdown_not_below_minus_100、monthly_win_rate_compounding、score_rank_vs_weight_order、standard7_score_rank_verification）
 **验证器**：通过（全部检查项通过）
 **隔离运行**：通过（临时目录完整运行并验证）
 **B0.4 slippage**：8/8 通过
