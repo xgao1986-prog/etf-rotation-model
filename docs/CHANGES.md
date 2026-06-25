@@ -5,6 +5,76 @@
 
 ---
 
+## 2026-06-26（本次 - B1 候选收敛验证 Milestone）
+
+**目标：** 不要继续扩展新策略，以 B0.4 作为唯一冻结基线，验证是否存在更稳、更少噪音、更适合实盘跟踪的 B1 候选。
+
+**本次只做三件事：**
+
+### 一、Holding Stability A/B 实验
+
+对照组：B0.4（use_v2_rebalance=True, rank_buffer_enabled=False）
+实验组：
+  - A. 卖出跌出 Top8 才卖（rank_buffer_enabled=True, sell_rank_n=8）
+  - B. 卖出跌出 Top10 才卖（rank_buffer_enabled=True, sell_rank_n=10）
+  - C. 卖出跌出 Top10，并连续 2 个调仓日确认（rank_buffer_enabled=True, sell_rank_n=10, exit_debounce=2）
+
+**重要规则：**
+  - 不修改 B0.4 生产代码，通过 cfg 参数切换实验组
+  - 止损仍然即时生效，不受 Top8/Top10 缓冲影响
+  - 买入规则不变：仍然只买 Top5
+  - 缓冲只作用于"已有持仓是否因为排名/信号弱化而卖出"
+  - 使用旧版 rebalance 引擎（use_v2_rebalance=False）激活 rank buffer 逻辑
+
+**输出：**
+  - `scripts/b1_holding_stability_ab_test.py`
+  - `reports/b1_holding_stability_ab_test.md`
+  - `reports/b1_holding_stability_metrics.csv`
+  - `reports/b1_holding_stability_exit_attribution.csv`
+
+**通过标准：**
+  - 交易次数下降 20% 以上
+  - 年化收益下降不超过 1 个百分点
+  - 最大回撤不恶化
+  - 夏普不低于 B0.4
+
+### 二、Universe Time-Consistency Audit
+
+目的：确认当前18只ETF池在历史回测中是否存在时间错配、覆盖不足或后验选择问题。
+
+检查项：
+  - 每只ETF真实上市日与数据库首个有效交易日
+  - 数据起点是否晚于上市日
+  - 覆盖不足ETF对结果的影响
+  - 剔除覆盖不足ETF后的B0.4表现变化
+  - 仅使用2019年已完整可用ETF的结果
+  - 从2022年以后18只ETF基本可用时重新回测的结果
+
+**注意**：这不是为了重选ETF池，而是审计B0.4可信度。不修改正式ETF池。
+
+**输出：**
+  - `scripts/b0_4_universe_time_consistency_audit.py`
+  - `reports/b0_4_universe_time_consistency_audit.md`
+  - `reports/b0_4_universe_time_consistency_detail.csv`
+
+### 三、Paper Trading Log 机制
+
+目的：为后续3-6个月纸面实盘验证做准备。
+
+字段：18个字段，包括建议 vs 实际执行的完整对比、滑点、未执行原因、止损触发等。
+
+**输出：**
+  - `docs/PAPER_TRADING_LOG_SPEC.md`
+
+**验证：**
+  - py_compile 通过
+  - 脚本运行（B1实验运行全部4个变体，Universe审计运行全部对照实验）
+  - git diff --check 通过
+
+**不修改：** B0.4 策略规则、回测引擎、实盘助手、正式交易池
+
+---
+
 ## 2026-06-26（本次 - v0.1 研究数据扩展层）
 
 **目标：** 在不影响 B0.4 实盘助手的前提下，开始收集行业数据、概念ETF数据和新ETF观察数据。

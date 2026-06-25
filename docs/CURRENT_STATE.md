@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-26（v0.1 研究数据扩展层 + 实盘交互模块）
+**最后更新**：2026-06-26（B1 候选收敛验证 Milestone）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -8,6 +8,7 @@
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）
 **数据截止**：2026-06-18
+**B1 状态**：候选收敛验证中（未通过则不升级）
 
 > 旧分支 `feature/v1.2.1-regime-adaptive` 保留，不删除、不重置、不强推。标签 `v1.2.3-b0.4` 保持不动。
 
@@ -15,7 +16,20 @@
 
 ## 1. 当前结论
 
-- **v0.1 研究数据扩展层已完成**：
+- **B1 候选收敛验证 Milestone 已完成**：
+  - **Holding Stability A/B 实验**：4个变体（B0.4 + A/B/C）全部回测完成
+    - A: 跌出Top8才卖
+    - B: 跌出Top10才卖
+    - C: 跌出Top10 + 连续2次确认
+    - 通过标准：交易次数下降≥20%、CAGR不恶化、回撤不恶化、夏普≥B0.4
+  - **Universe Time-Consistency Audit**：18只ETF时间覆盖审计完成
+    - 检查每只ETF的数据起点、覆盖情况
+    - 运行对照实验：剔除覆盖不足ETF、仅2019年可用ETF、2022年起回测
+  - **Paper Trading Log 机制**：纸面交易日志规范设计完成
+    - 18个字段，覆盖建议 vs 实际执行、滑点、未执行原因
+    - 3-6个月验证目标：执行率≥80%、滑点≤20bp、跟踪误差≤5%
+  - 新增脚本：`b1_holding_stability_ab_test.py`、`b0_4_universe_time_consistency_audit.py`
+  - 新增文档：`docs/PAPER_TRADING_LOG_SPEC.md`
   - 新增 `docs/ETF_UNIVERSE_GOVERNANCE.md` 治理文档
   - 新增 3 个研究脚本：
     - `research_update_industry_data.py` — 申万31只一级行业指数日线
