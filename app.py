@@ -7,6 +7,7 @@ import sys
 
 import json
 import os
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -1965,13 +1966,203 @@ def render_strategy_config(cfg, is_b0_18=True):
         st.dataframe(concept_df, use_container_width=True, hide_index=True)
 
 
+def render_live_trading(cfg, is_b0_18=True):
+    """实盘助手页面 v0.1"""
+    import sys
+    sys.path.insert(0, "src")
+    from live_trading_assistant import LiveTradingAssistant, CASH_TICKER
+
+    st.header("实盘助手")
+    st.markdown('<div class="section-note">真实持仓以用户录入为准，模型只生成目标组合和交易建议。v0.1 不自动下单。</div>', unsafe_allow_html=True)
+
+    assistant = LiveTradingAssistant(
+        positions_path=os.path.join("data", "live", "actual_positions.csv"),
+        trades_path=os.path.join("data", "live", "actual_trades.csv"),
+        plan_path=os.path.join("data", "live", "latest_trade_plan.csv"),
+        config=cfg,
+    )
+
+    # ------------------------------------------------------------------
+    # 子页面导航
+    # ------------------------------------------------------------------
+    sub_tab_holdings, sub_tab_alerts, sub_tab_plan, sub_tab_trades = st.tabs(
+        ["持仓管理", "止损检查", "调仓建议", "成交记录"]
+    )
+
+    # ------------------------------------------------------------------
+    # 子页1: 持仓管理
+    # ------------------------------------------------------------------
+    with sub_tab_holdings:
+        st.subheader("当前真实持仓")
+        positions_df = assistant.load_positions()
+
+        if positions_df.empty:
+            st.info("持仓为空，请通过下方上传 CSV 或手动录入。")
+        else:
+            # 计算关键指标
+            cash_rows = positions_df[positions_df["ticker"] == CASH_TICKER]
+            cash = float(cash_rows.iloc[0]["market_value"]) if not cash_rows.empty else 0.0
+            holdings = positions_df[positions_df["ticker"] != CASH_TICKER]
+            total_mv = holdings["market_value"].sum()
+            total_asset = cash + total_mv
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("总资产", f"{total_asset:,.2f}")
+            k2.metric("现金", f"{cash:,.2f}")
+            k3.metric("持仓市值", f"{total_mv:,.2f}")
+            k4.metric("总仓位", f"{total_mv/total_asset:.1%}" if total_asset > 0 else "N/A")
+
+            st.dataframe(holdings[["ticker", "name", "shares", "cost_price", "current_price", "market_value", "update_time"]],
+                         use_container_width=True, hide_index=True)
+
+            # 校验
+            if st.button("校验持仓"):
+                report = assistant.validate_positions(positions_df)
+                if report.ok:
+                    st.success("✅ 持仓校验通过")
+                else:
+                    for e in report.errors:
+                        st.error(f"❌ {e}")
+                    for w in report.warnings:
+                        st.warning(f"⚠️ {w}")
+
+        st.divider()
+        st.subheader("更新持仓")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**方式1: 上传 CSV**")
+            uploaded = st.file_uploader("上传持仓 CSV", type=["csv"], key="live_positions_upload")
+            if uploaded:
+                try:
+                    new_df = pd.read_csv(uploaded)
+                    assistant.save_positions(new_df)
+                    st.success("✅ 持仓已更新")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"上传失败: {e}")
+
+        with col2:
+            st.markdown("**方式2: 手动录入**")
+            with st.form("manual_position"):
+                t = st.text_input("ticker", "")
+                n = st.text_input("名称", "")
+                s = st.number_input("股数", min_value=0, step=100, value=0)
+                cp = st.number_input("成本价", min_value=0.0, step=0.001, value=0.0)
+                pp = st.number_input("现价", min_value=0.0, step=0.001, value=0.0)
+                cash_input = st.number_input("现金", min_value=0.0, step=1000.0, value=0.0)
+                submitted = st.form_submit_button("保存")
+                if submitted:
+                    rows = []
+                    if t and s > 0 and pp > 0:
+                        rows.append({
+                            "ticker": t, "name": n, "shares": s, "cost_price": cp,
+                            "current_price": pp, "market_value": s * pp,
+                            "available_cash": 0, "update_time": datetime.now().strftime("%Y-%m-%d"),
+                        })
+                    if cash_input > 0:
+                        rows.append({
+                            "ticker": CASH_TICKER, "name": CASH_NAME, "shares": 0,
+                            "cost_price": 0, "current_price": 0, "market_value": cash_input,
+                            "available_cash": cash_input + sum(r["market_value"] for r in rows if r["ticker"] != CASH_TICKER),
+                            "update_time": datetime.now().strftime("%Y-%m-%d"),
+                        })
+                    if rows:
+                        existing = assistant.load_positions()
+                        for r in rows:
+                            mask = existing["ticker"] == r["ticker"]
+                            if mask.any():
+                                for k, v in r.items():
+                                    existing.loc[mask, k] = v
+                            else:
+                                existing = pd.concat([existing, pd.DataFrame([r])], ignore_index=True)
+                        assistant.save_positions(existing)
+                        st.success("✅ 已保存")
+                        st.rerun()
+
+        # 图片识别预留
+        st.divider()
+        st.subheader("截图上传 (v0.1 预留接口)")
+        img = st.file_uploader("上传券商持仓截图", type=["png", "jpg"], key="live_screenshot")
+        if img:
+            st.image(img, caption="已上传截图")
+            st.info("v0.1 暂不支持自动 OCR，请手动录入持仓。v0.2 将接入自动识别。")
+
+    # ------------------------------------------------------------------
+    # 子页2: 止损检查
+    # ------------------------------------------------------------------
+    with sub_tab_alerts:
+        st.subheader("每日止损检查")
+        if st.button("运行止损检查"):
+            alerts = assistant.check_stop_loss()
+            if alerts.empty:
+                st.success("✅ 今日无触发止损的持仓")
+            else:
+                st.warning(f"⚠️ 今日触发 {len(alerts)} 只持仓止损")
+                st.dataframe(alerts[["ticker", "name", "shares", "cost_price", "current_price", "loss_pct"]],
+                             use_container_width=True, hide_index=True)
+            # 生成报告
+            content = assistant.generate_daily_alert()
+            st.download_button("下载报告", content, file_name="daily_stop_loss_alert.md")
+
+    # ------------------------------------------------------------------
+    # 子页3: 调仓建议
+    # ------------------------------------------------------------------
+    with sub_tab_plan:
+        st.subheader("每周调仓建议")
+        st.info("v0.1 调仓建议需通过命令行生成: py scripts/live_generate_trade_plan.py")
+        if os.path.exists(assistant.plan_path):
+            plan_df = pd.read_csv(assistant.plan_path)
+            if not plan_df.empty:
+                st.dataframe(plan_df, use_container_width=True, hide_index=True)
+                st.download_button("下载交易计划 CSV", plan_df.to_csv(index=False), file_name="latest_trade_plan.csv")
+            else:
+                st.info("暂无调仓计划")
+        else:
+            st.info("暂无调仓计划，请先运行命令行生成")
+
+    # ------------------------------------------------------------------
+    # 子页4: 成交记录
+    # ------------------------------------------------------------------
+    with sub_tab_trades:
+        st.subheader("成交记录")
+        if os.path.exists(assistant.trades_path):
+            trades_df = pd.read_csv(assistant.trades_path)
+            st.dataframe(trades_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("暂无成交记录")
+
+        st.divider()
+        st.subheader("手动录入成交")
+        with st.form("manual_trade"):
+            c1, c2 = st.columns(2)
+            with c1:
+                td = st.date_input("日期", datetime.now())
+                tt = st.text_input("ticker", "")
+                ta = st.selectbox("操作", ["BUY", "SELL"])
+            with c2:
+                ts = st.number_input("股数", min_value=0, step=100, value=0)
+                tp = st.number_input("成交价格", min_value=0.0, step=0.001, value=0.0)
+                tc = st.number_input("佣金", min_value=0.0, step=0.1, value=0.1)
+            tn = st.text_input("备注", "")
+            submitted = st.form_submit_button("记录成交")
+            if submitted and tt and ts > 0 and tp > 0:
+                trade = ActualTrade(
+                    date=td.strftime("%Y-%m-%d"), ticker=tt, action=ta,
+                    shares=ts, actual_price=tp, commission=tc, note=tn,
+                )
+                assistant.apply_trade(trade)
+                st.success(f"✅ 已记录成交: {ta} {tt} {ts}股 @ {tp}")
+                st.rerun()
+
+
 def main():
     inject_style()
     cfg, is_b0_18 = build_sidebar_config()
     render_header()
 
-    tab_dashboard, tab_backtest, tab_etf, tab_data, tab_config = st.tabs(
-        ["仪表盘", "回测结果", "ETF分析", "数据管理", "策略配置"]
+    tab_dashboard, tab_backtest, tab_etf, tab_data, tab_config, tab_live = st.tabs(
+        ["仪表盘", "回测结果", "ETF分析", "数据管理", "策略配置", "实盘助手"]
     )
 
     with tab_dashboard:
@@ -1984,6 +2175,8 @@ def main():
         render_data_management()
     with tab_config:
         render_strategy_config(cfg, is_b0_18)
+    with tab_live:
+        render_live_trading(cfg, is_b0_18)
 
     st.divider()
     st.caption("B0-18 主线 | 18只行业ETF轮动 | 概念池已封存 | 参数来自侧边栏实时状态")

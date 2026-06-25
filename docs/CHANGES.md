@@ -5,7 +5,56 @@
 
 ---
 
-## 2026-06-26（本次 - v1.3 Step 10：不同市场形态下 A/B/C/D 风险调整表现对比）
+## 2026-06-26（本次 - v0.1 实盘交互与信号发布模块）
+
+**目标：** 把 B0.4 模型转成可用于真实持仓管理的操作模块。
+
+**核心原则：**
+- 真实持仓以用户录入为准，不以回测模拟持仓为准
+- 模型只生成目标组合和交易建议
+- 实际成交后，由用户录入真实成交价格和数量，系统再更新真实持仓状态
+- 不修改 B0.4 策略规则，不接入 C/D/状态切换，不自动下单
+
+**新增文件：**
+- `docs/LIVE_TRADING_ASSISTANT_DESIGN.md` — 设计文档
+- `src/live_trading_assistant.py` — 核心模块（~370行）
+- `scripts/live_update_positions.py` — 持仓价格更新
+- `scripts/live_check_stop_loss.py` — 每日止损检查
+- `scripts/live_generate_trade_plan.py` — 每周调仓计划
+- `scripts/live_record_trade.py` — 实际成交记录
+- `tests/test_live_trading.py` — 22 项自动化测试全部通过
+- `data/live/` 目录和示例 CSV
+- `reports/live/` 目录
+
+**UI 更新：**
+- `app.py` 新增第 6 个 tab "实盘助手"
+- 包含 4 个子页：持仓管理 / 止损检查 / 调仓建议 / 成交记录
+- 支持 CSV 上传、手动录入、截图上传（v0.1 预留接口）
+
+**校验规则：**
+- ETF 池内检查（B0-18 池）
+- 100 股整数检查（WARNING）
+- NAV 恒等式：现金 + 持仓市值 = 总资产（ERROR）
+- 缺价检查（ERROR）
+- 总仓位检查（WARNING）
+
+**交付物：**
+- `data/live/actual_positions.csv` — 真实持仓
+- `data/live/actual_trades.csv` — 实际成交记录
+- `data/live/latest_trade_plan.csv` — 最新交易计划
+- `reports/live/daily_stop_loss_alert_*.md` — 止损检查报告
+- `reports/live/weekly_rebalance_plan_*.md` — 调仓计划报告
+
+**验证：**
+- 脚本：py_compile 全部通过
+- 测试：22 passed, 0 failed
+- git diff --check: 通过
+
+**不修改：** B0.4 策略规则、回测引擎、A/B/C/D 方案、市场状态算法
+
+---
+
+## 2026-06-26（v1.3 Step 10：不同市场形态下 A/B/C/D 风险调整表现对比）
 
 **目标：** Observer-only 诊断，找出在不同市场状态下 A/B/C/D 哪个方案的风险调整表现最好。不生成新交易规则，不修改 B0.4/A/B/C/D/市场状态算法。
 
