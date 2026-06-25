@@ -83,7 +83,7 @@ def get_b0_4_signals(assistant, date, cfg):
         else:
             target_positions[t] = 0
 
-    return target_positions
+    return target_positions, price_map
 
 
 def main():
@@ -107,7 +107,7 @@ def main():
         config=cfg,
     )
 
-    target_positions = get_b0_4_signals(assistant, args.date, cfg)
+    target_positions, price_map_signals = get_b0_4_signals(assistant, args.date, cfg)
     if not target_positions:
         print("WARN No B0.4 signals today, generating empty plan.")
         target_positions = {}
@@ -117,6 +117,11 @@ def main():
     for _, r in positions_df.iterrows():
         if r["ticker"] != "__CASH__" and r["current_price"] > 0:
             price_map[r["ticker"]] = r["current_price"]
+
+    # 合并价格：优先使用信号查询到的价格（更接近实时），持仓价格为备选
+    for t, p in price_map_signals.items():
+        if t not in price_map or price_map[t] <= 0:
+            price_map[t] = p
 
     actual_tickers = set(positions_df[positions_df["ticker"] != "__CASH__"]["ticker"].unique())
     target_tickers = set(target_positions.keys())

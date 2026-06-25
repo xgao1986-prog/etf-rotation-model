@@ -295,20 +295,64 @@ class TestReportGeneration:
         assert "卖出订单" in content
 
 
-class TestPositionRatio:
-    """总仓位测试"""
+class TestMissingPrice:
+    """缺价格场景测试"""
 
-    def test_position_over_limit(self, assistant):
-        """仓位超过 max_total_position 应警告"""
-        assistant.config["max_total_position"] = 0.8  # 降低上限以便触发
+    def test_buy_with_missing_price_not_valid(self, assistant):
+        """只有现金、目标买入新ETF、price_map缺失时，不能生成有效 BUY"""
+        # 只保留现金，清空持仓
         rows = [
-            {"ticker": "512400.SH", "name": "信息技术", "shares": 200000,
-             "cost_price": 0.636, "current_price": 0.650, "market_value": 130000.0,
-             "available_cash": 0, "update_time": "2026-06-26"},
             {"ticker": CASH_TICKER, "name": "现金", "shares": 0,
-             "cost_price": 0, "current_price": 0, "market_value": 0.0,
-             "available_cash": 130000.0, "update_time": "2026-06-26"},
+             "cost_price": 0, "current_price": 0, "market_value": 150000.0,
+             "available_cash": 150000.0, "update_time": "2026-06-26"},
         ]
         assistant.save_positions(pd.DataFrame(rows))
-        report = assistant.validate_positions()
-        assert any("总仓位超限" in w for w in report.warnings)
+
+        target = {"512400.SH": 1000}
+        price_map = {}  # 缺价格
+        plan = assistant.generate_trade_plan(target, price_map, "2026-06-26")
+
+        buy_df = plan[plan["action"] == "BUY"]
+        assert len(buy_df) == 1
+        assert buy_df.iloc[0]["estimated_price"] == 0
+        assert buy_df.iloc[0]["estimated_amount"] == 0
+        assert buy_df.iloc[0]["commission"] == 0
+        assert "缺价格" in buy_df.iloc[0]["reason"]
+        assert buy_df.iloc[0]["post_cash"] == 150000.0  # 现金未扣减
+
+    def test_buy_with_valid_price_correct(self, assistant):
+        """只有现金、目标买入新ETF、price_map包含价格时，BUY金额和股数正确"""
+        rows = [
+            {"ticker": CASH_TICKER, "name": "现金", "shares": 0,
+             "cost_price": 0, "current_price": 0, "market_value": 150000.0,
+             "available_cash": 150000.0, "update_time": "2026-06-26"},
+        ]
+        assistant.save_positions(pd.DataFrame(rows))
+
+        target = {"512400.SH": 1000}
+        price_map = {"512400.SH": 0.650}
+        plan = assistant.generate_trade_plan(target, price_map, "2026-06-26")
+
+        buy_df = plan[plan["action"] == "BUY"]
+        assert len(buy_df) == 1
+        assert buy_df.iloc[0]["estimated_price"] == 0.650
+        assert buy_df.iloc[0]["estimated_amount"] == 1000 * 0.650
+        assert buy_df.iloc[0]["commission"] > 0  # 有佣金
+        assert buy_df.iloc[0]["post_cash"] == 150000.0 - 1000 * 0.650 - buy_df.iloc[0]["commission"]
+
+    def test_report_warns_missing_price(self, assistant):
+        """价格缺失时报告有明确警告"""
+        rows = [
+            {"ticker": CASH_TICKER, "name": "现金", "shares": 0,
+             "cost_price": 0, "current_price": 0, "market_value": 150000.0,
+             "available_cash": 150000.0, "update_time": "2026-06-26"},
+        ]
+        assistant.save_positions(pd.DataFrame(rows))
+
+        target = {"512400.SH": 1000}
+        price_map = {}  # 缺价格
+        plan = assistant.generate_trade_plan(target, price_map, "2026-06-26")
+
+        content = assistant.generate_weekly_plan(plan, "2026-06-26", output_path=os.path.join(tempfile.gettempdir(), "plan_missing_price.md"))
+        assert "缺价格警告" in content
+        assert "无法生成有效预估" in content

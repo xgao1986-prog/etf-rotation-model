@@ -314,6 +314,23 @@ class LiveTradingAssistant:
                 continue
 
             price = price_map.get(ticker, 0)
+
+            if price <= 0:
+                # 缺价格，不能生成有效订单
+                rows.append({
+                    "ticker": ticker,
+                    "action": "BUY" if delta > 0 else "SELL",
+                    "current_shares": curr,
+                    "target_shares": target,
+                    "delta_shares": delta,
+                    "estimated_price": 0,
+                    "estimated_amount": 0.0,
+                    "reason": "缺价格，不能生成有效订单（请更新行情）",
+                    "commission": 0.0,
+                    "post_cash": cash,
+                })
+                continue
+
             amount = abs(delta) * price
             commission = max(amount * self.commission_rate, self.min_commission)
 
@@ -551,6 +568,17 @@ class LiveTradingAssistant:
                 lines.append("")
                 for _, r in hold_df.iterrows():
                     lines.append(f"- {r['ticker']}: {r['current_shares']} 股（保持不变）")
+                lines.append("")
+
+            # 检查缺价格订单
+            missing_price = plan_df[plan_df["reason"].str.contains("缺价格", na=False)]
+            if not missing_price.empty:
+                lines.append("## ⚠️ 缺价格警告")
+                lines.append("")
+                lines.append("以下订单因缺少价格无法生成有效预估，请运行 `py scripts/live_update_positions.py` 更新行情后重新生成：")
+                lines.append("")
+                for _, r in missing_price.iterrows():
+                    lines.append(f"- {r['action']} {r['ticker']}: 目标股数 {r['target_shares']}，但 estimated_price=0")
                 lines.append("")
 
         lines.append("> ⚠️ **注意**：本计划由 B0.4 模型生成，实际成交需用户手动确认并录入。")
