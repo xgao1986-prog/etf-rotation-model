@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-26（v0.1 实盘交互与信号发布模块）
+**最后更新**：2026-06-26（v0.1 研究数据扩展层 + 实盘交互模块）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -15,6 +15,16 @@
 
 ## 1. 当前结论
 
+- **v0.1 研究数据扩展层已完成**：
+  - 新增 `docs/ETF_UNIVERSE_GOVERNANCE.md` 治理文档
+  - 新增 3 个研究脚本：
+    - `research_update_industry_data.py` — 申万31只一级行业指数日线
+    - `research_update_concept_etf_data.py` — 概念/主题ETF观察池数据
+    - `research_scan_new_etfs.py` — 新ETF发现与观察池扫描
+  - 数据目录：`data/research/`（行业指数、概念ETF、观察池元数据）
+  - 报告目录：`reports/research/`（观察报告）
+  - 支持 --dry-run，缺数据只警告，不影响B0.4实盘
+  - 明确声明：研究数据不进入B0.4交易逻辑
 - **v0.1 实盘交互与信号发布模块已完成**：
   - 核心模块 `src/live_trading_assistant.py`（~370行），支持持仓管理、校验、止损检查、调仓建议、成交记录
   - 4 个命令行脚本：持仓更新、止损检查、调仓计划、成交记录

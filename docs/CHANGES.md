@@ -5,6 +5,47 @@
 
 ---
 
+## 2026-06-26（本次 - v0.1 研究数据扩展层）
+
+**目标：** 在不影响 B0.4 实盘助手的前提下，开始收集行业数据、概念ETF数据和新ETF观察数据。
+
+**核心原则：**
+- B0.4 正式交易池不变（18只ETF）
+- 实盘助手仍只使用 B0.4 的18只ETF
+- 行业数据、概念ETF、新ETF只进入观察层
+- 不自动纳入交易池，不根据这些数据改策略
+- 后续是否纳入必须用户确认
+
+**新增文件：**
+- `docs/ETF_UNIVERSE_GOVERNANCE.md` — ETF池治理与数据分层文档
+- `scripts/research_update_industry_data.py` — 申万行业指数日线更新
+- `scripts/research_update_concept_etf_data.py` — 概念/主题ETF观察池数据更新
+- `scripts/research_scan_new_etfs.py` — 新ETF发现与观察池扫描
+- `data/research/` 目录 — 研究数据存储
+- `reports/research/` 目录 — 研究报告存储
+
+**数据文件规范：**
+- `data/research/industry_index_daily.csv` — 申万行业指数日线
+- `data/research/concept_etf_daily.csv` — 概念ETF日线
+- `data/research/etf_watch_universe.csv` — 观察池元数据（status: watch/duplicate/candidate/rejected）
+- `data/research/etf_theme_mapping.csv` — 主题映射关系
+- `reports/research/universe_watch_report.md` — 观察报告
+
+**脚本功能：**
+- 申万行业指数：覆盖31只一级行业指数，AKShare index_hist_sw 数据源
+- 概念ETF更新：从观察池读取 watch/candidate 列表，获取日线
+- 新ETF扫描：扫描全部ETF，判断与正式池是否重复，新主题加入 watch
+
+**验证：**
+- py_compile 通过
+- 脚本支持 --dry-run 预览
+- 缺数据时只警告，不影响B0.4实盘助手
+- 报告中明确声明：数据仅用于研究观察，不进入交易逻辑
+
+**不修改：** B0.4策略规则、回测引擎、实盘助手、正式交易池
+
+---
+
 ## 2026-06-26（本次 - v0.1 实盘交互与信号发布模块）
 
 **目标：** 把 B0.4 模型转成可用于真实持仓管理的操作模块。
