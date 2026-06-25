@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-每日止损检查脚本
+Daily stop loss check script
 
-用法：
+Usage:
     py scripts/live_check_stop_loss.py --date 2026-06-26
 
-功能：
-    1. 读取真实持仓
-    2. 检查是否触发止损
-    3. 生成 Markdown 报告
+Features:
+    1. Read actual positions
+    2. Check stop loss triggers
+    3. Generate Markdown report
 """
 
 import argparse, os, sys
@@ -20,33 +20,32 @@ from live_trading_assistant import LiveTradingAssistant
 
 
 def main():
-    parser = argparse.ArgumentParser(description="每日止损检查")
+    parser = argparse.ArgumentParser(description="Daily stop loss check")
     parser.add_argument("--date", type=str, default=datetime.now().strftime("%Y-%m-%d"),
-                        help="检查日期 (YYYY-MM-DD)")
+                        help="Check date (YYYY-MM-DD)")
     parser.add_argument("--stop-loss", type=float, default=0.08,
-                        help="止损比例 (默认 8%)")
+                        help="Stop loss ratio (default 8%%)")
     parser.add_argument("--output", type=str, default=None,
-                        help="报告输出路径")
+                        help="Report output path")
     parser.add_argument("--positions-path", type=str, default=None)
     args = parser.parse_args()
 
     assistant = LiveTradingAssistant(positions_path=args.positions_path)
-
-    # 更新配置中的止损比例
     assistant.config["stop_loss"] = args.stop_loss
 
-    # 检查止损
     alerts = assistant.check_stop_loss()
     if alerts.empty:
-        print(f"✅ {args.date} 无触发止损的持仓。")
+        print("OK %s No stop loss triggered." % args.date)
     else:
-        print(f"⚠️ {args.date} 触发 {len(alerts)} 只持仓止损：")
+        print("WARN %s %d positions triggered stop loss:" % (args.date, len(alerts)))
         for _, r in alerts.iterrows():
-            print(f"  {r['ticker']}: 成本={r['cost_price']:.3f} 现价={r['current_price']:.3f} 亏损={r['loss_pct']:.2%}")
+            print("  %s: cost=%.3f current=%.3f loss=%.2f%%" % (r['ticker'], r['cost_price'], r['current_price'], r['loss_pct']*100))
 
-    # 生成报告
-    content = assistant.generate_daily_alert(date=args.date, output_path=args.output)
-    print(f"\n报告已保存至: {args.output or assistant.generate_daily_alert.__defaults__[0]}")
+    default_md = os.path.join(os.path.dirname(assistant.positions_path), "..", "reports", "live",
+                                 "daily_stop_loss_alert_%s.md" % args.date)
+    output_path = args.output or default_md
+    content = assistant.generate_daily_alert(date=args.date, output_path=output_path)
+    print("\nReport saved to: %s" % output_path)
 
 
 if __name__ == "__main__":

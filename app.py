@@ -1970,7 +1970,7 @@ def render_live_trading(cfg, is_b0_18=True):
     """实盘助手页面 v0.1"""
     import sys
     sys.path.insert(0, "src")
-    from live_trading_assistant import LiveTradingAssistant, CASH_TICKER
+    from live_trading_assistant import LiveTradingAssistant, CASH_TICKER, ActualTrade
 
     st.header("实盘助手")
     st.markdown('<div class="section-note">真实持仓以用户录入为准，模型只生成目标组合和交易建议。v0.1 不自动下单。</div>', unsafe_allow_html=True)

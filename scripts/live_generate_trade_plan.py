@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-每周调仓计划生成脚本
+Weekly rebalance plan script
 
-用法：
+Usage:
     py scripts/live_generate_trade_plan.py --date 2026-06-26
 
-功能：
-    1. 运行 B0.4 信号，获取目标持仓
-    2. 读取真实持仓
-    3. 对比生成交易计划
-    4. 保存 CSV 和 Markdown 报告
+Features:
+    1. Run B0.4 signals to get target positions
+    2. Read actual positions
+    3. Generate trade plan by comparison
+    4. Save CSV and Markdown report
 """
 
 import argparse, os, sys
@@ -24,12 +24,21 @@ from database import ETFDatabase
 import pandas as pd
 
 
-def get_b0_4_signals(date: str, cfg: dict):
-    """运行 B0.4 信号，返回目标持仓 {ticker: target_shares}。"""
+SHARE_UNIT = 100
+
+
+def get_b0_4_signals(assistant, date, cfg):
+    """
+    Run B0.4 signals, return target positions {ticker: target_shares}.
+
+    Logic:
+    - Read total asset from actual positions
+    - Each recommended ETF target amount = total_asset * max_position_per_etf (default 20%)
+    - Target shares = target_amount / current_price, floor to 100 multiples
+    """
     db = ETFDatabase()
     tickers = list(ETF_UNIVERSE.keys()) + list(DEFENSE_UNIVERSE.keys())
 
-    # 获取最新评分
     market_df = db.get_market_data(ticker=tickers)
     if market_df.empty:
         return {}
@@ -42,23 +51,49 @@ def get_b0_4_signals(date: str, cfg: dict):
     latest = signals[signals["date"] == signals["date"].max()].copy()
     latest = latest[latest["qualified"]].sort_values("total_score", ascending=False)
 
-    # 选取前 max_holdings 只
     max_holdings = cfg.get("max_holdings", 5)
     selected = latest.head(max_holdings)
 
-    # 计算目标股数（简化：每只等权，总金额 = 总资产 × 单只上限）
-    # 这里需要真实持仓中的总资产，所以返回 selected ticker 列表即可
-    return {row["ticker"]: 0 for _, row in selected.iterrows()}  # 0 表示目标持仓由用户决定
+    positions_df = assistant.load_positions()
+    cash_rows = positions_df[positions_df["ticker"] == "__CASH__"]
+    total_asset = float(cash_rows.iloc[0]["market_value"]) if not cash_rows.empty else 0.0
+    for _, r in positions_df.iterrows():
+        if r["ticker"] != "__CASH__" and r["current_price"] > 0:
+            total_asset += r["market_value"]
+
+    max_position = cfg.get("max_position_per_etf", 0.20)
+    target_amount = total_asset * max_position
+
+    price_map = {}
+    for t in selected["ticker"].unique():
+        try:
+            data = db.get_market_data(ticker=t, start_date=date, end_date=date)
+            if not data.empty:
+                price_map[t] = data["close"].iloc[-1]
+        except Exception:
+            pass
+
+    target_positions = {}
+    for _, row in selected.iterrows():
+        t = row["ticker"]
+        price = price_map.get(t, 0)
+        if price > 0 and target_amount > 0:
+            shares = int(target_amount / price // SHARE_UNIT * SHARE_UNIT)
+            target_positions[t] = shares
+        else:
+            target_positions[t] = 0
+
+    return target_positions
 
 
 def main():
-    parser = argparse.ArgumentParser(description="每周调仓计划生成")
+    parser = argparse.ArgumentParser(description="Weekly rebalance plan")
     parser.add_argument("--date", type=str, default=datetime.now().strftime("%Y-%m-%d"),
-                        help="日期 (YYYY-MM-DD)")
+                        help="Date (YYYY-MM-DD)")
     parser.add_argument("--output-csv", type=str, default=None,
-                        help="交易计划 CSV 输出路径")
+                        help="Trade plan CSV output path")
     parser.add_argument("--output-md", type=str, default=None,
-                        help="报告 Markdown 输出路径")
+                        help="Report Markdown output path")
     parser.add_argument("--positions-path", type=str, default=None)
     parser.add_argument("--trades-path", type=str, default=None)
     parser.add_argument("--plan-path", type=str, default=None)
@@ -72,55 +107,44 @@ def main():
         config=cfg,
     )
 
-    # 获取 B0.4 目标持仓
-    target_positions = get_b0_4_signals(args.date, cfg)
+    target_positions = get_b0_4_signals(assistant, args.date, cfg)
     if not target_positions:
-        print("⚠️ 今日无 B0.4 信号，生成空计划。")
+        print("WARN No B0.4 signals today, generating empty plan.")
         target_positions = {}
 
-    # 读取真实持仓，获取当前价格
     positions_df = assistant.load_positions()
     price_map = {}
     for _, r in positions_df.iterrows():
         if r["ticker"] != "__CASH__" and r["current_price"] > 0:
             price_map[r["ticker"]] = r["current_price"]
 
-    # 简化：目标持仓股数 = 当前持仓股数（HOLD），后续可扩展为基于仓位的计算
-    # v0.1 中，调仓计划主要是对比真实持仓和 B0.4 推荐信号
-    # 如果真实持仓中有不在 B0.4 推荐中的，标记为 SELL
-    # 如果 B0.4 推荐中有不在真实持仓中的，标记为 BUY
     actual_tickers = set(positions_df[positions_df["ticker"] != "__CASH__"]["ticker"].unique())
     target_tickers = set(target_positions.keys())
 
-    # 构建目标持仓（简化版：v0.1 只给出 BUY/SELL 建议，不计算精确股数）
-    # 实际使用中，用户需要手动输入目标持仓股数
-    # 这里生成一个计划模板
     all_tickers = actual_tickers | target_tickers
     plan_positions = {}
     for t in all_tickers:
-        if t in actual_tickers and t in target_tickers:
-            plan_positions[t] = positions_df[positions_df["ticker"] == t]["shares"].iloc[0]
-        elif t in actual_tickers and t not in target_tickers:
-            plan_positions[t] = 0  # 建议卖出
-        else:
-            plan_positions[t] = 0  # 建议买入，股数由用户决定
+        if t in target_tickers:
+            plan_positions[t] = target_positions[t]
+        elif t in actual_tickers:
+            plan_positions[t] = 0
 
-    # 生成交易计划
     plan_df = assistant.generate_trade_plan(plan_positions, price_map, date=args.date)
 
-    # 保存到指定路径
     if args.output_csv:
         plan_df.to_csv(args.output_csv, index=False)
-        print(f"✅ 交易计划 CSV 已保存: {args.output_csv}")
+        print("OK Trade plan CSV saved: %s" % args.output_csv)
 
-    # 生成 Markdown 报告
-    md = assistant.generate_weekly_plan(plan_df, date=args.date, output_path=args.output_md)
-    print(f"✅ 调仓报告已保存: {args.output_md or assistant.generate_weekly_plan.__defaults__[0]}")
+    default_md = os.path.join(os.path.dirname(assistant.plan_path), "..", "reports", "live",
+                                 "weekly_rebalance_plan_%s.md" % args.date)
+    output_md = args.output_md or default_md
+    md = assistant.generate_weekly_plan(plan_df, date=args.date, output_path=output_md)
+    print("OK Report saved: %s" % output_md)
 
-    print(f"\n📋 计划摘要:")
-    print(f"  买入: {len(plan_df[plan_df['action']=='BUY'])} 笔")
-    print(f"  卖出: {len(plan_df[plan_df['action']=='SELL'])} 笔")
-    print(f"  保留: {len(plan_df[plan_df['action']=='HOLD'])} 笔")
+    print("\nPlan summary:")
+    print("  BUY: %d orders" % len(plan_df[plan_df['action']=='BUY']))
+    print("  SELL: %d orders" % len(plan_df[plan_df['action']=='SELL']))
+    print("  HOLD: %d orders" % len(plan_df[plan_df['action']=='HOLD']))
 
 
 if __name__ == "__main__":
