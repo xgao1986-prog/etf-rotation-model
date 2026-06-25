@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-B1 Holding Stability A/B 实验
+B1 Holding Stability A/B 实验（修正版：单变量，只改卖出规则）
 
 目的：验证是否存在更稳、更少噪音的卖出缓冲规则，减少无意义换仓、误杀卖飞和震荡往返。
 
-对照组：B0.4（use_v2_rebalance=True, rank_buffer_enabled=False）
+对照组：B0.4（rank_buffer_enabled=False, sell_rank_n=None）
 实验组：
-  A. 卖出跌出 Top8 才卖（rank_buffer_enabled=True, buy_rank_n=8）
-  B. 卖出跌出 Top10 才卖（rank_buffer_enabled=True, buy_rank_n=10）
-  C. 卖出跌出 Top10，并连续 2 个调仓日确认（rank_buffer_enabled=True, buy_rank_n=10, exit_debounce=2）
+  A. 买入仍为 Top5，卖出改为跌出 Top8 才卖（rank_buffer_enabled=True, sell_rank_n=8）
+  B. 买入仍为 Top5，卖出改为跌出 Top10 才卖（rank_buffer_enabled=True, sell_rank_n=10）
+  C. 买入仍为 Top5，卖出改为跌出 Top10，且连续 2 个调仓日确认（rank_buffer_enabled=True, sell_rank_n=10, exit_debounce=2）
 
 重要规则：
   1. 不修改 B0.4 生产代码
-  2. 新规则只在独立实验脚本中实现（通过 cfg 参数切换）
-  3. 止损仍然即时生效，不受缓冲影响
-  4. 买入规则不变：仍然只买 Top5
-  5. 缓冲只作用于"已有持仓是否因为排名/信号弱化而卖出"
-  6. 所有实验组与 B0.4 使用同一 v2.5 调仓引擎，只改变持仓稳定规则
-  7. A/B 通过 buy_rank_n 控制保留范围；C 通过独立 wrapper 实现 exit_debounce
+  2. 所有实验组与 B0.4 使用同一 v2.5 调仓引擎（plan_rebalance_v2_5）
+  3. buy_rank_n=None（候选池与 B0.4 相同，都是全部 qualified BUY 信号）
+  4. 只通过 sell_rank_n 和 exit_debounce 改变卖出规则
+  5. 买入规则不变：仍然只买 Top5（max_holdings=5 控制）
+  6. 止损仍然即时生效，不受缓冲影响
+  7. B1BacktestEngine 子类在 v2.5 上实现 sell_rank_n 和 exit_debounce
 
 输出：
   - reports/b1_holding_stability_ab_test.md
@@ -44,33 +44,25 @@ AS_OF_DATE = '2026-06-18'
 # 实验配置
 VARIANTS = {
     'B0.4': {
-        'use_v2_rebalance': True,
         'rank_buffer_enabled': False,
-        'buy_rank_n': None,
         'sell_rank_n': None,
         'exit_debounce': 0,
         'label': 'B0.4 基线',
     },
     'A_Top8': {
-        'use_v2_rebalance': True,
         'rank_buffer_enabled': True,
-        'buy_rank_n': 8,
         'sell_rank_n': 8,
         'exit_debounce': 0,
         'label': 'A: 跌出Top8才卖',
     },
     'B_Top10': {
-        'use_v2_rebalance': True,
         'rank_buffer_enabled': True,
-        'buy_rank_n': 10,
         'sell_rank_n': 10,
         'exit_debounce': 0,
         'label': 'B: 跌出Top10才卖',
     },
     'C_Top10_2conf': {
-        'use_v2_rebalance': True,
         'rank_buffer_enabled': True,
-        'buy_rank_n': 10,
         'sell_rank_n': 10,
         'exit_debounce': 2,
         'label': 'C: 跌出Top10+连续2次确认',
@@ -78,8 +70,8 @@ VARIANTS = {
 }
 
 
-class B1CBacktestEngine(BacktestEngine):
-    """C实验专用BacktestEngine：在v2.5引擎基础上添加exit_debounce支持"""
+class B1BacktestEngine(BacktestEngine):
+    """B1 实验专用 BacktestEngine：在 v2.5 引擎上实现独立的 sell_rank_n 和 exit_debounce"""
 
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -92,38 +84,75 @@ class B1CBacktestEngine(BacktestEngine):
                       buy_rank_n, sell_rank_n, candidate_rank, exit_debounce,
                       min_hold_for_candidate_exit, corr_matrix, corr_threshold,
                       calc_commission, slippage=0.0):
-        """重写_rebalance_v2，在调用父类前处理exit_debounce"""
+        """在 v2.5 引擎上实现 sell_rank_n 和 exit_debounce
 
-        # 处理 exit_debounce：不在前sell_rank_n名中的持仓，需要连续确认才卖出
-        if exit_debounce > 0 and sell_rank_n is not None:
-            top_n = set(buy_signals.head(sell_rank_n)['ticker'].tolist())
+        核心逻辑：候选池与 B0.4 相同（buy_rank_n=None），只改变卖出规则。
+        对于 sell_rank_n 范围内的持仓，如果不在 buy_signals 中，临时加入 buy_signals
+        （score = min_score），让 v2.5 保留它们。
+        """
+        cfg_sell_rank_n = self.cfg.get('sell_rank_n', None)
+        cfg_exit_debounce = self.cfg.get('exit_debounce', 0)
+        min_score = self.cfg['min_total_score']
 
-            for ticker, pos in list(portfolio['positions'].items()):
-                if ticker in _core_tickers or ticker in _fallback_tickers:
-                    if ticker not in top_n:
-                        # 跌出候选列表，计数器+1
-                        self._exit_debounce_tracker[ticker] = self._exit_debounce_tracker.get(ticker, 0) + 1
-                        if self._exit_debounce_tracker[ticker] < exit_debounce:
-                            # 未达到确认次数，强制保留：将ticker加入buy_signals
-                            if ticker not in buy_signals['ticker'].values:
-                                ticker_rows = day_signals[day_signals['ticker'] == ticker]
-                                if not ticker_rows.empty:
-                                    new_row = ticker_rows.iloc[0].copy()
-                                    new_row['signal_type'] = 'BUY'
-                                    new_row['total_score'] = 0
-                                    buy_signals = pd.concat([buy_signals, pd.DataFrame([new_row])], ignore_index=True)
-                    else:
-                        # 在候选列表中，重置计数器
-                        self._exit_debounce_tracker[ticker] = 0
+        # 只有在 sell_rank_n 或 exit_debounce 设置时才处理
+        if (cfg_sell_rank_n is not None and cfg_sell_rank_n > 0) or cfg_exit_debounce > 0:
+            if not buy_signals.empty:
+                # 获取全部 BUY 信号（按 score 排序）
+                all_buy = day_signals[day_signals['signal_type'] == 'BUY'].sort_values('total_score', ascending=False)
+                candidate_rank_dict = {t: i + 1 for i, t in enumerate(all_buy['ticker'].tolist())}
 
-        # 调用父类原始_v2.5调仓逻辑
-        return super()._rebalance_v2(portfolio, day_signals, day_prices, effective_close_prices,
-                                     last_valid_close, date, date_str, buy_signals, trade_records,
-                                     cooling_list, max_total_position, _core_tickers, _fallback_tickers,
-                                     _defense_tickers, etf_group_map, same_group_max, rank_buffer_enabled,
-                                     buy_rank_n, sell_rank_n, candidate_rank, exit_debounce,
-                                     min_hold_for_candidate_exit, corr_matrix, corr_threshold,
-                                     calc_commission, slippage)
+                # 1. sell_rank_n 处理：保留在 sell_rank_n 范围内的持仓
+                if cfg_sell_rank_n is not None and cfg_sell_rank_n > 0:
+                    new_rows = []
+                    for ticker in list(portfolio['positions'].keys()):
+                        if ticker in _core_tickers or ticker in _fallback_tickers:
+                            rank = candidate_rank_dict.get(ticker, len(all_buy) + 1)
+                            if rank <= cfg_sell_rank_n:
+                                if ticker not in buy_signals['ticker'].values:
+                                    ticker_row = day_signals[day_signals['ticker'] == ticker]
+                                    if not ticker_row.empty:
+                                        new_row = ticker_row.iloc[0].copy()
+                                        new_row['signal_type'] = 'BUY'
+                                        new_row['total_score'] = min_score
+                                        new_rows.append(new_row)
+
+                    if new_rows:
+                        buy_signals = pd.concat([buy_signals, pd.DataFrame(new_rows)], ignore_index=True)
+                        buy_signals = buy_signals.sort_values('total_score', ascending=False)
+
+                # 2. exit_debounce 处理：连续确认
+                if cfg_exit_debounce > 0 and cfg_sell_rank_n is not None and cfg_sell_rank_n > 0:
+                    top_n = set(all_buy.head(cfg_sell_rank_n)['ticker'].tolist())
+
+                    for ticker in list(portfolio['positions'].keys()):
+                        if ticker in _core_tickers or ticker in _fallback_tickers:
+                            if ticker not in top_n:
+                                # 跌出候选范围，计数器+1
+                                self._exit_debounce_tracker[ticker] = self._exit_debounce_tracker.get(ticker, 0) + 1
+                                if self._exit_debounce_tracker[ticker] < cfg_exit_debounce:
+                                    # 未达到确认次数，强制保留
+                                    if ticker not in buy_signals['ticker'].values:
+                                        ticker_row = day_signals[day_signals['ticker'] == ticker]
+                                        if not ticker_row.empty:
+                                            new_row = ticker_row.iloc[0].copy()
+                                            new_row['signal_type'] = 'BUY'
+                                            new_row['total_score'] = min_score
+                                            buy_signals = pd.concat([buy_signals, pd.DataFrame([new_row])], ignore_index=True)
+                                            buy_signals = buy_signals.sort_values('total_score', ascending=False)
+                            else:
+                                # 在候选范围内，重置计数器
+                                self._exit_debounce_tracker[ticker] = 0
+
+        # 调用父类原始 _rebalance_v2（v2.5 引擎）
+        return super()._rebalance_v2(
+            portfolio, day_signals, day_prices, effective_close_prices,
+            last_valid_close, date, date_str, buy_signals, trade_records,
+            cooling_list, max_total_position, _core_tickers, _fallback_tickers,
+            _defense_tickers, etf_group_map, same_group_max, rank_buffer_enabled,
+            buy_rank_n, sell_rank_n, candidate_rank, exit_debounce,
+            min_hold_for_candidate_exit, corr_matrix, corr_threshold,
+            calc_commission, slippage)
+
 
 def run_experiment(variant_key, cfg_override, market_df, bench_df):
     """运行单个实验变体"""
@@ -134,10 +163,8 @@ def run_experiment(variant_key, cfg_override, market_df, bench_df):
     cfg = build_config()
     cfg.update(cfg_override)
 
-    if variant_key == 'C_Top10_2conf':
-        engine = B1CBacktestEngine(cfg)
-    else:
-        engine = BacktestEngine(cfg)
+    # 所有变体使用 B1BacktestEngine（B0.4 的 sell_rank_n=None，不改变行为）
+    engine = B1BacktestEngine(cfg)
 
     result = engine.run(market_df, bench_df, as_of_date=AS_OF_DATE)
 
@@ -302,9 +329,10 @@ def generate_report(metrics_list, exit_attributions, output_path):
     lines.append("| C | Top5 | 跌出 Top10 才卖 | 连续2次调仓确认 | v2.5（同B0.4） |")
     lines.append("")
     lines.append("**重要**：所有实验组与 B0.4 使用同一调仓引擎，只改变持仓稳定规则。")
-    lines.append("- A/B 通过 `buy_rank_n` 扩展候选保留范围，v2.5 引擎会保留在扩展范围内的持仓")
-    lines.append("- C 通过 `B1CBacktestEngine` 子类在 v2.5 引擎上叠加 `exit_debounce` 逻辑")
-    lines.append("- 止损仍然即时生效，不受缓冲影响")
+    lines.append("- 候选池与 B0.4 相同（buy_rank_n=None），都是全部 qualified BUY 信号")
+    lines.append("- A/B 通过 `sell_rank_n=8/10` 控制卖出保留范围，B1BacktestEngine 在 v2.5 上实现")
+    lines.append("- C 通过 `B1BacktestEngine` 子类在 v2.5 引擎上叠加 `exit_debounce` 逻辑")
+    lines.append("- 买入仍只买 Top5（max_holdings=5 控制），止损仍即时生效")
     lines.append("")
 
     # 全周期指标对比
@@ -404,9 +432,10 @@ def generate_report(metrics_list, exit_attributions, output_path):
     lines.append("### 1. B0.4 与 A/B/C 是否使用同一套 v2.5 调仓引擎？")
     lines.append("")
     lines.append("**是**。所有实验组（B0.4、A、B、C）均使用 `plan_rebalance_v2_5` 纯函数调仓规划。")
-    lines.append("- B0.4：`rank_buffer_enabled=False, buy_rank_n=None`")
-    lines.append("- A/B：`rank_buffer_enabled=True, buy_rank_n=8/10`（仅扩展候选保留范围）")
-    lines.append("- C：`B1CBacktestEngine` 子类在 v2.5 引擎上叠加 `exit_debounce`，不改变引擎内部语义")
+    lines.append("- B0.4：`rank_buffer_enabled=False, sell_rank_n=None`")
+    lines.append("- A/B：`rank_buffer_enabled=True, sell_rank_n=8/10`（通过 B1BacktestEngine 在 v2.5 上实现独立卖出规则）")
+    lines.append("- C：`B1BacktestEngine` 子类在 v2.5 引擎上叠加 `exit_debounce`，不改变引擎内部语义")
+    lines.append("- 买入候选池与 B0.4 相同（buy_rank_n=None），都是全部 qualified BUY 信号")
     lines.append("- 信号生成、佣金、整手、止损、防御逻辑完全一致")
     lines.append("")
 
@@ -414,10 +443,11 @@ def generate_report(metrics_list, exit_attributions, output_path):
     lines.append("")
     lines.append("**是**。唯一改变的是'已有持仓是否因跌出排名而卖出'的判断：")
     lines.append("- B0.4：不在 BUY 信号候选列表即卖（即跌出 qualified 即卖）")
-    lines.append("- A：跌出 Top8 才卖（保留范围从 qualified 扩展到 Top8）")
-    lines.append("- B：跌出 Top10 才卖（保留范围扩展到 Top10）")
+    lines.append("- A：跌出 Top8 才卖（B1BacktestEngine 在 v2.5 上实现独立卖出规则）")
+    lines.append("- B：跌出 Top10 才卖（B1BacktestEngine 在 v2.5 上实现独立卖出规则）")
     lines.append("- C：跌出 Top10，且连续 2 个调仓日确认才卖")
-    lines.append("- 买入规则不变：仍只买 Top5（`max_holdings=5` 控制）")
+    lines.append("- 买入候选池与 B0.4 相同：全部 qualified BUY 信号（buy_rank_n=None）")
+    lines.append("- 买入规则不变：仍只买 Top5（max_holdings=5 控制）")
     lines.append("- 止损不变：仍即时生效")
     lines.append("")
 
