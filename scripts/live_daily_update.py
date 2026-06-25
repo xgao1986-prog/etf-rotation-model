@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Live Daily Update — v0.2
+Live Daily Check — v0.2
 
 每日运行：
-1. 更新 B0.4 正式池数据（16+2+沪深300）
-2. 运行数据准入检查（完整性、缺失）
-3. 基于真实持仓检查止损
-4. 输出每日检查报告
-5. 数据不完整时给出警告，不生成交易建议
+1. 检查 B0.4 正式池数据完整性（16+2+沪深300）
+2. 基于真实持仓检查止损
+3. 输出每日检查报告
+4. 数据不完整时给出警告，不生成交易建议
+
+注意：
+- 当前 v0.2 不拉取新行情，只检查已有数据库
+- 真正数据更新列为 v0.3 待办
+- 数据完整性检查是简化检查，不是正式数据准入检查
 
 用法：
     py scripts/live_daily_update.py --date 2026-06-26
@@ -203,11 +207,15 @@ def generate_daily_report(date, is_complete, missing, last_dates, alerts, cfg, o
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Live Daily Update")
-    parser.add_argument("--date", type=str, default=datetime.now().strftime("%Y-%m-%d"))
-    parser.add_argument("--output-md", type=str, default=None)
-    parser.add_argument("--positions-path", type=str, default=None)
-    parser.add_argument("--config", type=str, default=None)
+    parser = argparse.ArgumentParser(description="Live Daily Check (v0.2: 不拉取新数据，只检查已有数据库)")
+    parser.add_argument("--date", type=str, default=datetime.now().strftime("%Y-%m-%d"),
+                        help="检查日期 (YYYY-MM-DD)")
+    parser.add_argument("--output-md", type=str, default=None,
+                        help="报告输出路径")
+    parser.add_argument("--positions-path", type=str, default=None,
+                        help="持仓 CSV 路径")
+    parser.add_argument("--config", type=str, default=None,
+                        help="配置 JSON 字符串")
     args = parser.parse_args()
 
     ensure_dirs()
@@ -221,12 +229,14 @@ def main():
     assistant = LiveTradingAssistant(positions_path=args.positions_path, config=cfg)
 
     print(f"{'='*60}")
-    print(f"Live Daily Update — {args.date}")
+    print(f"Live Daily Check — {args.date}")
+    print(f"注意：v0.2 只检查已有数据，不拉取新行情")
     print(f"{'='*60}")
     print()
 
     # 1. 数据完整性检查
     print("检查数据完整性...")
+    print("(当前只检查已有数据库，不拉取新行情)")
     is_complete, missing, last_dates = check_data_completeness(db, args.date, FORMAL_POOL)
     if is_complete:
         print(f"OK 数据完整，{len(FORMAL_POOL)} 只ETF")
@@ -259,6 +269,7 @@ def main():
 
     print(f"{'='*60}")
     print("每日检查完成")
+    print("待办：v0.3 实现真正数据更新（拉取新行情 + 正式准入检查）")
     print(f"{'='*60}")
 
 

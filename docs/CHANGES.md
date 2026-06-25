@@ -3022,14 +3022,16 @@ python scripts/phase6_7_holiday_rebalance_experiment.py
 **目的**：让 B0.4 可以稳定做 3-6 个月纸面实盘验证。
 
 **新增脚本**：
-- `scripts/live_daily_update.py`：每日数据更新、止损检查、纸面日志
-  - 更新 B0.4 正式池（16+2+沪深300），不扩池
-  - 数据完整性检查，不完整时给出警告，不生成交易建议
-  - 基于真实持仓检查止损，输出是否触发
+- `scripts/live_daily_update.py`：每日数据检查（v0.2 不拉取新行情，只检查已有数据库）
+  - 检查 B0.4 正式池（16+2+沪深300）数据完整性，不扩池
+  - 数据完整性检查是简化检查，不是正式数据准入检查
+  - 数据不完整时警告，不生成交易建议
+  - 基于真实持仓检查止损，输出触发情况
   - 追加纸面交易日志（`data/live/paper_trading_log.csv`）
   - 输出 `reports/live/latest_daily_check.md`
+  - **待办 v0.3**：实现真正数据更新（拉取新行情 + 正式准入检查）
 
-- `scripts/live_weekly_signal.py`：每周调仓信号
+- `scripts/live_weekly_signal.py`：每周调仓信号（v0.2 骨架）
   - 周四收盘后运行 B0.4 信号
   - T+1 开盘为建议成交口径
   - 只输出建议，不自动下单
@@ -3041,10 +3043,16 @@ python scripts/phase6_7_holiday_rebalance_experiment.py
 - `tests/test_live_daily_workflow.py`：6 个测试全部通过
   - 持仓加载、校验、止损检查、交易计划生成、纸面日志追加、报告生成
 
-**新增报告骨架**：
+**新增报告骨架（observer-only，实际采集待 v0.3）**：
 - `reports/research/latest_industry_data_status.md`：行业指数数据状态（observer-only）
+  - 当前为报告骨架，申万行业数据未采集
+  - 实际采集待 v0.3，写入 `data/research/industry_index_daily.csv`
 - `reports/research/latest_concept_etf_watchlist.md`：概念/主题 ETF 观察池（observer-only）
+  - 当前为报告骨架，观察池为空
+  - 实际扫描待 v0.3
 - `reports/research/latest_new_etf_scan.md`：新 ETF 扫描（observer-only）
+  - 当前为报告骨架，扫描结果为空
+  - 实际扫描待 v0.3
 
 **隔离声明**：
 - `data/research/` 下的所有数据不得被交易相关代码读取
