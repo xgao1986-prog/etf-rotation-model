@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-25（Universe Time-Consistency Audit 收口）
+**最后更新**：2026-06-26（实盘助手 v0.2 + 研究数据骨架）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -450,21 +450,34 @@
 
 **B1 Holding Stability 已终审收口，不升级 B1。**
 
-下一步唯一任务：
+**已交付（本次）**：
 
-1. **实盘助手 / 纸面交易闭环**
-   - 使用 B0.4 启动 3-6 个月纸面交易
-   - 验证执行率、滑点、跟踪误差
-   - 使用 `docs/PAPER_TRADING_LOG_SPEC.md` 记录建议 vs 实际执行
+1. **实盘助手 v0.2**
+   - `scripts/live_daily_update.py`：每日数据更新 + 止损检查 + 纸面日志
+   - `scripts/live_weekly_signal.py`：每周调仓信号（T日收盘，T+1建议成交）
+   - `tests/test_live_daily_workflow.py`：6 个测试全部通过
+   - 数据不完整时给出警告，不生成交易建议
+   - 只输出建议，不自动下单
 
-2. **数据更新闭环**
-   - 建立定期数据更新流程（通过 cron 或手动触发）
-   - 每次更新后运行准入检查，生成 SHA-256 快照
-   - 确保数据质量持续监控
+2. **研究数据积累骨架（observer-only）**
+   - `reports/research/latest_industry_data_status.md`：行业指数数据状态
+   - `reports/research/latest_concept_etf_watchlist.md`：概念/主题 ETF 观察池
+   - `reports/research/latest_new_etf_scan.md`：新 ETF 扫描
+   - 明确隔离：research 数据不得被交易代码读取
 
-3. **不再继续的研究方向（已关闭）**
-   - Holding Stability 参数调优（Top8/Top10/连续确认）
-   - 任何试图修改 B0.4 交易规则或冻结基线的实验
+**下一步**：
+
+1. **启动纸面交易**
+   - 使用 B0.4 开始 3-6 个月纸面验证
+   - 验证执行率 ≥ 80%、滑点 ≤ 20bp、跟踪误差 ≤ 5%
+
+2. **数据采集**
+   - 完成申万一级行业指数数据采集
+   - 运行概念/主题 ETF 扫描，填充观察池
+
+3. **不再继续（已关闭）**
+   - Holding Stability 参数调优
+   - 任何修改 B0.4 交易规则或冻结基线的实验
 
 
 ---

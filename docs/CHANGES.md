@@ -3017,3 +3017,37 @@ python scripts/phase6_7_holiday_rebalance_experiment.py
 3. 改了哪些文件（文件名 + 一句话解释）
 4. 测试结果（多少个通过/失败）
 5. Commit 信息（commit 后补充）
+### 四、实盘助手 v0.2 — 数据更新与纸面交易闭环
+
+**目的**：让 B0.4 可以稳定做 3-6 个月纸面实盘验证。
+
+**新增脚本**：
+- `scripts/live_daily_update.py`：每日数据更新、止损检查、纸面日志
+  - 更新 B0.4 正式池（16+2+沪深300），不扩池
+  - 数据完整性检查，不完整时给出警告，不生成交易建议
+  - 基于真实持仓检查止损，输出是否触发
+  - 追加纸面交易日志（`data/live/paper_trading_log.csv`）
+  - 输出 `reports/live/latest_daily_check.md`
+
+- `scripts/live_weekly_signal.py`：每周调仓信号
+  - 周四收盘后运行 B0.4 信号
+  - T+1 开盘为建议成交口径
+  - 只输出建议，不自动下单
+  - 生成交易计划（`data/live/latest_trade_plan.csv`）
+  - 追加纸面日志
+  - 输出 `reports/live/latest_weekly_signal.md`
+
+**新增测试**：
+- `tests/test_live_daily_workflow.py`：6 个测试全部通过
+  - 持仓加载、校验、止损检查、交易计划生成、纸面日志追加、报告生成
+
+**新增报告骨架**：
+- `reports/research/latest_industry_data_status.md`：行业指数数据状态（observer-only）
+- `reports/research/latest_concept_etf_watchlist.md`：概念/主题 ETF 观察池（observer-only）
+- `reports/research/latest_new_etf_scan.md`：新 ETF 扫描（observer-only）
+
+**隔离声明**：
+- `data/research/` 下的所有数据不得被交易相关代码读取
+- 研究数据只写入 `data/research/` 或 `reports/research`
+- live 数据只写入 `data/live/` 或 `reports/live`
+- 任何读取 research 数据影响交易逻辑的行为视为 P0 阻断
