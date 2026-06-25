@@ -187,7 +187,7 @@ class ETFDatabase:
     # ==================== 行情数据操作 ====================
     
     def save_market_data(self, df: pd.DataFrame):
-        """保存行情数据，自动去重"""
+        """保存行情数据，自动去重（INSERT OR IGNORE）"""
         if df.empty:
             return 0
         
@@ -201,23 +201,31 @@ class ETFDatabase:
         df = df.copy()
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
+        # 确保 adj_close、source、adjust_type 列存在
+        for col in ['adj_close', 'source', 'adjust_type']:
+            if col not in df.columns:
+                df[col] = None
+
+        # 选择数据库中存在的列
+        db_cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'adj_close', 'source', 'adjust_type']
+        df_cols = [c for c in db_cols if c in df.columns]
+        df = df[df_cols]
+
         with self._connect() as conn:
-            # 使用INSERT OR REPLACE避免重复
-            df.to_sql('market_data', conn, if_exists='append', index=False)
-            
-            # 清理重复数据（保留最新）
             cursor = conn.cursor()
-            cursor.execute('''
-                DELETE FROM market_data 
-                WHERE rowid NOT IN (
-                    SELECT MIN(rowid) 
-                    FROM market_data 
-                    GROUP BY ticker, date
-                )
-            ''')
+
+            # 使用 INSERT OR IGNORE 避免重复键错误
+            placeholders = ','.join(['?' for _ in df_cols])
+            sql = f"INSERT OR IGNORE INTO market_data ({','.join(df_cols)}) VALUES ({placeholders})"
+
+            # 转换为记录列表
+            records = df.values.tolist()
+            cursor.executemany(sql, records)
             conn.commit()
-            
-        return len(df)
+
+            inserted = cursor.rowcount
+
+        return inserted
     
     def get_market_data(self, ticker=None, start_date=None, end_date=None) -> pd.DataFrame:
         """获取行情数据"""

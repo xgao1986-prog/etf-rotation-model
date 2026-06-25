@@ -48,10 +48,16 @@ class DataFetcher:
         self._ak = None  # 懒加载AKShare
     
     def _get_akshare(self):
-        """懒加载AKShare"""
+        """懒加载AKShare，未安装时给出明确提示"""
         if self._ak is None:
-            import akshare as ak
-            self._ak = ak
+            try:
+                import akshare as ak
+                self._ak = ak
+            except ImportError:
+                raise ImportError(
+                    "AKShare 未安装。请运行：pip install akshare\n"
+                    "或继续使用 iFinD CSV 导入方式更新数据。"
+                )
         return self._ak
     
     def fetch_etf_history(self, code, start_date, end_date=None, adjust='qfq') -> pd.DataFrame:
@@ -444,7 +450,12 @@ def download_all_data(start_date='2019-06-03', end_date=None, db=None, include_s
         except Exception as e:
             print(f"⚠️ 备份失败（继续导入）: {e}")
     
-    fetcher = DataFetcher()
+    try:
+        fetcher = DataFetcher()
+    except ImportError as e:
+        print(f"[ERROR] {e}")
+        print("[提示] 请安装 AKShare: pip install akshare")
+        return pd.DataFrame()
     
     print(f"="*60)
     print(f"AKShare数据下载: {start_date} ~ {end_date or '今天'}")
@@ -494,7 +505,14 @@ def update_latest_data(db=None):
         except Exception as e:
             print(f"[WARN] 备份失败（继续更新）: {e}")
     
-    fetcher = DataFetcher()
+    try:
+        fetcher = DataFetcher()
+    except ImportError as e:
+        print(f"[ERROR] {e}")
+        print("[提示] 数据已更新到 2026-06-25，如需更新最新数据，请：")
+        print("  1. 安装 AKShare: pip install akshare")
+        print("  2. 或使用 iFinD CSV 导入方式")
+        return 0
     
     print(f"AKShare增量更新...")
     df = fetcher.fetch_latest(db=db)

@@ -1605,13 +1605,23 @@ def render_data_management():
             with st.spinner("更新中..."):
                 from data_fetcher import update_latest_data
 
-                count = update_latest_data(db=db)
-                load_market_data.clear()
-                load_scores.clear()
-                load_stats.clear()
-                st.success(f"已更新 {count} 条记录")
-                st.rerun()
-        st.caption("AKShare 增量更新，不修改 src 目录。")
+                try:
+                    count = update_latest_data(db=db)
+                    load_market_data.clear()
+                    load_scores.clear()
+                    load_stats.clear()
+                    if count > 0:
+                        st.success(f"✅ 已更新 {count} 条记录")
+                    else:
+                        st.info("暂无新数据或 AKShare 未安装")
+                    st.rerun()
+                except ImportError as e:
+                    st.error(f"AKShare 未安装: {e}")
+                    st.info("请安装 AKShare: `pip install akshare`，或继续使用 iFinD CSV 导入方式")
+                except Exception as e:
+                    st.error(f"更新失败: {e}")
+        st.caption("AKShare 增量更新。若未安装 AKShare，请使用 iFinD CSV 导入。")
+        st.caption("当前数据已更新至 2026-06-25。")
 
         st.divider()
 
