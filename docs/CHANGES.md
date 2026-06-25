@@ -26,6 +26,19 @@
   - 缓冲只作用于"已有持仓是否因为排名/信号弱化而卖出"
   - 使用旧版 rebalance 引擎（use_v2_rebalance=False）激活 rank buffer 逻辑
 
+**修正（2026-06-26 复审）：**
+  - Codex 终审结论：原实验不是单变量，A/B/C 使用旧版引擎而 B0.4 使用 v2.5 引擎，同时改变了引擎和规则
+  - 修正后：所有实验组与 B0.4 使用同一 v2.5 调仓引擎（`plan_rebalance_v2_5`）
+  - A/B 通过 `rank_buffer_enabled=True, buy_rank_n=8/10` 扩展候选保留范围，v2.5 引擎会保留在扩展范围内的持仓
+  - C 通过 `B1CBacktestEngine` 子类在 v2.5 引擎上叠加 `exit_debounce` 逻辑，不改变引擎内部语义
+  - 买入仍只买 Top5（`max_holdings=5` 控制），止损仍即时生效
+  - 报告明确回答 8 个预注册问题（同一引擎、单变量、交易次数、CAGR、回撤、夏普、OOS仅观察、不强行升级）
+  - 纸面交易结论修正：没有 B1 候选时，继续使用 B0.4 做 3-6 个月纸面交易，B1 不升级不影响 B0.4 纸面验证启动
+
+**修正结果：**
+  - A/B/C 均未通过全部标准（交易次数未下降≥20%，夏普低于 B0.4）
+  - **结论：不强行升级 B1，B0.4 继续作为正式基线**
+
 **输出：**
   - `scripts/b1_holding_stability_ab_test.py`
   - `reports/b1_holding_stability_ab_test.md`
