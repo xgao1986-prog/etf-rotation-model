@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-26（B1 候选收敛验证 Milestone）
+**最后更新**：2026-06-25（B1 Holding Stability 终审收口）
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/v1.3-regime-research`
 **当前版本**：v1.2.3
@@ -8,7 +8,7 @@
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）
 **数据截止**：2026-06-18
-**B1 状态**：候选收敛验证完成，复审修正 v2 完成。buy_rank_n=None（候选池与 B0.4 相同），只通过 sell_rank_n 控制卖出。A/B/C 均未通过全部标准（A 交易下降 52.7% 但夏普 0.84 < 0.91，最大回撤恶化至 -32.47%；B/C 夏普更低、回撤更恶化）。不强行升级 B1，B0.4 继续作为正式基线。纸面交易可用 B0.4 启动。
+**B1 状态**：Holding Stability A/B 实验已终审收口（f9794e4）。A/B/C 均未通过全部标准，不升级 B1，B0.4 继续作为正式基线。结论：卖出缓冲减少换仓有效（A 交易下降 52.7%），但最大回撤显著恶化（A -32.47% vs B0.4 -17.75%），夏普下降（A 0.84 vs B0.4 0.91），风险调整后表现变差。不再继续调 Top8/Top10/连续确认参数。纸面交易可用 B0.4 启动。
 
 > 旧分支 `feature/v1.2.1-regime-adaptive` 保留，不删除、不重置、不强推。标签 `v1.2.3-b0.4` 保持不动。
 
@@ -17,17 +17,20 @@
 ## 1. 当前结论
 
 - **B1 候选收敛验证 Milestone 已完成**：
-  - **Holding Stability A/B 实验**：4个变体（B0.4 + A/B/C）全部回测完成
-    - A: 跌出Top8才卖
-    - B: 跌出Top10才卖
-    - C: 跌出Top10 + 连续2次确认
-    - 通过标准：交易次数下降≥20%、CAGR不恶化、回撤不恶化、夏普≥B0.4
+- **Holding Stability A/B 实验：已终审收口，不再继续调参**
+    - A: 跌出Top8才卖 — 交易下降52.7%，CAGR +0.97pp，但最大回撤恶化-14.72pp，夏普0.84<0.91，未通过
+    - B: 跌出Top10才卖 — 交易下降62.3%，CAGR -1.71pp，最大回撤恶化-17.12pp，夏普0.75<0.91，未通过
+    - C: 跌出Top10+连续2次确认 — 交易下降64.2%，CAGR -3.96pp，最大回撤恶化-17.89pp，夏普0.66<0.91，未通过
+    - 明确结论：卖出缓冲减少换仓有效，但风险调整后表现变差；不再继续调 Top8/Top10/连续确认参数
+    - 交付物：`scripts/b1_holding_stability_ab_test.py`（v2 单变量修正）、`reports/b1_holding_stability_ab_test.md`、`reports/b1_holding_stability_metrics.csv`、`reports/b1_holding_stability_exit_attribution.csv`
   - **Universe Time-Consistency Audit**：18只ETF时间覆盖审计完成
     - 检查每只ETF的数据起点、覆盖情况
     - 运行对照实验：剔除覆盖不足ETF、仅2019年可用ETF、2022年起回测
   - **Paper Trading Log 机制**：纸面交易日志规范设计完成
     - 18个字段，覆盖建议 vs 实际执行、滑点、未执行原因
     - 3-6个月验证目标：执行率≥80%、滑点≤20bp、跟踪误差≤5%
+    - 明确结论：没有 B1 候选时，仍可用 B0.4 启动纸面交易，目的为验证执行/滑点/跟踪误差
+  - 新增脚本：`b1_holding_stability_ab_test.py`、`b0_4_universe_time_consistency_audit.py`
   - 新增脚本：`b1_holding_stability_ab_test.py`、`b0_4_universe_time_consistency_audit.py`
   - 新增文档：`docs/PAPER_TRADING_LOG_SPEC.md`
   - 新增 `docs/ETF_UNIVERSE_GOVERNANCE.md` 治理文档
@@ -444,7 +447,24 @@
 
 ## 7. 下一步唯一任务
 
-Step 6 已完成。动态第5槽位实验结论：**预注册标准未全部通过，C只能判定为机制观察候选，不得升级B0.4**。等待用户决定下一步研究方向。
+**B1 Holding Stability 已终审收口，不升级 B1。**
+
+下一步唯一任务：
+
+1. **实盘助手 / 纸面交易闭环**
+   - 使用 B0.4 启动 3-6 个月纸面交易
+   - 验证执行率、滑点、跟踪误差
+   - 使用 `docs/PAPER_TRADING_LOG_SPEC.md` 记录建议 vs 实际执行
+
+2. **数据更新闭环**
+   - 建立定期数据更新流程（通过 cron 或手动触发）
+   - 每次更新后运行准入检查，生成 SHA-256 快照
+   - 确保数据质量持续监控
+
+3. **不再继续的研究方向（已关闭）**
+   - Holding Stability 参数调优（Top8/Top10/连续确认）
+   - 任何试图修改 B0.4 交易规则或冻结基线的实验
+
 
 ---
 
@@ -474,4 +494,4 @@ Step 6 已完成。动态第5槽位实验结论：**预注册标准未全部通�
 3. `docs/DECISIONS.md`
 4. `git status --short --branch`
 
-恢复后只继续"v1.3 Step 6 完成，预注册标准未通过，等待用户决定下一步研究方向"，不要重新展开历史研究。
+恢复后只继续"B1 Holding Stability 已终审收口，下一步唯一任务：实盘助手/纸面交易/数据更新闭环"，不要重新展开历史研究。
