@@ -422,6 +422,13 @@ class ETFDatabase:
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
+        # 只保留 daily_scores 表存在的列
+        db_cols = ['ticker', 'date', 'ma20', 'ma50', 'ma20_slope', 'above_ma20_days',
+                   'volatility_20', 'momentum_20', 'volume_ratio',
+                   'trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score', 'total_score']
+        df_cols = [c for c in db_cols if c in df.columns]
+        df = df[df_cols]
+        
         with self._connect() as conn:
             cursor = conn.cursor()
             
@@ -432,7 +439,7 @@ class ETFDatabase:
                     (row['ticker'], row['date'])
                 )
             
-            # 插入新记录
+            # 插入新记录（只含 daily_scores 表存在的列）
             df.to_sql('daily_scores', conn, if_exists='append', index=False)
             conn.commit()
         
