@@ -1585,6 +1585,77 @@ def render_etf_analysis(cfg, is_b0_18=True):
         st.plotly_chart(make_score_trend(ticker, cfg, window), use_container_width=True)
 
 
+
+def _recalculate_scores(db, cfg, st_info=None, st_success=None, st_error=None):
+    """重新计算所有评分并保存到数据库。
+
+    参数:
+        db: ETFDatabase 实例
+        cfg: 策略配置 dict
+        st_info: st.info 回调（可选）
+        st_success: st.success 回调（可选）
+        st_error: st.error 回调（可选）
+    返回:
+        scores_all DataFrame 或 None（失败时）
+    """
+    engine_calc = StrategyEngine(cfg)
+    all_tickers = list(ALL_TRADABLE_ETFS.keys())
+    market_df_all = db.get_market_data(ticker=all_tickers)
+
+    stock_df = market_df_all[market_df_all['ticker'].isin(ETF_UNIVERSE.keys())].copy()
+    fallback_df = market_df_all[market_df_all['ticker'].isin(FALLBACK_EQUITY_UNIVERSE.keys())].copy()
+    defense_df = market_df_all[market_df_all['ticker'].isin(DEFENSE_UNIVERSE.keys())].copy()
+
+    stock_scores = []
+    for ticker in stock_df['ticker'].unique():
+        ticker_df = stock_df[stock_df['ticker'] == ticker].copy()
+        if len(ticker_df) >= 50:
+            scored = engine_calc.calculate_total_score(ticker_df)
+            stock_scores.append(scored)
+
+    if not stock_scores:
+        if st_error:
+            st_error("无有效行业ETF数据")
+        return None
+
+    scores_all = pd.concat(stock_scores, ignore_index=True)
+    scores_all = engine_calc.rank_all_momentum(scores_all)
+    scores_all = engine_calc.compute_total_score(scores_all)
+
+    fallback_scores = []
+    for ticker in fallback_df['ticker'].unique():
+        ticker_df = fallback_df[fallback_df['ticker'] == ticker].copy()
+        if len(ticker_df) >= 50:
+            scored = engine_calc.calculate_fallback_equity_score(ticker_df)
+            fallback_scores.append(scored)
+
+    if fallback_scores:
+        fallback_scores_df = pd.concat(fallback_scores, ignore_index=True)
+        fallback_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
+        fallback_scores_df['total_score'] = fallback_scores_df[fallback_cols].fillna(0).sum(axis=1)
+        scores_all = pd.concat([scores_all, fallback_scores_df], ignore_index=True)
+
+    defense_scores = []
+    for ticker in defense_df['ticker'].unique():
+        ticker_df = defense_df[defense_df['ticker'] == ticker].copy()
+        if len(ticker_df) >= 50:
+            scored = engine_calc.calculate_defense_score(ticker_df)
+            defense_scores.append(scored)
+
+    if defense_scores:
+        defense_scores_df = pd.concat(defense_scores, ignore_index=True)
+        defense_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
+        defense_scores_df['total_score'] = defense_scores_df[defense_cols].fillna(0).sum(axis=1)
+        scores_all = pd.concat([scores_all, defense_scores_df], ignore_index=True)
+
+    scores_all['total_score'] = scores_all['total_score'].fillna(0)
+    db.save_scores(scores_all)
+
+    if st_success:
+        st_success(f"✅ 已计算并保存 {len(scores_all)} 条评分记录")
+
+    return scores_all
+
 def render_data_management():
     st.header("数据管理")
     st.markdown('<div class="section-note">查看数据库覆盖、更新行情、检查运行日志。</div>', unsafe_allow_html=True)
@@ -1601,7 +1672,7 @@ def render_data_management():
     cfg["min_total_score"] = 40
     cfg["max_holdings"] = 5
     cfg["market_timing"] = True
-    cfg["stop_loss"] = 0.08
+    cfg["stop_loss"] = -0.08
     cfg["max_position_per_etf"] = 0.20
     cfg["rebalance_freq"] = 5
     cfg["sector_boost_enabled"] = False
@@ -1631,68 +1702,12 @@ def render_data_management():
                         st.info("暂无新行情数据或 AKShare 未安装")
 
                     # 方案 A：行情更新后自动重新计算评分
-                    st.info("正在重新计算评分...")
-                    engine_calc = StrategyEngine(cfg)
-
-                    # 加载所有三类资产数据
-                    all_tickers = list(ALL_TRADABLE_ETFS.keys())
-                    market_df_all = db.get_market_data(ticker=all_tickers)
-
-                    # 分离三类资产
-                    stock_df = market_df_all[market_df_all['ticker'].isin(ETF_UNIVERSE.keys())].copy()
-                    fallback_df = market_df_all[market_df_all['ticker'].isin(FALLBACK_EQUITY_UNIVERSE.keys())].copy()
-                    defense_df = market_df_all[market_df_all['ticker'].isin(DEFENSE_UNIVERSE.keys())].copy()
-
-                    # 步骤1-2：行业ETF评分
-                    stock_scores = []
-                    for ticker in stock_df['ticker'].unique():
-                        ticker_df = stock_df[stock_df['ticker'] == ticker].copy()
-                        if len(ticker_df) >= 50:
-                            scored = engine_calc.calculate_total_score(ticker_df)
-                            stock_scores.append(scored)
-
-                    if not stock_scores:
-                        st.error("无有效行业ETF数据，跳过评分")
-                    else:
-                        scores_all = pd.concat(stock_scores, ignore_index=True)
-
-                        # 步骤3：行业ETF横截面动量排名
-                        scores_all = engine_calc.rank_all_momentum(scores_all)
-                        scores_all = engine_calc.compute_total_score(scores_all)
-
-                        # 步骤4：宽基补仓ETF评分
-                        fallback_scores = []
-                        for ticker in fallback_df['ticker'].unique():
-                            ticker_df = fallback_df[fallback_df['ticker'] == ticker].copy()
-                            if len(ticker_df) >= 50:
-                                scored = engine_calc.calculate_fallback_equity_score(ticker_df)
-                                fallback_scores.append(scored)
-
-                        if fallback_scores:
-                            fallback_scores_df = pd.concat(fallback_scores, ignore_index=True)
-                            fallback_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
-                            fallback_scores_df['total_score'] = fallback_scores_df[fallback_cols].fillna(0).sum(axis=1)
-                            scores_all = pd.concat([scores_all, fallback_scores_df], ignore_index=True)
-
-                        # 步骤5：防御资产评分
-                        defense_scores = []
-                        for ticker in defense_df['ticker'].unique():
-                            ticker_df = defense_df[defense_df['ticker'] == ticker].copy()
-                            if len(ticker_df) >= 50:
-                                scored = engine_calc.calculate_defense_score(ticker_df)
-                                defense_scores.append(scored)
-
-                        if defense_scores:
-                            defense_scores_df = pd.concat(defense_scores, ignore_index=True)
-                            defense_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
-                            defense_scores_df['total_score'] = defense_scores_df[defense_cols].fillna(0).sum(axis=1)
-                            scores_all = pd.concat([scores_all, defense_scores_df], ignore_index=True)
-
-                        # 确保 total_score 已填充
-                        scores_all['total_score'] = scores_all['total_score'].fillna(0)
-
-                        db.save_scores(scores_all)
-                        st.success(f"✅ 已计算并保存 {len(scores_all)} 条评分记录")
+                    scores_all = _recalculate_scores(
+                        db, cfg,
+                        st_info=lambda msg: st.info(msg),
+                        st_success=lambda msg: st.success(msg),
+                        st_error=lambda msg: st.error(msg)
+                    )
 
                     load_market_data.clear()
                     load_scores.clear()
@@ -1722,58 +1737,12 @@ def render_data_management():
                     st.success(f"✅ 已导入 {count} 条 iFinD 记录")
 
                     # 导入后自动重新计算评分
-                    st.info("正在重新计算评分...")
-                    engine_calc = StrategyEngine(cfg)
-                    all_tickers = list(ALL_TRADABLE_ETFS.keys())
-                    market_df_all = db.get_market_data(ticker=all_tickers)
-
-                    stock_df = market_df_all[market_df_all['ticker'].isin(ETF_UNIVERSE.keys())].copy()
-                    fallback_df = market_df_all[market_df_all['ticker'].isin(FALLBACK_EQUITY_UNIVERSE.keys())].copy()
-                    defense_df = market_df_all[market_df_all['ticker'].isin(DEFENSE_UNIVERSE.keys())].copy()
-
-                    stock_scores = []
-                    for ticker in stock_df['ticker'].unique():
-                        ticker_df = stock_df[stock_df['ticker'] == ticker].copy()
-                        if len(ticker_df) >= 50:
-                            scored = engine_calc.calculate_total_score(ticker_df)
-                            stock_scores.append(scored)
-
-                    if not stock_scores:
-                        st.error("无有效行业ETF数据，跳过评分")
-                    else:
-                        scores_all = pd.concat(stock_scores, ignore_index=True)
-                        scores_all = engine_calc.rank_all_momentum(scores_all)
-                        scores_all = engine_calc.compute_total_score(scores_all)
-
-                        fallback_scores = []
-                        for ticker in fallback_df['ticker'].unique():
-                            ticker_df = fallback_df[fallback_df['ticker'] == ticker].copy()
-                            if len(ticker_df) >= 50:
-                                scored = engine_calc.calculate_fallback_equity_score(ticker_df)
-                                fallback_scores.append(scored)
-
-                        if fallback_scores:
-                            fallback_scores_df = pd.concat(fallback_scores, ignore_index=True)
-                            fallback_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
-                            fallback_scores_df['total_score'] = fallback_scores_df[fallback_cols].fillna(0).sum(axis=1)
-                            scores_all = pd.concat([scores_all, fallback_scores_df], ignore_index=True)
-
-                        defense_scores = []
-                        for ticker in defense_df['ticker'].unique():
-                            ticker_df = defense_df[defense_df['ticker'] == ticker].copy()
-                            if len(ticker_df) >= 50:
-                                scored = engine_calc.calculate_defense_score(ticker_df)
-                                defense_scores.append(scored)
-
-                        if defense_scores:
-                            defense_scores_df = pd.concat(defense_scores, ignore_index=True)
-                            defense_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
-                            defense_scores_df['total_score'] = defense_scores_df[defense_cols].fillna(0).sum(axis=1)
-                            scores_all = pd.concat([scores_all, defense_scores_df], ignore_index=True)
-
-                        scores_all['total_score'] = scores_all['total_score'].fillna(0)
-                        db.save_scores(scores_all)
-                        st.success(f"✅ 已计算并保存 {len(scores_all)} 条评分记录")
+                    scores_all = _recalculate_scores(
+                        db, cfg,
+                        st_info=lambda msg: st.info(msg),
+                        st_success=lambda msg: st.success(msg),
+                        st_error=lambda msg: st.error(msg)
+                    )
 
                     st.rerun()
                 except Exception as e:
