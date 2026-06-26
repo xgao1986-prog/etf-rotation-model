@@ -428,7 +428,7 @@ class ETFDatabase:
                    'trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score', 'total_score']
         df_cols = [c for c in db_cols if c in df.columns]
         df = df[df_cols]
-        
+
         with self._connect() as conn:
             cursor = conn.cursor()
             
