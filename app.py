@@ -1589,6 +1589,24 @@ def render_data_management():
     st.header("数据管理")
     st.markdown('<div class="section-note">查看数据库覆盖、更新行情、检查运行日志。</div>', unsafe_allow_html=True)
 
+    # 构建策略配置（同 render_sidebar）
+    cfg = STRATEGY_CONFIG.copy()
+    cfg["weights"] = {
+        "trend": 1.0,
+        "confirm": 1.0,
+        "momentum": 1.0,
+        "volatility": 0.8,
+    }
+    cfg["min_trend_score"] = 5
+    cfg["min_total_score"] = 40
+    cfg["max_holdings"] = 5
+    cfg["market_timing"] = True
+    cfg["stop_loss"] = 0.08
+    cfg["max_position_per_etf"] = 0.20
+    cfg["rebalance_freq"] = 5
+    cfg["sector_boost_enabled"] = False
+    cfg["trading_fee"] = 0.0003
+
     db = get_database()
     stats = load_stats()
     c1, c2, c3, c4, c5 = st.columns(5)
