@@ -113,6 +113,27 @@ def main():
         target_positions = {}
 
     positions_df = assistant.load_positions()
+
+    # 持仓为空时，不生成交易建议
+    actual_tickers = set(positions_df[positions_df["ticker"] != "__CASH__"]["ticker"].unique())
+    if not actual_tickers:
+        print("WARN 持仓为空（只有现金），不生成交易建议。")
+        print("      请先在持仓管理页面录入真实持仓，或运行：")
+        print("        py scripts/live_update_positions.py")
+        plan_df = pd.DataFrame(columns=[
+            "ticker", "action", "current_shares", "target_shares", "delta_shares",
+            "estimated_price", "estimated_amount", "reason", "note"
+        ])
+        if args.output_csv:
+            plan_df.to_csv(args.output_csv, index=False)
+        default_md = os.path.join(os.path.dirname(assistant.plan_path), "..", "reports", "live",
+                                     "weekly_rebalance_plan_%s.md" % args.date)
+        output_md = args.output_md or default_md
+        md = assistant.generate_weekly_plan(plan_df, date=args.date, output_path=output_md)
+        print("OK Report saved: %s" % output_md)
+        print("\nPlan summary: 无持仓，无需操作")
+        return
+
     price_map = {}
     for _, r in positions_df.iterrows():
         if r["ticker"] != "__CASH__" and r["current_price"] > 0:
@@ -123,7 +144,6 @@ def main():
         if t not in price_map or price_map[t] <= 0:
             price_map[t] = p
 
-    actual_tickers = set(positions_df[positions_df["ticker"] != "__CASH__"]["ticker"].unique())
     target_tickers = set(target_positions.keys())
 
     all_tickers = actual_tickers | target_tickers

@@ -1702,6 +1702,61 @@ def render_data_management():
                     load_scores.clear()
                     load_stats.clear()
                     st.success(f"✅ 已导入 {count} 条 iFinD 记录")
+
+                    # 导入后自动重新计算评分
+                    st.info("正在重新计算评分...")
+                    engine_calc = StrategyEngine(cfg)
+                    all_tickers = list(ALL_TRADABLE_ETFS.keys())
+                    market_df_all = db.get_market_data(ticker=all_tickers)
+
+                    stock_df = market_df_all[market_df_all['ticker'].isin(ETF_UNIVERSE.keys())].copy()
+                    fallback_df = market_df_all[market_df_all['ticker'].isin(FALLBACK_EQUITY_UNIVERSE.keys())].copy()
+                    defense_df = market_df_all[market_df_all['ticker'].isin(DEFENSE_UNIVERSE.keys())].copy()
+
+                    stock_scores = []
+                    for ticker in stock_df['ticker'].unique():
+                        ticker_df = stock_df[stock_df['ticker'] == ticker].copy()
+                        if len(ticker_df) >= 50:
+                            scored = engine_calc.calculate_total_score(ticker_df)
+                            stock_scores.append(scored)
+
+                    if not stock_scores:
+                        st.error("无有效行业ETF数据，跳过评分")
+                    else:
+                        scores_all = pd.concat(stock_scores, ignore_index=True)
+                        scores_all = engine_calc.rank_all_momentum(scores_all)
+                        scores_all = engine_calc.compute_total_score(scores_all)
+
+                        fallback_scores = []
+                        for ticker in fallback_df['ticker'].unique():
+                            ticker_df = fallback_df[fallback_df['ticker'] == ticker].copy()
+                            if len(ticker_df) >= 50:
+                                scored = engine_calc.calculate_fallback_equity_score(ticker_df)
+                                fallback_scores.append(scored)
+
+                        if fallback_scores:
+                            fallback_scores_df = pd.concat(fallback_scores, ignore_index=True)
+                            fallback_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
+                            fallback_scores_df['total_score'] = fallback_scores_df[fallback_cols].fillna(0).sum(axis=1)
+                            scores_all = pd.concat([scores_all, fallback_scores_df], ignore_index=True)
+
+                        defense_scores = []
+                        for ticker in defense_df['ticker'].unique():
+                            ticker_df = defense_df[defense_df['ticker'] == ticker].copy()
+                            if len(ticker_df) >= 50:
+                                scored = engine_calc.calculate_defense_score(ticker_df)
+                                defense_scores.append(scored)
+
+                        if defense_scores:
+                            defense_scores_df = pd.concat(defense_scores, ignore_index=True)
+                            defense_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
+                            defense_scores_df['total_score'] = defense_scores_df[defense_cols].fillna(0).sum(axis=1)
+                            scores_all = pd.concat([scores_all, defense_scores_df], ignore_index=True)
+
+                        scores_all['total_score'] = scores_all['total_score'].fillna(0)
+                        db.save_scores(scores_all)
+                        st.success(f"✅ 已计算并保存 {len(scores_all)} 条评分记录")
+
                     st.rerun()
                 except Exception as e:
                     st.error(f"导入失败: {e}")
@@ -2185,16 +2240,24 @@ def render_live_trading(cfg, is_b0_18=True):
     # ------------------------------------------------------------------
     with sub_tab_plan:
         st.subheader("每周调仓建议")
-        st.info("v0.1 调仓建议需通过命令行生成: py scripts/live_generate_trade_plan.py")
-        if os.path.exists(assistant.plan_path):
-            plan_df = pd.read_csv(assistant.plan_path)
-            if not plan_df.empty:
-                st.dataframe(plan_df, use_container_width=True, hide_index=True)
-                st.download_button("下载交易计划 CSV", plan_df.to_csv(index=False), file_name="latest_trade_plan.csv")
-            else:
-                st.info("暂无调仓计划")
+
+        # 检查持仓是否为空
+        positions_check = assistant.load_positions()
+        actual_holdings = positions_check[positions_check["ticker"] != "__CASH__"]
+        if actual_holdings.empty:
+            st.warning("⚠️ 当前无持仓（只有现金），不生成交易建议。")
+            st.info("请先在「持仓管理」页面录入真实持仓，或运行：\n`py scripts/live_generate_trade_plan.py`")
         else:
-            st.info("暂无调仓计划，请先运行命令行生成")
+            st.info("v0.1 调仓建议需通过命令行生成: py scripts/live_generate_trade_plan.py")
+            if os.path.exists(assistant.plan_path):
+                plan_df = pd.read_csv(assistant.plan_path)
+                if not plan_df.empty:
+                    st.dataframe(plan_df, use_container_width=True, hide_index=True)
+                    st.download_button("下载交易计划 CSV", plan_df.to_csv(index=False), file_name="latest_trade_plan.csv")
+                else:
+                    st.info("暂无调仓计划")
+            else:
+                st.info("暂无调仓计划，请先运行命令行生成")
 
     # ------------------------------------------------------------------
     # 子页4: 成交记录
