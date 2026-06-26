@@ -167,7 +167,7 @@ def build_sidebar_config():
         raw_weights["volatility"] = col1.slider("波动率", 0.0, 1.0, 0.10, 0.05)
         weights, raw_total = normalize_weights(raw_weights)
         st.caption(f"输入合计 {raw_total:.2f}，已自动归一化用于实时评分。")
-        
+
         # v1.2.1: 动量/波动率因子总开关（B0.4默认关闭）
         enable_momentum_vol = st.checkbox("启用动量+波动率因子", False, help="关闭时动量排名与波动率评分不计入总分（B0.4基线状态）")
         if not enable_momentum_vol:
@@ -184,32 +184,32 @@ def build_sidebar_config():
         max_holdings = st.slider("最大持仓数", 1, 10, STRATEGY_CONFIG["max_holdings"])
         max_per_etf = st.slider("单只上限(%)", 5, 50, int(STRATEGY_CONFIG["max_position_per_etf"] * 100)) / 100
         stop_loss = st.slider("止损线(%)", -20, -1, int(STRATEGY_CONFIG["stop_loss"] * 100)) / 100
-        
+
         # 止损模式选择
         stop_loss_mode_options = {"固定止损": "fixed", "ATR动态止损": "atr", "不止损": "none"}
         stop_loss_mode_display = list(stop_loss_mode_options.keys())
         stop_loss_mode_selected = st.selectbox("止损模式", stop_loss_mode_display, index=0)
         stop_loss_mode = stop_loss_mode_options[stop_loss_mode_selected]
-        
+
         atr_multiplier = 2.0
         if stop_loss_mode == "atr":
             atr_multiplier = st.slider("ATR倍数", 1.0, 5.0, 2.0, 0.5)
-        
+
         use_timing = st.checkbox("启用大盘择时", False)  # 默认关闭，回测数据显示关闭后收益更高
-        
+
         st.divider()
         st.caption("宽基补仓")
         fallback_equity_enabled = st.checkbox("启用宽基补仓（沪深300/中证500/创业板/科创50）", False, help="行业ETF选不满时，用宽基ETF填充剩余仓位。回测显示当前参数下可能为负贡献。")
-        
+
         st.divider()
         st.caption("调仓规则")
-        
+
         # 调仓频率
         freq_options = {"每周": "weekly", "双周": "biweekly", "月度": "monthly"}
         freq_display = list(freq_options.keys())
         freq_selected = st.selectbox("调仓频率", freq_display, index=0)
         rebalance_freq = freq_options[freq_selected]
-        
+
         # 调仓日
         weekday_options = ["周一", "周二", "周三", "周四", "周五"]
         rebalance_weekday = st.selectbox("调仓日", weekday_options, index=3)
@@ -218,16 +218,16 @@ def build_sidebar_config():
     # ========== 实验性因子参数 (v1.1) ==========
     with st.sidebar.expander("⚡ v1.1实验因子", expanded=False):
         st.caption("冷静期、动态止盈、防御模块（默认关闭）")
-        
+
         # 板块动量增强（v1.2 预留，当前回测引擎未实现）
         sector_boost = st.checkbox("启用板块动量增强", False, help="v1.2 预留功能，当前回测引擎暂未实现该因子，勾选不影响结果")
-        
+
         # 冷静期
         st.divider()
         st.caption("冷静期")
         cooling_period = st.slider("冷静期(交易日)", 0, 20, 0)
         cooling_score_boost = st.slider("冷静期评分提升", 0, 30, 10)
-        
+
         # 动态止盈
         st.divider()
         st.caption("动态止盈（默认关闭）")
@@ -235,7 +235,7 @@ def build_sidebar_config():
         trailing_display = list(trailing_mode_options.keys())
         trailing_selected = st.selectbox("动态止盈模式", trailing_display, index=0)
         trailing_stop_mode = trailing_mode_options[trailing_selected]
-        
+
         trailing_stop = None
         if trailing_stop_mode == "simple":
             trailing_stop = st.slider("回撤止盈阈值(%)", -20, -1, -10) / 100
@@ -247,24 +247,24 @@ def build_sidebar_config():
             tier_2_drawdown = st.slider("2档回撤容忍(%)", -15, -5, -8) / 100
             tier_3_pnl = st.slider("3档盈利门槛(%)", 20, 50, 30) / 100
             tier_3_drawdown = st.slider("3档回撤容忍(%)", -20, -8, -12) / 100
-        
+
         # 防御模块
         st.divider()
         st.caption("防御模块")
         defense_enabled = st.checkbox("启用防御资产", True)
         defense_mode = st.selectbox("防御资产模式", ["黄金+国债", "仅黄金", "仅国债"], index=0)
-        
+
         # 初始资金
         st.divider()
         st.caption("回测参数")
         initial_capital = st.number_input(
-            "初始资金（万元）", 
-            min_value=10, 
-            max_value=10000, 
-            value=int(BACKTEST_CONFIG['initial_capital'] / 10000), 
+            "初始资金（万元）",
+            min_value=10,
+            max_value=10000,
+            value=int(BACKTEST_CONFIG['initial_capital'] / 10000),
             step=10
         ) * 10000
-        
+
         st.caption("防御比例（按大盘择时信号）")
         defense_20 = st.slider("防御仓位(0.2)配防御(%)", 0, 100, 50) / 100
         defense_50 = st.slider("半仓(0.5)配防御(%)", 0, 50, 20) / 100
@@ -285,7 +285,7 @@ def build_sidebar_config():
     cfg["fallback_equity_enabled"] = fallback_equity_enabled
     cfg["momentum_factor_enabled"] = enable_momentum_vol
     cfg["volatility_factor_enabled"] = enable_momentum_vol
-    
+
     # 构建交易规则配置
     trading_rules_cfg = {
         "sector_boost_enabled": sector_boost,
@@ -306,17 +306,17 @@ def build_sidebar_config():
             "tier_3_pnl": tier_3_pnl,
             "tier_3_drawdown": tier_3_drawdown,
         })
-    
+
     # 构建防御配置
     defense_cfg = {
         "defense_enabled": defense_enabled,
     }
-    
+
     # 回测配置
     backtest_cfg = {
         "initial_capital": initial_capital,
     }
-    
+
     # 根据防御资产模式设置 DEFENSE_UNIVERSE
     import config as _config_module
     if defense_mode == "仅黄金":
@@ -325,14 +325,14 @@ def build_sidebar_config():
         _config_module.DEFENSE_UNIVERSE = {"511010.SH": "国债ETF"}
     else:
         _config_module.DEFENSE_UNIVERSE = {"518880.SH": "黄金ETF", "511010.SH": "国债ETF"}
-    
+
     # 更新防御比例
     _config_module.DEFENSE_ALLOCATION = {
         0.2: defense_20,
         0.5: defense_50,
         1.0: defense_100,
     }
-    
+
     # 合并为完整配置
     cfg = build_config(strategy_cfg=cfg, trading_rules_cfg=trading_rules_cfg, defense_cfg=defense_cfg, backtest_cfg=backtest_cfg)
 
@@ -345,12 +345,12 @@ def build_sidebar_config():
         backtest_cfg=BACKTEST_CONFIG,
     )
     B0_18_SIGNATURE = cfg_signature(B0_18_CFG)
-    
+
     current_sig = cfg_signature(cfg)
     is_b0_18 = (current_sig == B0_18_SIGNATURE)
-    
+
     st.sidebar.divider()
-    
+
     # 状态标记
     if is_b0_18:
         st.sidebar.markdown(
@@ -372,12 +372,12 @@ def build_sidebar_config():
             """,
             unsafe_allow_html=True,
         )
-    
+
     # 一键加载B0-18
     if st.sidebar.button("🔄 重置为B0-18", use_container_width=True):
         st.session_state.clear()
         st.rerun()
-    
+
     st.sidebar.divider()
     latest = get_database().get_latest_date()
     st.sidebar.metric("最新数据日", latest or "N/A")
@@ -454,7 +454,7 @@ def get_latest_score_table(cfg):
         cursor.execute("SELECT MAX(date) FROM daily_scores")
         result = cursor.fetchone()
         latest = result[0] if result and result[0] else None
-    
+
     if not latest:
         # daily_scores 没有数据，回退到 market_data 的最新日期
         latest = db.get_latest_date()
@@ -638,12 +638,12 @@ def make_combined_figure(result, start_date=None, end_date=None):
     nav_df = result["nav_df"].copy()
     if start_date and end_date:
         nav_df = nav_df[(nav_df["date"] >= pd.Timestamp(start_date)) & (nav_df["date"] <= pd.Timestamp(end_date))]
-    
+
     nav_df = nav_df.sort_values("date").reset_index(drop=True)
-    
+
     if nav_df.empty:
         return go.Figure()
-    
+
     fig = make_subplots(
         rows=4,
         cols=1,
@@ -652,7 +652,7 @@ def make_combined_figure(result, start_date=None, end_date=None):
         row_heights=[0.40, 0.15, 0.08, 0.37],
         subplot_titles=("", "", "", ""),
     )
-    
+
     # ===== 第1行：净值曲线 =====
     # 市场状态背景着色
     if "regime_id" in nav_df.columns and nav_df["regime_id"].notna().any():
@@ -682,13 +682,13 @@ def make_combined_figure(result, start_date=None, end_date=None):
             color = regime_colors.get(int(current_regime), "rgba(128,128,128,0.05)")
             for r in [1, 2, 3, 4]:
                 fig.add_vrect(x0=seg_start, x1=end_date, fillcolor=color, opacity=1, line_width=0, row=r, col=1)
-    
+
     base_nav = nav_df["nav"].iloc[0]
     fig.add_trace(go.Scatter(
         x=nav_df["date"], y=nav_df["nav"] / base_nav,
         name="策略", line=dict(color="#1769aa", width=2.4),
     ), row=1, col=1)
-    
+
     # 基准也按选中区间重新归一化到1.0起始
     if "bench_return" in nav_df.columns and nav_df["bench_return"].notna().any():
         bench_start = nav_df["bench_return"].iloc[0]
@@ -697,14 +697,14 @@ def make_combined_figure(result, start_date=None, end_date=None):
             x=nav_df["date"], y=normalized_bench,
             name="沪深300", line=dict(color="#7d8793", width=1.6, dash="dash"),
         ), row=1, col=1)
-    
+
     # ===== 第2行：回撤 =====
     fig.add_trace(go.Scatter(
         x=nav_df["date"], y=nav_df["drawdown"],
         name="回撤", fill="tozeroy", line=dict(color="#d64f4f", width=1.1),
     ), row=2, col=1)
     fig.update_yaxes(tickformat=".0%", row=2, col=1)
-    
+
     # ===== 第3行：牛熊状态 =====
     if "max_total_position" in nav_df.columns:
         mkt_signals = nav_df["max_total_position"].values
@@ -720,13 +720,13 @@ def make_combined_figure(result, start_date=None, end_date=None):
             else:
                 mkt_colors.append("#d64f4f")
                 mkt_labels.append(f"🔴 熊市(防御) {sig:.0%}")
-        
+
         fig.add_trace(go.Bar(
             x=nav_df["date"], y=[1] * len(nav_df),
             marker=dict(color=mkt_colors, line=dict(width=0, color="rgba(0,0,0,0)"),),
             showlegend=False, hovertemplate="%{customdata}<extra></extra>", customdata=mkt_labels,
         ), row=3, col=1)
-        
+
         # 图例：牛熊状态
         for color, label in [
             ("#2e9d75", "🟢 牛市(满仓)"),
@@ -738,10 +738,10 @@ def make_combined_figure(result, start_date=None, end_date=None):
                 marker=dict(size=10, color=color, line=dict(width=0)),
                 name=label, showlegend=True,
             ), row=3, col=1)
-        
+
         fig.update_yaxes(range=[0, 1], visible=False, row=3, col=1)
         fig.update_layout(bargap=0, bargroupgap=0)
-    
+
     # ===== 第4行：仓位分配堆叠面积 =====
     if "positions_pct" in nav_df.columns:
         pos_records = []
@@ -756,17 +756,17 @@ def make_combined_figure(result, start_date=None, end_date=None):
             else:
                 record["cash"] = 1.0
             pos_records.append(record)
-        
+
         if pos_records:
             pos_df = pd.DataFrame(pos_records).fillna(0)
-            
+
             colors = [
                 "#1769aa", "#2e9d75", "#f0a202", "#d64f4f", "#9c27b0",
                 "#607d8b", "#795548", "#e91e63", "#3f51b5", "#009688",
                 "#ff5722", "#673ab7", "#8bc34a", "#cddc39", "#ffeb3b",
                 "#00bcd4", "#ff9800"
             ]
-            
+
             # 行业ETF
             for i, ticker in enumerate(ETF_UNIVERSE.keys()):
                 if ticker in pos_df.columns:
@@ -779,7 +779,7 @@ def make_combined_figure(result, start_date=None, end_date=None):
                         line=dict(width=0.5, color=color), fillcolor=color,
                         text=hover_texts, hoverinfo="text",
                     ), row=4, col=1)
-            
+
             # 宽基ETF
             import config as _config_module
             fallback_tickers = list(getattr(_config_module, "FALLBACK_EQUITY_UNIVERSE", {}).keys())
@@ -795,7 +795,7 @@ def make_combined_figure(result, start_date=None, end_date=None):
                         line=dict(width=0.5, color=color), fillcolor=color,
                         text=hover_texts, hoverinfo="text",
                     ), row=4, col=1)
-            
+
             # 防御资产
             defense_tickers = list(getattr(_config_module, "DEFENSE_UNIVERSE", {}).keys())
             defense_colors = ["#ffd700", "#2b6cb0"]
@@ -810,7 +810,7 @@ def make_combined_figure(result, start_date=None, end_date=None):
                         line=dict(width=0.5, color=color), fillcolor=color,
                         text=hover_texts, hoverinfo="text",
                     ), row=4, col=1)
-            
+
             # Cash
             if "cash" in pos_df.columns:
                 hover_texts_cash = [f"<b>现金</b><br>占比: {v:.1%}" if v > 0 else "" for v in pos_df["cash"]]
@@ -820,9 +820,9 @@ def make_combined_figure(result, start_date=None, end_date=None):
                     line=dict(width=0.5, color="#cccccc"), fillcolor="rgba(200,200,200,0.5)",
                     text=hover_texts_cash, hoverinfo="text",
                 ), row=4, col=1)
-            
+
             fig.update_yaxes(tickformat=".0%", row=4, col=1)
-    
+
     fig.update_layout(
         height=720,
         hovermode="x unified",
@@ -830,14 +830,14 @@ def make_combined_figure(result, start_date=None, end_date=None):
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=9)),
         xaxis_rangeslider_visible=False,
     )
-    
+
     # 4行x轴都跳过周末（只显示交易日，不显示空白）
     rangebreaks = [dict(bounds=["sat", "mon"])]
     fig.update_xaxes(title_text="", rangebreaks=rangebreaks, row=1, col=1)
     fig.update_xaxes(title_text="", rangebreaks=rangebreaks, row=2, col=1)
     fig.update_xaxes(title_text="", rangebreaks=rangebreaks, row=3, col=1)
     fig.update_xaxes(title_text="日期", rangebreaks=rangebreaks, row=4, col=1)
-    
+
     return fig
 
 
@@ -918,7 +918,7 @@ def make_candlestick(ticker, days=180, weekly=False, rebalance_weekday=4, trades
 
         buy_trades = trade_weeks[trade_weeks["action"] == "BUY"]
         sell_trades = trade_weeks[trade_weeks["action"].isin(["SELL", "STOP_LOSS"])]
-        
+
         # 关键：过滤交易日期，只保留在当前数据时间范围内，防止Plotly x轴被强制扩展
         min_date = market["date"].min()
         max_date = market["date"].max()
@@ -971,7 +971,7 @@ def make_candlestick(ticker, days=180, weekly=False, rebalance_weekday=4, trades
         margin=dict(l=8, r=16, t=20, b=8),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
     )
-    
+
     return fig
 
 
@@ -1148,7 +1148,7 @@ def render_dashboard(cfg, is_b0_18=True):
             stock_signals = signal_df[signal_df["ticker"].isin(ETF_UNIVERSE.keys())]
             fallback_signals = signal_df[signal_df["ticker"].isin(FALLBACK_EQUITY_UNIVERSE.keys())]
             defense_signals = signal_df[signal_df["ticker"].isin(DEFENSE_UNIVERSE.keys())]
-            
+
             if not stock_signals.empty:
                 st.markdown("<div style='font-size:0.85rem;color:#1b5e8f;font-weight:600;'>行业/主题ETF</div>", unsafe_allow_html=True)
                 for _, row in stock_signals.head(cfg["max_holdings"]).iterrows():
@@ -1157,7 +1157,7 @@ def render_dashboard(cfg, is_b0_18=True):
                         f"{row['total_score']:.1f}分",
                         f"趋势 {row['trend_score']:.0f} / 确认 {row['confirm_score']:.0f}",
                     )
-            
+
             if not fallback_signals.empty:
                 st.markdown("<div style='font-size:0.85rem;color:#2e7d32;font-weight:600;'>宽基补仓ETF</div>", unsafe_allow_html=True)
                 for _, row in fallback_signals.iterrows():
@@ -1166,7 +1166,7 @@ def render_dashboard(cfg, is_b0_18=True):
                         f"{row['total_score']:.1f}分",
                         f"趋势 {row['trend_score']:.0f} / 确认 {row['confirm_score']:.0f}",
                     )
-            
+
             if not defense_signals.empty:
                 st.markdown("<div style='font-size:0.85rem;color:#d64f4f;font-weight:600;'>防御资产</div>", unsafe_allow_html=True)
                 for _, row in defense_signals.iterrows():
@@ -1292,10 +1292,10 @@ def render_backtest(cfg, is_b0_18=True):
         trading_dates = nav_df_all["date"].dt.date.unique()
         trading_dates = np.sort(trading_dates)
         num_trading_days = len(trading_dates)
-        
+
         min_date = trading_dates[0] if num_trading_days > 0 else None
         max_date = trading_dates[-1] if num_trading_days > 0 else None
-        
+
         if num_trading_days < 2:
             start_date = min_date
             end_date = max_date
@@ -1309,37 +1309,37 @@ def render_backtest(cfg, is_b0_18=True):
                 step=1,
                 key="backtest_date_range_slider",
             )
-            
+
             start_idx, end_idx = slider_idx
             start_date = trading_dates[start_idx]
             end_date = trading_dates[end_idx]
-            
+
             st.caption(f"当前时段：{start_date} ~ {end_date}（共 {end_idx - start_idx + 1} 个交易日）")
-        
+
         # 根据时段过滤数据并重算指标
         filtered_nav = nav_df_all[
             (nav_df_all["date"] >= pd.Timestamp(start_date)) & (nav_df_all["date"] <= pd.Timestamp(end_date))
         ].sort_values("date").reset_index(drop=True) if start_date and end_date else nav_df_all.sort_values("date").reset_index(drop=True)
-        
+
         is_full_range = (start_date == min_date and end_date == max_date)
-        
+
         if len(filtered_nav) >= 2:
             nav_start = filtered_nav["nav"].iloc[0]
             nav_end = filtered_nav["nav"].iloc[-1]
             total_return = (nav_end / nav_start) - 1 if nav_start > 0 else 0
-            
+
             days = len(filtered_nav)
             years = days / 252
             annual_return = (1 + total_return) ** (1 / max(years, 0.01)) - 1
-            
+
             daily_rets = filtered_nav["nav"].pct_change().dropna()
             vol = daily_rets.std() * np.sqrt(252) if len(daily_rets) > 1 else 0
             sharpe = annual_return / vol if vol > 0 else 0
-            
+
             peak = filtered_nav["nav"].cummax()
             drawdown = (filtered_nav["nav"] - peak) / peak
             max_drawdown = drawdown.min()
-            
+
             # 交易次数（在时段内）
             trades = result["trades_df"]
             trades_in_range = 0
@@ -1354,14 +1354,14 @@ def render_backtest(cfg, is_b0_18=True):
             sharpe = result["sharpe_ratio"]
             max_drawdown = result["max_drawdown"]
             trades_in_range = result["num_trades"]
-        
+
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("总收益率", format_pct(total_return))
         c2.metric("年化收益", format_pct(annual_return))
         c3.metric("夏普比率", f"{sharpe:.2f}")
         c4.metric("最大回撤", format_pct(max_drawdown))
         c5.metric("交易次数", trades_in_range)
-        
+
         if not is_full_range:
             st.caption(f"⏱️ 当前显示：{start_date} ~ {end_date}（共 {len(filtered_nav)} 个交易日）")
 
@@ -1420,7 +1420,7 @@ def render_backtest(cfg, is_b0_18=True):
                         </div>
                         """, unsafe_allow_html=True)
             st.caption(f"状态切换: {summary['switch_count']}次 | 平均置信度: {summary['avg_confidence']:.1%}")
-        
+
         # v6: 预热期信息
         if "warmup_info" in result:
             warmup = result["warmup_info"]
@@ -1442,48 +1442,48 @@ def render_backtest(cfg, is_b0_18=True):
             nav_df["daily_return"] = nav_df["nav"].pct_change()
             nav_df["peak"] = nav_df["nav"].cummax()
             nav_df["drawdown"] = (nav_df["nav"] - nav_df["peak"]) / nav_df["peak"]
-            
+
             yearly_stats = []
             for year, group in nav_df.groupby("year"):
                 if len(group) < 5:  # 数据不足，跳过
                     continue
-                
+
                 nav_start = group["nav"].iloc[0]
                 nav_end = group["nav"].iloc[-1]
                 strategy_return = (nav_end / nav_start) - 1 if nav_start > 0 else 0
-                
+
                 # 基准收益
                 bench_return = 0
                 if "bench_return" in group.columns and group["bench_return"].notna().any():
                     bench_start = group["bench_return"].iloc[0]
                     bench_end = group["bench_return"].iloc[-1]
                     bench_return = bench_end - bench_start
-                
+
                 # 日收益率统计
                 daily_rets = group["daily_return"].dropna()
                 trading_days = len(daily_rets)
-                
+
                 # 夏普率
                 vol = daily_rets.std() * np.sqrt(252) if len(daily_rets) > 1 else 0
                 years = trading_days / 252
                 annual_ret = (1 + strategy_return) ** (1 / max(years, 0.01)) - 1
                 sharpe = annual_ret / vol if vol > 0 else 0
-                
+
                 # 胜率（正收益交易日占比）
                 win_days = (daily_rets > 0).sum()
                 win_rate_days = win_days / len(daily_rets) if len(daily_rets) > 0 else 0
-                
+
                 # 最大回撤
                 max_dd = group["drawdown"].min()
-                
+
                 # 交易次数
                 year_trades = 0
                 if not trades_df.empty and "date" in trades_df.columns:
                     year_trades = len(trades_df[pd.to_datetime(trades_df["date"]).dt.year == year])
-                
+
                 # 平均持仓
                 avg_hold = group["num_positions"].mean() if "num_positions" in group.columns else 0
-                
+
                 yearly_stats.append({
                     "年份": int(year),
                     "策略收益": strategy_return,
@@ -1496,10 +1496,10 @@ def render_backtest(cfg, is_b0_18=True):
                     "交易次数": year_trades,
                     "平均持仓": avg_hold,
                 })
-            
+
             if yearly_stats:
                 yearly = pd.DataFrame(yearly_stats)
-                
+
                 # 格式化显示
                 display_yearly = yearly.copy()
                 display_yearly["策略"] = display_yearly["策略收益"].apply(lambda x: format_pct(x, 1))
@@ -1511,7 +1511,7 @@ def render_backtest(cfg, is_b0_18=True):
                 display_yearly["最大回撤"] = display_yearly["最大回撤"].apply(lambda x: format_pct(x, 1))
                 display_yearly["交易次数"] = display_yearly["交易次数"].astype(int)
                 display_yearly["平均持仓"] = display_yearly["平均持仓"].apply(lambda x: f"{x:.1f}")
-                
+
                 # 按列顺序显示
                 cols = ["年份", "策略", "基准", "超额", "夏普率", "胜率", "波动率", "最大回撤", "交易次数", "平均持仓"]
                 st.dataframe(
@@ -1607,13 +1607,78 @@ def render_data_management():
 
                 try:
                     count = update_latest_data(db=db)
+                    if count > 0:
+                        st.success(f"✅ 已更新 {count} 条行情记录")
+                    else:
+                        st.info("暂无新行情数据或 AKShare 未安装")
+
+                    # 方案 A：行情更新后自动重新计算评分
+                    st.info("正在重新计算评分...")
+                    engine_calc = StrategyEngine(cfg)
+
+                    # 加载所有三类资产数据
+                    all_tickers = list(ALL_TRADABLE_ETFS.keys())
+                    market_df_all = db.get_market_data(ticker=all_tickers)
+
+                    # 分离三类资产
+                    stock_df = market_df_all[market_df_all['ticker'].isin(ETF_UNIVERSE.keys())].copy()
+                    fallback_df = market_df_all[market_df_all['ticker'].isin(FALLBACK_EQUITY_UNIVERSE.keys())].copy()
+                    defense_df = market_df_all[market_df_all['ticker'].isin(DEFENSE_UNIVERSE.keys())].copy()
+
+                    # 步骤1-2：行业ETF评分
+                    stock_scores = []
+                    for ticker in stock_df['ticker'].unique():
+                        ticker_df = stock_df[stock_df['ticker'] == ticker].copy()
+                        if len(ticker_df) >= 50:
+                            scored = engine_calc.calculate_total_score(ticker_df)
+                            stock_scores.append(scored)
+
+                    if not stock_scores:
+                        st.error("无有效行业ETF数据，跳过评分")
+                    else:
+                        scores_all = pd.concat(stock_scores, ignore_index=True)
+
+                        # 步骤3：行业ETF横截面动量排名
+                        scores_all = engine_calc.rank_all_momentum(scores_all)
+                        scores_all = engine_calc.compute_total_score(scores_all)
+
+                        # 步骤4：宽基补仓ETF评分
+                        fallback_scores = []
+                        for ticker in fallback_df['ticker'].unique():
+                            ticker_df = fallback_df[fallback_df['ticker'] == ticker].copy()
+                            if len(ticker_df) >= 50:
+                                scored = engine_calc.calculate_fallback_equity_score(ticker_df)
+                                fallback_scores.append(scored)
+
+                        if fallback_scores:
+                            fallback_scores_df = pd.concat(fallback_scores, ignore_index=True)
+                            fallback_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
+                            fallback_scores_df['total_score'] = fallback_scores_df[fallback_cols].fillna(0).sum(axis=1)
+                            scores_all = pd.concat([scores_all, fallback_scores_df], ignore_index=True)
+
+                        # 步骤5：防御资产评分
+                        defense_scores = []
+                        for ticker in defense_df['ticker'].unique():
+                            ticker_df = defense_df[defense_df['ticker'] == ticker].copy()
+                            if len(ticker_df) >= 50:
+                                scored = engine_calc.calculate_defense_score(ticker_df)
+                                defense_scores.append(scored)
+
+                        if defense_scores:
+                            defense_scores_df = pd.concat(defense_scores, ignore_index=True)
+                            defense_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
+                            defense_scores_df['total_score'] = defense_scores_df[defense_cols].fillna(0).sum(axis=1)
+                            scores_all = pd.concat([scores_all, defense_scores_df], ignore_index=True)
+
+                        # 确保 total_score 已填充
+                        scores_all['total_score'] = scores_all['total_score'].fillna(0)
+
+                        db.save_scores(scores_all)
+                        st.success(f"✅ 已计算并保存 {len(scores_all)} 条评分记录")
+
                     load_market_data.clear()
                     load_scores.clear()
                     load_stats.clear()
-                    if count > 0:
-                        st.success(f"✅ 已更新 {count} 条记录")
-                    else:
-                        st.info("暂无新数据或 AKShare 未安装")
                     st.rerun()
                 except ImportError as e:
                     st.error(f"AKShare 未安装: {e}")
@@ -1648,16 +1713,16 @@ def render_data_management():
             with st.spinner("重新计算所有评分..."):
                 try:
                     engine_calc = StrategyEngine(cfg)
-                    
+
                     # 加载所有三类资产数据
                     all_tickers = list(ALL_TRADABLE_ETFS.keys())
                     market_df_all = db.get_market_data(ticker=all_tickers)
-                    
+
                     # 分离三类资产
                     stock_df = market_df_all[market_df_all['ticker'].isin(ETF_UNIVERSE.keys())].copy()
                     fallback_df = market_df_all[market_df_all['ticker'].isin(FALLBACK_EQUITY_UNIVERSE.keys())].copy()
                     defense_df = market_df_all[market_df_all['ticker'].isin(DEFENSE_UNIVERSE.keys())].copy()
-                    
+
                     # 步骤1-2：行业ETF评分
                     stock_scores = []
                     for ticker in stock_df['ticker'].unique():
@@ -1665,17 +1730,17 @@ def render_data_management():
                         if len(ticker_df) >= 50:
                             scored = engine_calc.calculate_total_score(ticker_df)
                             stock_scores.append(scored)
-                    
+
                     if not stock_scores:
                         st.error("无有效行业ETF数据")
                         raise ValueError("无有效行业ETF数据")
-                    
+
                     scores_all = pd.concat(stock_scores, ignore_index=True)
-                    
+
                     # 步骤3：行业ETF横截面动量排名
                     scores_all = engine_calc.rank_all_momentum(scores_all)
                     scores_all = engine_calc.compute_total_score(scores_all)
-                    
+
                     # 步骤4：宽基补仓ETF评分
                     fallback_scores = []
                     for ticker in fallback_df['ticker'].unique():
@@ -1683,13 +1748,13 @@ def render_data_management():
                         if len(ticker_df) >= 50:
                             scored = engine_calc.calculate_fallback_equity_score(ticker_df)
                             fallback_scores.append(scored)
-                    
+
                     if fallback_scores:
                         fallback_scores_df = pd.concat(fallback_scores, ignore_index=True)
                         fallback_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
                         fallback_scores_df['total_score'] = fallback_scores_df[fallback_cols].fillna(0).sum(axis=1)
                         scores_all = pd.concat([scores_all, fallback_scores_df], ignore_index=True)
-                    
+
                     # 步骤5：防御资产评分
                     defense_scores = []
                     for ticker in defense_df['ticker'].unique():
@@ -1697,16 +1762,16 @@ def render_data_management():
                         if len(ticker_df) >= 50:
                             scored = engine_calc.calculate_defense_score(ticker_df)
                             defense_scores.append(scored)
-                    
+
                     if defense_scores:
                         defense_scores_df = pd.concat(defense_scores, ignore_index=True)
                         defense_cols = ['trend_score', 'confirm_score', 'momentum_rank', 'volume_score', 'vol_score']
                         defense_scores_df['total_score'] = defense_scores_df[defense_cols].fillna(0).sum(axis=1)
                         scores_all = pd.concat([scores_all, defense_scores_df], ignore_index=True)
-                    
+
                     # 确保 total_score 已填充
                     scores_all['total_score'] = scores_all['total_score'].fillna(0)
-                    
+
                     db.save_scores(scores_all)
                     load_scores.clear()
                     st.success(f"✅ 已计算并保存 {len(scores_all)} 条评分记录")
@@ -1950,26 +2015,26 @@ def render_strategy_config(cfg, is_b0_18=True):
         )
 
     st.subheader("ETF标的池")
-    
+
     st.info("B0-18 主线：只使用16只行业ETF + 2只防御资产。概念ETF（16只）和宽基补仓（4只）已封存，不参与日常轮动。")
-    
+
     # 行业ETF（B0-18 核心池）
     st.markdown("**行业ETF（B0-18 核心池 - 16只）**")
     stock_df = pd.DataFrame([{"代码": code, "名称": name} for code, name in ETF_UNIVERSE.items()])
     st.dataframe(stock_df, use_container_width=True, hide_index=True)
-    
+
     # 防御资产（B0-18 防御池）
     st.markdown("**防御资产（B0-18 防御池 - 2只）**")
     defense_df = pd.DataFrame([{"代码": code, "名称": name} for code, name in DEFENSE_UNIVERSE.items()])
     st.dataframe(defense_df, use_container_width=True, hide_index=True)
-    
+
     # 已封存池
     st.markdown("**已封存（不参与轮动）**")
     with st.expander("概念ETF + 宽基补仓（16只概念 + 4只宽基）"):
         fallback_df = pd.DataFrame([{"代码": code, "名称": name} for code, name in FALLBACK_EQUITY_UNIVERSE.items()])
         st.caption("宽基补仓：暂停使用，等待进一步验证")
         st.dataframe(fallback_df, use_container_width=True, hide_index=True)
-        
+
         from config import CONCEPT_UNIVERSE
         concept_df = pd.DataFrame([{"代码": code, "名称": name} for code, name in CONCEPT_UNIVERSE.items()])
         st.caption("概念ETF：已封存。测试显示加入后全区间收益从132%降至79%，为负贡献")
