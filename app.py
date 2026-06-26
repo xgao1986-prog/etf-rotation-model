@@ -2232,19 +2232,18 @@ def render_live_trading(cfg, is_b0_18=True):
         positions_check = assistant.load_positions()
         actual_holdings = positions_check[positions_check["ticker"] != "__CASH__"]
         if actual_holdings.empty:
-            st.warning("⚠️ 当前无持仓（只有现金），不生成交易建议。")
-            st.info("请先在「持仓管理」页面录入真实持仓，或运行：\n`py scripts/live_generate_trade_plan.py`")
+            st.info("📌 当前无持仓（只有现金），以下为首次建仓建议。")
         else:
             st.info("v0.1 调仓建议需通过命令行生成: py scripts/live_generate_trade_plan.py")
-            if os.path.exists(assistant.plan_path):
-                plan_df = pd.read_csv(assistant.plan_path)
-                if not plan_df.empty:
-                    st.dataframe(plan_df, use_container_width=True, hide_index=True)
-                    st.download_button("下载交易计划 CSV", plan_df.to_csv(index=False), file_name="latest_trade_plan.csv")
-                else:
-                    st.info("暂无调仓计划")
+        if os.path.exists(assistant.plan_path):
+            plan_df = pd.read_csv(assistant.plan_path)
+            if not plan_df.empty:
+                st.dataframe(plan_df, use_container_width=True, hide_index=True)
+                st.download_button("下载交易计划 CSV", plan_df.to_csv(index=False), file_name="latest_trade_plan.csv")
             else:
-                st.info("暂无调仓计划，请先运行命令行生成")
+                st.info("暂无调仓计划")
+        else:
+            st.info("暂无调仓计划，请先运行命令行生成")
 
     # ------------------------------------------------------------------
     # 子页4: 成交记录
