@@ -157,14 +157,36 @@ def build_sidebar_config():
     st.sidebar.title("⚙️ 策略控制台")
     st.sidebar.caption("参数变更会触发页面重算，回测需点击按钮重新运行。")
 
+    # ========== 处理待加载预设 ==========
+    # 在创建任何 widget 之前，检查是否有待加载的预设
+    if "pending_preset_name" in st.session_state:
+        preset_name = st.session_state.pop("pending_preset_name")
+        presets = load_presets()
+        if preset_name in presets:
+            preset = presets[preset_name]
+            # 将预设值写入各个 widget 的 session_state
+            # 权重
+            for dim, weight in preset.get("weights", {}).items():
+                st.session_state[f"slider_weight_{dim}"] = weight
+            # 入场阈值
+            st.session_state["slider_min_trend"] = preset.get("min_trend_score", 5)
+            st.session_state["slider_min_confirm"] = preset.get("min_confirm_score", 4)
+            st.session_state["slider_min_total"] = preset.get("min_total_score", 40)
+            # 持仓与风控
+            st.session_state["slider_max_holdings"] = preset.get("max_holdings", 5)
+            st.session_state["slider_max_per_etf"] = int(preset.get("max_position_per_etf", 0.20) * 100)
+            st.session_state["slider_stop_loss"] = int(preset.get("stop_loss", -0.08) * 100)
+            # 标记已加载
+            st.session_state["last_loaded_preset"] = preset_name
+
     with st.sidebar.expander("评分权重", expanded=True):
         raw_weights = {}
         col1, col2 = st.columns(2)
-        raw_weights["trend"] = col1.slider("趋势", 0.0, 1.0, 0.30, 0.05)
-        raw_weights["confirm"] = col2.slider("确认", 0.0, 1.0, 0.20, 0.05)
-        raw_weights["momentum"] = col1.slider("动量", 0.0, 1.0, 0.25, 0.05)
-        raw_weights["volume"] = col2.slider("成交量", 0.0, 1.0, 0.15, 0.05)
-        raw_weights["volatility"] = col1.slider("波动率", 0.0, 1.0, 0.10, 0.05)
+        raw_weights["trend"] = col1.slider("趋势", 0.0, 1.0, 0.30, 0.05, key="slider_weight_trend")
+        raw_weights["confirm"] = col2.slider("确认", 0.0, 1.0, 0.20, 0.05, key="slider_weight_confirm")
+        raw_weights["momentum"] = col1.slider("动量", 0.0, 1.0, 0.25, 0.05, key="slider_weight_momentum")
+        raw_weights["volume"] = col2.slider("成交量", 0.0, 1.0, 0.15, 0.05, key="slider_weight_volume")
+        raw_weights["volatility"] = col1.slider("波动率", 0.0, 1.0, 0.10, 0.05, key="slider_weight_volatility")
         weights, raw_total = normalize_weights(raw_weights)
         st.caption(f"输入合计 {raw_total:.2f}，已自动归一化用于实时评分。")
 
@@ -1928,7 +1950,16 @@ def render_strategy_config(cfg, is_b0_18=True):
         for i, (name, preset) in enumerate(presets.items()):
             with preset_cols[i % len(preset_cols)]:
                 is_current = (
-                    abs(preset.get("min_total_score", 0) - cfg["min_total_score"]) < 0.01
+                    abs(preset.get("weights", {}).get("trend", 0) - cfg["weights"]["trend"]) < 0.001
+                    and abs(preset.get("weights", {}).get("confirm", 0) - cfg["weights"]["confirm"]) < 0.001
+                    and abs(preset.get("weights", {}).get("momentum", 0) - cfg["weights"]["momentum"]) < 0.001
+                    and abs(preset.get("weights", {}).get("volume", 0) - cfg["weights"]["volume"]) < 0.001
+                    and abs(preset.get("weights", {}).get("volatility", 0) - cfg["weights"]["volatility"]) < 0.001
+                    and abs(preset.get("min_trend_score", 0) - cfg["min_trend_score"]) < 0.01
+                    and abs(preset.get("min_confirm_score", 0) - cfg["min_confirm_score"]) < 0.01
+                    and abs(preset.get("min_total_score", 0) - cfg["min_total_score"]) < 0.01
+                    and abs(preset.get("max_holdings", 0) - cfg["max_holdings"]) < 0.01
+                    and abs(preset.get("max_position_per_etf", 0) - cfg["max_position_per_etf"]) < 0.001
                     and abs(preset.get("stop_loss", 0) - cfg["stop_loss"]) < 0.001
                 )
                 border_color = "#1769aa" if is_current else "#e6edf5"
@@ -1951,14 +1982,8 @@ def render_strategy_config(cfg, is_b0_18=True):
                 btn_cols = st.columns(2)
                 with btn_cols[0]:
                     if st.button("加载", key=f"load_{name}", use_container_width=True):
-                        # 通过 session_state 修改侧边栏 widget 的值
-                        st.session_state["slider_min_total"] = preset.get("min_total_score", 40)
-                        st.session_state["slider_stop_loss"] = int(preset.get("stop_loss", -0.08) * 100)
-                        st.session_state["slider_max_holdings"] = preset.get("max_holdings", 5)
-                        st.session_state["slider_max_per_etf"] = int(preset.get("max_position_per_etf", 0.20) * 100)
-                        st.session_state["slider_min_trend"] = preset.get("min_trend_score", 5)
-                        st.session_state["slider_min_confirm"] = preset.get("min_confirm_score", 4)
-                        st.success(f"✅ 已加载 '{name}' 预设参数，请稍等页面刷新...")
+                        # 通过 pending_preset_name 机制加载，避免在 widget 创建后修改 session_state
+                        st.session_state["pending_preset_name"] = name
                         st.rerun()
                 with btn_cols[1]:
                     if st.button("删除", key=f"del_{name}", use_container_width=True):

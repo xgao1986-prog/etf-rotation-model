@@ -7,7 +7,7 @@ Usage:
     py scripts/live_generate_trade_plan.py --date 2026-06-26
 
 Features:
-    1. Run B0.4 signals to get target positions
+    1. Run B0.4 signals to get target positions (using plan_rebalance_v2_5)
     2. Read actual positions
     3. Generate trade plan by comparison
     4. Save CSV and Markdown report
@@ -21,6 +21,7 @@ from live_trading_assistant import LiveTradingAssistant
 from config import ETF_UNIVERSE, DEFENSE_UNIVERSE, build_config
 from strategy import StrategyEngine
 from database import ETFDatabase
+from rebalance_planner import plan_rebalance_v2_5
 import pandas as pd
 
 
@@ -29,7 +30,7 @@ SHARE_UNIT = 100
 
 def get_b0_4_signals(assistant, date, cfg):
     """
-    从数据库 daily_scores 读取最新评分，生成目标持仓。
+    从数据库 daily_scores 读取最新评分，使用 plan_rebalance_v2_5 生成目标持仓。
 
     参数:
         assistant: LiveTradingAssistant 实例
@@ -42,54 +43,54 @@ def get_b0_4_signals(assistant, date, cfg):
     db = ETFDatabase()
 
     # 读取最新评分
-    # 读取最新评分，只筛选 ETF_UNIVERSE（行业ETF）中的 ticker
     scores = db.get_scores()
     if scores.empty:
         print("WARN 数据库无评分数据，无法生成目标持仓")
-        return {}, {}
-
-    # 只保留行业ETF（排除宽基补仓和防御资产）
-    scores = scores[scores['ticker'].isin(ETF_UNIVERSE.keys())]
-    if scores.empty:
-        print("WARN 无行业ETF评分数据")
         return {}, {}
 
     # 取最新日期
     latest_date = scores['date'].max()
     latest = scores[scores['date'] == latest_date].copy()
 
-    # 筛选 qualified（total_score >= min_total_score）
+    # 筛选行业ETF候选（来自 ETF_UNIVERSE）
+    industry_scores = latest[latest['ticker'].isin(ETF_UNIVERSE.keys())]
     min_score = cfg.get('min_total_score', 40)
-    qualified = latest[latest['total_score'] >= min_score].sort_values('total_score', ascending=False)
+    qualified_industry = industry_scores[industry_scores['total_score'] >= min_score].sort_values('total_score', ascending=False)
+    industry_candidates = [(row['ticker'], float(row['total_score'])) for _, row in qualified_industry.iterrows()]
 
-    if qualified.empty:
-        print("WARN 最新日期无 qualified 评分，无法生成目标持仓")
-        return {}, {}
-
-    max_holdings = cfg.get('max_holdings', 5)
-    selected = qualified.head(max_holdings)
+    # 防御资产候选（来自 DEFENSE_UNIVERSE）
+    defense_scores = latest[latest['ticker'].isin(DEFENSE_UNIVERSE.keys())]
+    defense_candidates = [(row['ticker'], float(row['total_score'])) for _, row in defense_scores.iterrows()]
 
     print(f"OK 最新评分日期: {latest_date}")
-    print(f"OK 选中 {len(selected)} 只: {list(selected['ticker'].values)}")
+    print(f"OK 行业候选: {len(industry_candidates)} 只")
+    print(f"OK 防御候选: {len(defense_candidates)} 只")
 
-    # 计算总资产
+    # 读取当前持仓
     positions_df = assistant.load_positions()
-    cash_rows = positions_df[positions_df['ticker'] == '__CASH__']
-    total_asset = float(cash_rows.iloc[0]['market_value']) if not cash_rows.empty else 0.0
+    current_positions = {}
+    cash = 0.0
     for _, r in positions_df.iterrows():
-        if r['ticker'] != '__CASH__' and r['current_price'] > 0:
-            total_asset += r['market_value']
+        if r['ticker'] == '__CASH__':
+            cash = float(r['market_value'])
+        elif r['ticker'] != '__CASH__':
+            current_positions[r['ticker']] = int(r['shares'])
 
-    max_position = cfg.get('max_position_per_etf', 0.20)
-    target_amount = total_asset * max_position
-    print(f"OK 总资产: {total_asset:,.2f}, 单只目标金额: {target_amount:,.2f}")
+    # 计算 NAV
+    nav = cash
+    for t, s in current_positions.items():
+        price = float(positions_df[positions_df['ticker'] == t]['current_price'].iloc[0]) if not positions_df[positions_df['ticker'] == t].empty else 0
+        nav += s * price
 
-    # 获取最新价格
-    tickers = selected['ticker'].unique().tolist()
+    # 获取所有需要的价格（行业 + 防御 + 当前持仓）
+    all_tickers = set(
+        [t for t, _ in industry_candidates] +
+        [t for t, _ in defense_candidates] +
+        list(current_positions.keys())
+    )
     price_map = {}
-    # 将 Timestamp 转为字符串日期，避免 SQLite 字符串比较问题
     date_str = latest_date.strftime('%Y-%m-%d') if hasattr(latest_date, 'strftime') else str(latest_date)
-    for t in tickers:
+    for t in all_tickers:
         try:
             data = db.get_market_data(ticker=t, start_date=date_str, end_date=date_str)
             if not data.empty:
@@ -97,16 +98,43 @@ def get_b0_4_signals(assistant, date, cfg):
         except Exception:
             pass
 
+    # 从当前持仓补充价格
+    for _, r in positions_df.iterrows():
+        if r['ticker'] != '__CASH__' and r['ticker'] not in price_map and r['current_price'] > 0:
+            price_map[r['ticker']] = r['current_price']
+
+    # 使用 plan_rebalance_v2_5 生成调仓计划
+    max_holdings = cfg.get('max_holdings', 5)
+    max_position = cfg.get('max_position_per_etf', 0.20)
+
+    trades, final_state = plan_rebalance_v2_5(
+        nav=nav,
+        cash=cash,
+        current_positions=current_positions,
+        industry_candidates=industry_candidates,
+        defense_candidates=defense_candidates,
+        prices=price_map,
+        industry_tickers=set(ETF_UNIVERSE.keys()),
+        defense_tickers=set(DEFENSE_UNIVERSE.keys()),
+        max_industry_holdings=max_holdings,
+        max_defense_holdings=2,
+        max_total_holdings=max_holdings,
+        max_position_per_etf=max_position,
+        max_total_position=1.0,
+        commission_rate=0.0003,
+        min_commission=5.0,
+        lot_size=100,
+        defense_enabled=True,
+    )
+
+    # 从 final_state 提取目标持仓
     target_positions = {}
-    for _, row in selected.iterrows():
-        t = row['ticker']
-        price = price_map.get(t, 0)
-        if price > 0 and target_amount > 0:
-            shares = int(target_amount / price // SHARE_UNIT * SHARE_UNIT)
+    for t, shares in final_state.items():
+        if t != '__CASH__' and shares > 0:
             target_positions[t] = shares
-        else:
-            target_positions[t] = 0
-            print(f"WARN {t}: 价格缺失或目标金额为零，目标股数设为 0")
+
+    print(f"OK 总资产: {nav:,.2f}, 现金: {cash:,.2f}")
+    print(f"OK 目标持仓: {target_positions}")
 
     return target_positions, price_map
 
