@@ -17,9 +17,9 @@ import argparse, os, sys
 sys.path.insert(0, "src")
 
 from datetime import datetime
+from typing import Dict, Tuple, Optional
 from live_trading_assistant import LiveTradingAssistant
 from config import ETF_UNIVERSE, DEFENSE_UNIVERSE, build_config
-from strategy import StrategyEngine
 from database import ETFDatabase
 from rebalance_planner import plan_rebalance_v2_5
 import pandas as pd
@@ -28,29 +28,40 @@ import pandas as pd
 SHARE_UNIT = 100
 
 
-def get_b0_4_signals(assistant, date, cfg):
+def get_b0_4_signals(assistant, date, cfg, db=None):
     """
-    从数据库 daily_scores 读取最新评分，使用 plan_rebalance_v2_5 生成目标持仓。
+    从数据库读取不晚于 date 的最新评分，使用 plan_rebalance_v2_5 生成目标持仓。
 
     参数:
         assistant: LiveTradingAssistant 实例
-        date: 日期字符串（用于价格查询）
+        date: 日期字符串（YYYY-MM-DD），只使用不晚于此日期的评分和行情
         cfg: 策略配置
+        db: 可选的 ETFDatabase 实例（测试中注入 mock）
 
     返回:
         (target_positions, price_map)
+        target_positions: {ticker: int_shares}，只包含 ETF 代码和正整数股数
+        price_map: {ticker: float_price}
     """
-    db = ETFDatabase()
+    if db is None:
+        db = ETFDatabase()
 
-    # 读取最新评分
+    # 读取评分
     scores = db.get_scores()
     if scores.empty:
         print("WARN 数据库无评分数据，无法生成目标持仓")
         return {}, {}
 
-    # 取最新日期
-    latest_date = scores['date'].max()
-    latest = scores[scores['date'] == latest_date].copy()
+    # 只使用不晚于指定日期的评分
+    scores_dates = pd.to_datetime(scores['date'])
+    target_dt = pd.to_datetime(date)
+    eligible = scores[scores_dates <= target_dt]
+    if eligible.empty:
+        print(f"WARN {date} 及之前无评分数据")
+        return {}, {}
+
+    latest_date = eligible['date'].max()
+    latest = eligible[eligible['date'] == latest_date].copy()
 
     # 筛选行业ETF候选（来自 ETF_UNIVERSE）
     industry_scores = latest[latest['ticker'].isin(ETF_UNIVERSE.keys())]
@@ -62,7 +73,7 @@ def get_b0_4_signals(assistant, date, cfg):
     defense_scores = latest[latest['ticker'].isin(DEFENSE_UNIVERSE.keys())]
     defense_candidates = [(row['ticker'], float(row['total_score'])) for _, row in defense_scores.iterrows()]
 
-    print(f"OK 最新评分日期: {latest_date}")
+    print(f"OK 评分日期: {latest_date} (请求日期上限: {date})")
     print(f"OK 行业候选: {len(industry_candidates)} 只")
     print(f"OK 防御候选: {len(defense_candidates)} 只")
 
@@ -127,10 +138,12 @@ def get_b0_4_signals(assistant, date, cfg):
         defense_enabled=True,
     )
 
-    # 从 final_state 提取目标持仓
+    # 从 final_state['positions'] 提取目标持仓
+    # final_state 结构: {'cash': float, 'positions': {ticker: int}, ...}
     target_positions = {}
-    for t, shares in final_state.items():
-        if t != '__CASH__' and shares > 0:
+    positions = final_state.get('positions', {})
+    for t, shares in positions.items():
+        if t != '__CASH__' and isinstance(shares, int) and shares > 0:
             target_positions[t] = shares
 
     print(f"OK 总资产: {nav:,.2f}, 现金: {cash:,.2f}")
