@@ -80,9 +80,11 @@ def get_b0_4_signals(assistant, date, cfg):
     # 获取最新价格
     tickers = selected['ticker'].unique().tolist()
     price_map = {}
+    # 将 Timestamp 转为字符串日期，避免 SQLite 字符串比较问题
+    date_str = latest_date.strftime('%Y-%m-%d') if hasattr(latest_date, 'strftime') else str(latest_date)
     for t in tickers:
         try:
-            data = db.get_market_data(ticker=t, start_date=latest_date, end_date=latest_date)
+            data = db.get_market_data(ticker=t, start_date=date_str, end_date=date_str)
             if not data.empty:
                 price_map[t] = data['close'].iloc[-1]
         except Exception:
