@@ -29,59 +29,75 @@ SHARE_UNIT = 100
 
 def get_b0_4_signals(assistant, date, cfg):
     """
-    Run B0.4 signals, return target positions {ticker: target_shares}.
+    从数据库 daily_scores 读取最新评分，生成目标持仓。
 
-    Logic:
-    - Read total asset from actual positions
-    - Each recommended ETF target amount = total_asset * max_position_per_etf (default 20%)
-    - Target shares = target_amount / current_price, floor to 100 multiples
+    参数:
+        assistant: LiveTradingAssistant 实例
+        date: 日期字符串（用于价格查询）
+        cfg: 策略配置
+
+    返回:
+        (target_positions, price_map)
     """
     db = ETFDatabase()
-    tickers = list(ETF_UNIVERSE.keys()) + list(DEFENSE_UNIVERSE.keys())
 
-    market_df = db.get_market_data(ticker=tickers)
-    if market_df.empty:
-        return {}
+    # 读取最新评分
+    scores = db.get_scores()
+    if scores.empty:
+        print("WARN 数据库无评分数据，无法生成目标持仓")
+        return {}, {}
 
-    engine = StrategyEngine(cfg)
-    signals = engine.generate_signals(market_df)
-    if signals.empty:
-        return {}
+    # 取最新日期
+    latest_date = scores['date'].max()
+    latest = scores[scores['date'] == latest_date].copy()
 
-    latest = signals[signals["date"] == signals["date"].max()].copy()
-    latest = latest[latest["qualified"]].sort_values("total_score", ascending=False)
+    # 筛选 qualified（total_score >= min_total_score）
+    min_score = cfg.get('min_total_score', 40)
+    qualified = latest[latest['total_score'] >= min_score].sort_values('total_score', ascending=False)
 
-    max_holdings = cfg.get("max_holdings", 5)
-    selected = latest.head(max_holdings)
+    if qualified.empty:
+        print("WARN 最新日期无 qualified 评分，无法生成目标持仓")
+        return {}, {}
 
+    max_holdings = cfg.get('max_holdings', 5)
+    selected = qualified.head(max_holdings)
+
+    print(f"OK 最新评分日期: {latest_date}")
+    print(f"OK 选中 {len(selected)} 只: {list(selected['ticker'].values)}")
+
+    # 计算总资产
     positions_df = assistant.load_positions()
-    cash_rows = positions_df[positions_df["ticker"] == "__CASH__"]
-    total_asset = float(cash_rows.iloc[0]["market_value"]) if not cash_rows.empty else 0.0
+    cash_rows = positions_df[positions_df['ticker'] == '__CASH__']
+    total_asset = float(cash_rows.iloc[0]['market_value']) if not cash_rows.empty else 0.0
     for _, r in positions_df.iterrows():
-        if r["ticker"] != "__CASH__" and r["current_price"] > 0:
-            total_asset += r["market_value"]
+        if r['ticker'] != '__CASH__' and r['current_price'] > 0:
+            total_asset += r['market_value']
 
-    max_position = cfg.get("max_position_per_etf", 0.20)
+    max_position = cfg.get('max_position_per_etf', 0.20)
     target_amount = total_asset * max_position
+    print(f"OK 总资产: {total_asset:,.2f}, 单只目标金额: {target_amount:,.2f}")
 
+    # 获取最新价格
+    tickers = selected['ticker'].unique().tolist()
     price_map = {}
-    for t in selected["ticker"].unique():
+    for t in tickers:
         try:
-            data = db.get_market_data(ticker=t, start_date=date, end_date=date)
+            data = db.get_market_data(ticker=t, start_date=latest_date, end_date=latest_date)
             if not data.empty:
-                price_map[t] = data["close"].iloc[-1]
+                price_map[t] = data['close'].iloc[-1]
         except Exception:
             pass
 
     target_positions = {}
     for _, row in selected.iterrows():
-        t = row["ticker"]
+        t = row['ticker']
         price = price_map.get(t, 0)
         if price > 0 and target_amount > 0:
             shares = int(target_amount / price // SHARE_UNIT * SHARE_UNIT)
             target_positions[t] = shares
         else:
             target_positions[t] = 0
+            print(f"WARN {t}: 价格缺失或目标金额为零，目标股数设为 0")
 
     return target_positions, price_map
 
@@ -99,7 +115,7 @@ def main():
     parser.add_argument("--plan-path", type=str, default=None)
     args = parser.parse_args()
 
-    cfg, _ = build_config()
+    cfg = build_config()
     assistant = LiveTradingAssistant(
         positions_path=args.positions_path,
         trades_path=args.trades_path,
