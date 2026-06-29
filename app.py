@@ -176,30 +176,30 @@ def build_sidebar_config():
             st.caption("✅ 全部5个因子参与评分")
 
     with st.sidebar.expander("入场阈值", expanded=True):
-        min_trend = st.slider("趋势最低分", 0, 30, STRATEGY_CONFIG["min_trend_score"])
-        min_confirm = st.slider("确认最低分", 0, 20, STRATEGY_CONFIG["min_confirm_score"])
-        min_total = st.slider("总评分最低分", 0, 100, STRATEGY_CONFIG["min_total_score"])
+        min_trend = st.slider("趋势最低分", 0, 30, STRATEGY_CONFIG["min_trend_score"], key="slider_min_trend")
+        min_confirm = st.slider("确认最低分", 0, 20, STRATEGY_CONFIG["min_confirm_score"], key="slider_min_confirm")
+        min_total = st.slider("总评分最低分", 0, 100, STRATEGY_CONFIG["min_total_score"], key="slider_min_total")
 
     with st.sidebar.expander("持仓与风控", expanded=True):
-        max_holdings = st.slider("最大持仓数", 1, 10, STRATEGY_CONFIG["max_holdings"])
-        max_per_etf = st.slider("单只上限(%)", 5, 50, int(STRATEGY_CONFIG["max_position_per_etf"] * 100)) / 100
-        stop_loss = st.slider("止损线(%)", -20, -1, int(STRATEGY_CONFIG["stop_loss"] * 100)) / 100
+        max_holdings = st.slider("最大持仓数", 1, 10, STRATEGY_CONFIG["max_holdings"], key="slider_max_holdings")
+        max_per_etf = st.slider("单只上限(%)", 5, 50, int(STRATEGY_CONFIG["max_position_per_etf"] * 100), key="slider_max_per_etf") / 100
+        stop_loss = st.slider("止损线(%)", -20, -1, int(STRATEGY_CONFIG["stop_loss"] * 100), key="slider_stop_loss") / 100
 
         # 止损模式选择
         stop_loss_mode_options = {"固定止损": "fixed", "ATR动态止损": "atr", "不止损": "none"}
         stop_loss_mode_display = list(stop_loss_mode_options.keys())
-        stop_loss_mode_selected = st.selectbox("止损模式", stop_loss_mode_display, index=0)
+        stop_loss_mode_selected = st.selectbox("止损模式", stop_loss_mode_display, index=0, key="select_stop_loss_mode")
         stop_loss_mode = stop_loss_mode_options[stop_loss_mode_selected]
 
         atr_multiplier = 2.0
         if stop_loss_mode == "atr":
-            atr_multiplier = st.slider("ATR倍数", 1.0, 5.0, 2.0, 0.5)
+            atr_multiplier = st.slider("ATR倍数", 1.0, 5.0, 2.0, 0.5, key="slider_atr_multiplier")
 
-        use_timing = st.checkbox("启用大盘择时", False)  # 默认关闭，回测数据显示关闭后收益更高
+        use_timing = st.checkbox("启用大盘择时", False, key="checkbox_use_timing")  # 默认关闭，回测数据显示关闭后收益更高
 
         st.divider()
         st.caption("宽基补仓")
-        fallback_equity_enabled = st.checkbox("启用宽基补仓（沪深300/中证500/创业板/科创50）", False, help="行业ETF选不满时，用宽基ETF填充剩余仓位。回测显示当前参数下可能为负贡献。")
+        fallback_equity_enabled = st.checkbox("启用宽基补仓（沪深300/中证500/创业板/科创50）", False, help="行业ETF选不满时，用宽基ETF填充剩余仓位。回测显示当前参数下可能为负贡献。", key="checkbox_fallback")
 
         st.divider()
         st.caption("调仓规则")
@@ -207,12 +207,12 @@ def build_sidebar_config():
         # 调仓频率
         freq_options = {"每周": "weekly", "双周": "biweekly", "月度": "monthly"}
         freq_display = list(freq_options.keys())
-        freq_selected = st.selectbox("调仓频率", freq_display, index=0)
+        freq_selected = st.selectbox("调仓频率", freq_display, index=0, key="select_freq")
         rebalance_freq = freq_options[freq_selected]
 
         # 调仓日
         weekday_options = ["周一", "周二", "周三", "周四", "周五"]
-        rebalance_weekday = st.selectbox("调仓日", weekday_options, index=3)
+        rebalance_weekday = st.selectbox("调仓日", weekday_options, index=3, key="select_weekday")
         rebalance_weekday = weekday_options.index(rebalance_weekday)
 
     # ========== 实验性因子参数 (v1.1) ==========
@@ -1951,7 +1951,15 @@ def render_strategy_config(cfg, is_b0_18=True):
                 btn_cols = st.columns(2)
                 with btn_cols[0]:
                     if st.button("加载", key=f"load_{name}", use_container_width=True):
-                        st.info(f"请手动在侧边栏调整参数以匹配 '{name}' 预设（Streamlit 限制无法自动同步 slider）")
+                        # 通过 session_state 修改侧边栏 widget 的值
+                        st.session_state["slider_min_total"] = preset.get("min_total_score", 40)
+                        st.session_state["slider_stop_loss"] = int(preset.get("stop_loss", -0.08) * 100)
+                        st.session_state["slider_max_holdings"] = preset.get("max_holdings", 5)
+                        st.session_state["slider_max_per_etf"] = int(preset.get("max_position_per_etf", 0.20) * 100)
+                        st.session_state["slider_min_trend"] = preset.get("min_trend_score", 5)
+                        st.session_state["slider_min_confirm"] = preset.get("min_confirm_score", 4)
+                        st.success(f"✅ 已加载 '{name}' 预设参数，请稍等页面刷新...")
+                        st.rerun()
                 with btn_cols[1]:
                     if st.button("删除", key=f"del_{name}", use_container_width=True):
                         del presets[name]

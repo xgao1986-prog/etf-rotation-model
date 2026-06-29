@@ -42,9 +42,16 @@ def get_b0_4_signals(assistant, date, cfg):
     db = ETFDatabase()
 
     # 读取最新评分
+    # 读取最新评分，只筛选 ETF_UNIVERSE（行业ETF）中的 ticker
     scores = db.get_scores()
     if scores.empty:
         print("WARN 数据库无评分数据，无法生成目标持仓")
+        return {}, {}
+
+    # 只保留行业ETF（排除宽基补仓和防御资产）
+    scores = scores[scores['ticker'].isin(ETF_UNIVERSE.keys())]
+    if scores.empty:
+        print("WARN 无行业ETF评分数据")
         return {}, {}
 
     # 取最新日期
