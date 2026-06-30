@@ -106,3 +106,66 @@ def test_account_config_is_immutable(service):
     )
     with pytest.raises(RuntimeError, match="immutable"):
         service.replace_config("acct-fixed", {"max_holdings": 4})
+
+
+def test_append_same_order_twice_is_rejected(service):
+    service.create_account(
+        AccountCreate(
+            account_id="acct-order",
+            name="Order account",
+            account_type=AccountType.COMPARISON,
+            strategy_name="B0.4",
+            strategy_config={"max_holdings": 5},
+            initial_capital=1_000_000,
+            start_mode=StartMode.CASH,
+            start_date="2026-06-29",
+        )
+    )
+    order = {
+        "order_id": "order-1",
+        "dedupe_key": "acct-order:2026-07-02:512400.SH:BUY",
+        "account_id": "acct-order",
+        "signal_date": "2026-07-02",
+        "trade_date": "2026-07-03",
+        "ticker": "512400.SH",
+        "action": "BUY",
+        "current_shares": 0,
+        "target_shares": 100,
+        "delta_shares": 100,
+        "reference_price": 1.0,
+        "reason": "B0.4 selected",
+        "status": "PENDING",
+    }
+    service.append_order(order)
+    with pytest.raises(RuntimeError, match="duplicate ledger event"):
+        service.append_order(order)
+
+
+def test_reconcile_detects_bad_nav(service):
+    service.create_account(
+        AccountCreate(
+            account_id="acct-reconcile",
+            name="Reconcile",
+            account_type=AccountType.COMPARISON,
+            strategy_name="B0.4",
+            strategy_config={"max_holdings": 5},
+            initial_capital=1_000_000,
+            start_mode=StartMode.CASH,
+            start_date="2026-06-29",
+        )
+    )
+    assert service.reconcile("acct-reconcile", "2026-06-29")["ok"]
+    service.store.insert_nav(
+        {
+            "account_id": "acct-reconcile",
+            "nav_date": "2026-06-30",
+            "cash": 900_000,
+            "positions_value": 50_000,
+            "nav": 1_000_000,
+            "data_date": "2026-06-30",
+            "created_at": "2026-06-30T16:00:00",
+        }
+    )
+    result = service.reconcile("acct-reconcile", "2026-06-30")
+    assert not result["ok"]
+    assert result["difference"] == -50_000

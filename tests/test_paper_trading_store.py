@@ -94,3 +94,25 @@ def test_config_snapshot_cannot_be_updated(store):
                 """,
                 ('{"max_holdings":4}', "changed", "acct-1"),
             )
+
+
+def test_duplicate_trade_is_rejected(store):
+    seed_account(store, "acct-trade")
+    trade = {
+        "trade_id": "trade-1",
+        "dedupe_key": "acct-trade:2026-07-03:512400.SH:BUY",
+        "order_id": None,
+        "account_id": "acct-trade",
+        "trade_date": "2026-07-03",
+        "ticker": "512400.SH",
+        "action": "BUY",
+        "shares": 100,
+        "price": 1.0,
+        "commission": 5.0,
+        "source": "SIMULATED",
+        "created_at": "2026-07-03T09:30:00",
+    }
+    store.append_trade(trade)
+    duplicate = dict(trade, trade_id="trade-2")
+    with pytest.raises(DuplicateLedgerEvent):
+        store.append_trade(duplicate)

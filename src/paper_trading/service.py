@@ -10,6 +10,7 @@ from .models import (
     canonical_config,
     config_hash,
 )
+from .store import DuplicateLedgerEvent
 
 
 class PaperTradingService:
@@ -88,3 +89,35 @@ class PaperTradingService:
         raise RuntimeError(
             "account configuration is immutable; copy to a new account"
         )
+
+    def append_order(self, order):
+        row = dict(order)
+        row["created_at"] = datetime.now().isoformat(timespec="seconds")
+        try:
+            self.store.append_order(row)
+        except DuplicateLedgerEvent as exc:
+            raise RuntimeError(f"duplicate ledger event: {exc}") from exc
+
+    def reconcile(self, account_id, nav_date):
+        nav = self.store.get_nav(account_id, nav_date)
+        if nav is None:
+            raise KeyError(f"missing NAV: {account_id} {nav_date}")
+        expected = nav["cash"] + nav["positions_value"]
+        difference = expected - nav["nav"]
+        return {
+            "account_id": account_id,
+            "nav_date": nav_date,
+            "expected_nav": expected,
+            "recorded_nav": nav["nav"],
+            "difference": difference,
+            "ok": abs(difference) <= self.NAV_TOLERANCE,
+        }
+
+    def list_accounts(self):
+        return self.store.list_accounts()
+
+    def get_account(self, account_id):
+        account = self.store.get_account(account_id)
+        if account is None:
+            raise KeyError(account_id)
+        return account

@@ -132,6 +132,71 @@ class PaperTradingStore:
         finally:
             conn.close()
 
+    def append_order(self, row):
+        try:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO paper_orders (
+                        order_id, dedupe_key, account_id, signal_date,
+                        trade_date, ticker, action, current_shares,
+                        target_shares, delta_shares, reference_price,
+                        reason, status, created_at
+                    ) VALUES (
+                        :order_id, :dedupe_key, :account_id, :signal_date,
+                        :trade_date, :ticker, :action, :current_shares,
+                        :target_shares, :delta_shares, :reference_price,
+                        :reason, :status, :created_at
+                    )
+                    """,
+                    row,
+                )
+        except sqlite3.IntegrityError as exc:
+            if "dedupe_key" in str(exc):
+                raise DuplicateLedgerEvent(row["dedupe_key"]) from exc
+            raise
+
+    def append_trade(self, row):
+        try:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO paper_trades (
+                        trade_id, dedupe_key, order_id, account_id,
+                        trade_date, ticker, action, shares, price,
+                        commission, source, created_at
+                    ) VALUES (
+                        :trade_id, :dedupe_key, :order_id, :account_id,
+                        :trade_date, :ticker, :action, :shares, :price,
+                        :commission, :source, :created_at
+                    )
+                    """,
+                    row,
+                )
+        except sqlite3.IntegrityError as exc:
+            if "dedupe_key" in str(exc):
+                raise DuplicateLedgerEvent(row["dedupe_key"]) from exc
+            raise
+
+    def list_positions(self, account_id, as_of_date):
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM paper_positions
+                WHERE account_id = ? AND as_of_date = ?
+                ORDER BY ticker
+                """,
+                (account_id, as_of_date),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_accounts(self):
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_accounts ORDER BY created_at, account_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def create_account_snapshot(self, account_row, position_rows, nav_row):
         with self.connect() as conn:
             conn.execute(
