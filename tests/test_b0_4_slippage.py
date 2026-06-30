@@ -1,18 +1,20 @@
 """
-B0.4 单变量滑点敏感性测试 v2
+B0.4 单变量滑点敏感性测试 v2（冻结快照版）
 
 要求：
-1. 0bp 精确复现 B0.4
-2. 所有规划 BUY 订单在滑点下可执行，不得被静默跳过
-3. 买入价格上调、卖出价格下调
-4. NAV 随滑点递减
-5. STOP_LOSS 单独统计
-6. 年化使用回测引擎值（非总收益/年数）
-7. 每日现金+持仓市值=NAV 恒等式
+1. 使用 B0.4 冻结快照，不依赖持续更新中的数据库。
+2. 0bp 精确复现 B0.4（NAV=2,761,288.07，交易804笔）。
+3. 所有规划 BUY 订单在滑点下可执行，不得被静默跳过。
+4. 买入价格上调、卖出价格下调。
+5. NAV 随滑点递减。
+6. STOP_LOSS 单独统计。
+7. 年化使用回测引擎值（非总收益/年数）。
+8. 每日现金+持仓市值=NAV 恒等式。
 """
 
 import sys
 import os
+import hashlib
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(root, "src"))
@@ -21,24 +23,73 @@ import unittest
 import pandas as pd
 
 from config import build_config, BENCHMARK, ETF_UNIVERSE, DEFENSE_UNIVERSE
-from database import ETFDatabase
 from backtest import BacktestEngine
+
+# 冻结快照路径
+FROZEN_SNAPSHOT_PATH = os.path.join(
+    root, "data", "snapshots", "B0_4_candidate_data_20260621_210815.csv"
+)
+# 冻结快照 SHA-256（不得修改快照文件）
+FROZEN_SNAPSHOT_SHA256 = "dbdb041d1269c50ec32fe30da4986d650f57daef412b7c8d2371d9eeba367d13"
+
+
+def _load_frozen_snapshot():
+    """从冻结快照加载数据，并校验 SHA-256。"""
+    if not os.path.exists(FROZEN_SNAPSHOT_PATH):
+        raise FileNotFoundError(
+            f"冻结快照不存在: {FROZEN_SNAPSHOT_PATH}. "
+            f"B0.4 冻结基线测试必须使用固定快照，不能读取当前数据库。"
+        )
+
+    with open(FROZEN_SNAPSHOT_PATH, "rb") as f:
+        actual_hash = hashlib.sha256(f.read()).hexdigest()
+
+    if actual_hash != FROZEN_SNAPSHOT_SHA256:
+        raise AssertionError(
+            f"冻结快照 SHA-256 不匹配。\n"
+            f"预期: {FROZEN_SNAPSHOT_SHA256}\n"
+            f"实际: {actual_hash}\n"
+            f"快照文件已被修改或不是 B0.4 冻结基线。"
+        )
+
+    df = pd.read_csv(FROZEN_SNAPSHOT_PATH)
+    # 确保 date 列为 datetime 类型，与数据库查询结果一致
+    df['date'] = pd.to_datetime(df['date'])
+
+    # 筛选回测引擎需要的列
+    cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume']
+    df = df[cols]
+
+    return df
+
+
+def _load_frozen_data():
+    """加载冻结快照并拆分为 market_df 和 bench_df。"""
+    df = _load_frozen_snapshot()
+
+    etf_tickers = set(ETF_UNIVERSE.keys()) | set(DEFENSE_UNIVERSE.keys())
+    market_df = df[df['ticker'].isin(etf_tickers)].copy()
+    bench_df = df[df['ticker'] == BENCHMARK].copy()
+
+    if market_df.empty:
+        raise ValueError("冻结快照中未找到 ETF 数据")
+    if bench_df.empty:
+        raise ValueError("冻结快照中未找到基准数据")
+
+    return market_df, bench_df
 
 
 class TestSlippageV2(unittest.TestCase):
-    """B0.4 单变量滑点敏感性测试 v2。"""
+    """B0.4 单变量滑点敏感性测试 v2（冻结快照版）。"""
 
     @classmethod
     def setUpClass(cls):
-        """加载一次数据，供所有测试使用。"""
+        """从冻结快照加载一次数据，供所有测试使用。"""
         cfg = build_config()
         cfg['as_of_date'] = '2026-06-18'
         cls.cfg = cfg
 
-        db = ETFDatabase()
-        etf_tickers = list(ETF_UNIVERSE.keys()) + list(DEFENSE_UNIVERSE.keys())
-        cls.market_df = db.get_market_data(ticker=etf_tickers)
-        cls.bench_df = db.get_market_data(ticker=BENCHMARK)
+        cls.market_df, cls.bench_df = _load_frozen_data()
 
     def _run_backtest(self, slippage_bps):
         """运行回测并返回结果。"""
@@ -58,7 +109,7 @@ class TestSlippageV2(unittest.TestCase):
         self.assertEqual(total_trades, 804)
 
     def test_planned_buys_are_executable(self):
-        """所有规划 BUY 订单在滑点下必须可执行，不得被静默跳过（先写失败测试）。"""
+        """所有规划 BUY 订单在滑点下必须可执行，不得被静默跳过。"""
         r = self._run_backtest(3)
         engine = r['engine']
         skipped = getattr(engine, '_skipped_buys', [])
@@ -129,8 +180,6 @@ class TestSlippageV2(unittest.TestCase):
         stop_count = len(trades[trades['action'] == 'STOP_LOSS'])
         combined_sell = len(trades[trades['action'].isin(['SELL', 'STOP_LOSS'])])
 
-        # result['sell_count'] 包含 SELL + STOP_LOSS（这是回测引擎的现有行为）
-        # 但我们需要验证 STOP_LOSS 是独立存在的
         self.assertGreater(stop_count, 0, "应有止损交易")
         self.assertEqual(combined_sell, sell_count + stop_count,
             "SELL 和 STOP_LOSS 应无重叠")
@@ -143,14 +192,11 @@ class TestSlippageV2(unittest.TestCase):
         nav_df = r['nav_df']
         years = len(nav_df) / 252
 
-        # 年化 ≠ 总收益 / 年数
         naive_annual = total_return / years if years > 0 else 0
         self.assertNotAlmostEqual(annual_return, naive_annual, delta=0.001,
             msg="年化必须使用复利公式，不是总收益除以年数")
 
-        # 年化应使用引擎的复利计算
         self.assertGreater(annual_return, 0)
-        # 验证：annual_return ≈ (1 + total_return)^(1/years) - 1
         expected = (1 + total_return) ** (1 / years) - 1 if years > 0 and total_return > -1 else 0
         self.assertAlmostEqual(annual_return, expected, delta=0.001)
 
@@ -164,6 +210,17 @@ class TestSlippageV2(unittest.TestCase):
                 row['nav'], expected_nav, delta=1.0,
                 msg=f"日期 {row['date']}: cash({row['cash']}) + positions({row['positions_value']}) != nav({row['nav']})"
             )
+
+    def test_snapshot_hash_matches(self):
+        """冻结快照 SHA-256 必须匹配预期值。"""
+        # _load_frozen_snapshot 已在 setUpClass 中调用，若哈希不匹配会抛出 AssertionError。
+        # 此测试显式验证哈希值，使失败原因在测试报告中更明确。
+        with open(FROZEN_SNAPSHOT_PATH, "rb") as f:
+            actual_hash = hashlib.sha256(f.read()).hexdigest()
+        self.assertEqual(
+            actual_hash, FROZEN_SNAPSHOT_SHA256,
+            f"冻结快照 SHA-256 不匹配。预期: {FROZEN_SNAPSHOT_SHA256}, 实际: {actual_hash}"
+        )
 
 
 if __name__ == '__main__':
