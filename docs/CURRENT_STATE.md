@@ -4,7 +4,7 @@
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/paper-trading-v0.1`
 **当前版本**：v1.2.3
-**当前 HEAD**：`365a7f4` 及之后文档收口提交
+**当前 HEAD**：以 `git status` 为准
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）
 **数据截止**：2026-06-18
@@ -97,7 +97,7 @@
 
 - `tests/test_b0_data_admission.py`：8 passed（准入失败触发、mock 验证、权威上市日分离、SHA-256 格式）
 - `tests/test_app_b0_signature.py`：13 passed（默认签名、因子开关偏离、参数修改偏离）
-- `tests/test_b0_4_slippage.py`：8 passed（0bp 复现 NAV=2,761,288.07，3bp 无静默跳过，NAV 单调递减）
+- `tests/test_b0_4_slippage.py`：历史冻结数据验证曾 8 项通过；当前可变数据库下 `test_0bp_matches_baseline` 存在 NAV 漂移。原因是测试没有固定使用 B0.4 冻结快照。不得修改冻结 NAV，不得放宽误差。修复冻结快照测试入口是 Phase 2 开始前的独立前置任务。
 - `tests/test_v1_3_step6_dynamic_fifth_slot.py`：16 passed（LOO、配置、NaN 回退、regime 标签、B/C 勾稽）
 - `tests/test_live_trading.py`：26 passed（持仓、校验、止损、交易计划、报告生成）
 - `tests/test_live_daily_workflow.py`：6 passed（每日工作流、纸面日志）
