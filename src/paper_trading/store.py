@@ -132,6 +132,82 @@ class PaperTradingStore:
         finally:
             conn.close()
 
+    def create_account_snapshot(self, account_row, position_rows, nav_row):
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO paper_accounts (
+                    account_id, name, account_type, group_id, strategy_name,
+                    config_json, config_hash, initial_capital, start_mode,
+                    start_date, end_date, status, created_at, updated_at
+                ) VALUES (
+                    :account_id, :name, :account_type, :group_id, :strategy_name,
+                    :config_json, :config_hash, :initial_capital, :start_mode,
+                    :start_date, :end_date, :status, :created_at, :updated_at
+                )
+                """,
+                account_row,
+            )
+            if position_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO paper_positions (
+                        account_id, as_of_date, ticker, shares,
+                        cost_price, last_price, market_value
+                    ) VALUES (
+                        :account_id, :as_of_date, :ticker, :shares,
+                        :cost_price, :last_price, :market_value
+                    )
+                    """,
+                    position_rows,
+                )
+            conn.execute(
+                """
+                INSERT INTO paper_daily_nav (
+                    account_id, nav_date, cash, positions_value,
+                    nav, data_date, created_at
+                ) VALUES (
+                    :account_id, :nav_date, :cash, :positions_value,
+                    :nav, :data_date, :created_at
+                )
+                """,
+                nav_row,
+            )
+
+    def get_account(self, account_id):
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM paper_accounts WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def insert_nav(self, row):
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO paper_daily_nav (
+                    account_id, nav_date, cash, positions_value,
+                    nav, data_date, created_at
+                ) VALUES (
+                    :account_id, :nav_date, :cash, :positions_value,
+                    :nav, :data_date, :created_at
+                )
+                """,
+                row,
+            )
+
+    def get_nav(self, account_id, nav_date):
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM paper_daily_nav
+                WHERE account_id = ? AND nav_date = ?
+                """,
+                (account_id, nav_date),
+            ).fetchone()
+        return dict(row) if row else None
+
     def append_run(
         self,
         run_id,
