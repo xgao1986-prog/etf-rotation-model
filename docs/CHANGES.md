@@ -3070,11 +3070,11 @@ python scripts/phase6_7_holiday_rebalance_experiment.py
 - 支持现金、持仓市值和总资产勾稽。
 - 本阶段不包含自动数据更新、自动信号、界面、截图识别或券商连接。
 
-## 2026-06-30 — B0.4 冻结基线测试入口修复
+## 2026-06-30 — Paper Trading Phase 2：每日运行流程、止损检查、每周调仓、模拟成交
 
-- `tests/test_b0_4_slippage.py` 不再依赖持续更新中的数据库，改为从冻结快照读取数据。
-- 冻结快照：`data/snapshots/B0_4_candidate_data_20260621_210815.csv`。
-- 运行前校验 SHA-256，哈希不匹配时测试明确失败。
-- 0bp 复现：NAV 2,761,288.07，交易 804 笔（全部 9 项测试通过）。
-- 不修改冻结 NAV、不放宽 delta、不修改冻结快照、不修改当前数据库。
-- 不修改 B0.4 策略、参数、ETF 池和调仓引擎。
+- `src/paper_trading/runner.py`：新增每日估值、止损检查、每周调仓、模拟成交
+- 每日估值：更新持仓市值，记录 NAV 到 paper_daily_nav
+- 止损检查：每个交易日检查持仓，触发时生成 STOP_LOSS 订单
+- 每周调仓：周四生成信号，周五 T+1 开盘模拟成交
+- 模拟成交：计算佣金（max 0.03%, 5元），更新持仓和现金，同日去重
+- 新增 11 个 runner 测试，全部通过。26 Paper Trading + 30 live 测试无回归。
