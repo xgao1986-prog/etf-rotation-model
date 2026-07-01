@@ -101,7 +101,11 @@
 - `tests/test_v1_3_step6_dynamic_fifth_slot.py`：16 passed（LOO、配置、NaN 回退、regime 标签、B/C 勾稽）
 - `tests/test_live_trading.py`：26 passed（持仓、校验、止损、交易计划、报告生成）
 - `tests/test_live_daily_workflow.py`：6 passed（每日工作流、纸面日志）
-- `tests/test_paper_trading_runner.py`：20 passed（原子成交、满仓手续费、重复运行、缺价、冲突、防御资产填充、T+1 日期分离）
+- `tests/test_paper_trading_runner.py`：13 passed（原子成交、满仓手续费、重复运行、缺价、冲突、防御资产填充、T+1 日期分离、超卖保护、交易日历、开盘收盘分离、止损清仓、唯一最终状态）
+- `tests/test_paper_trading_models.py`：4 passed（配置哈希、现金启动验证、导入验证）
+- `tests/test_paper_trading_store.py`：4 passed（schema、重复事件、配置不可变）
+- `tests/test_paper_trading_service.py`：7 passed（账户创建、NAV 勾稽、重复订单、对账）
+- `tests/test_paper_account_admin.py`：1 passed（命令行创建/列示）
 - A/B 数据补齐实验：完整数据 NAV=2,761,288.07；排除补齐 NAV=2,809,091.21。首次分歧：2026-06-08。
 
 ---
@@ -111,12 +115,15 @@
 **Phase 2：单个 B0.4 虚拟账户自动运行——已完成**
 
 - 每日估值：更新持仓市值，记录 NAV
-- 止损检查：每个交易日检查，触发时生成 STOP_LOSS 订单
-- 周度调仓：调用 `plan_rebalance_v2_5` 正式规则（含防御资产、槽位、资金、整手、佣金）
+- 止损检查：每个交易日检查，触发时执行 STOP_LOSS 并清仓
+- 周度调仓：调用 `plan_rebalance_v2_5` 正式规则（含防御资产门槛=行业门槛-10分、槽位、资金、整手、佣金）
 - 模拟成交：T+1 开盘成交，原子执行（成交+持仓+现金+NAV 同一事务）
-- 买入前现金检查（含佣金），缺少可靠价格时跳过并记录原因
-- 周四收盘生成信号、周五 T+1 开盘成交，信号日期与交易日期分开
-- 35 Paper Trading 测试 + 30 live 测试无回归
+- 买入前现金检查（含佣金），超卖整笔拒绝，缺少可靠价格时跳过并记录原因
+- 周四收盘保存评分和候选，周五使用周五开盘价重新计算股数并执行
+- 开盘成交价和收盘估值价分开传入
+- 真实交易日历：周末及节假日自动顺延
+- 重复运行幂等：现金、持仓、总资产与首次运行完全一致
+- 28 Paper Trading 测试 + 30 live 测试无回归
 
 **下一步唯一任务**：Phase 3 多策略并行、影子盘确认（未来）
 

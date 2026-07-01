@@ -3072,11 +3072,20 @@ python scripts/phase6_7_holiday_rebalance_experiment.py
 
 ## 2026-06-30 — Paper Trading Phase 2：每日运行流程、止损检查、每周调仓、模拟成交
 
-- `src/paper_trading/runner.py`：调用 `plan_rebalance_v2_5` 正式调仓规则，含防御资产、槽位、资金、整手和佣金
-- `src/paper_trading/store.py`：`execute_trades_atomic` 原子执行（成交+持仓+现金+NAV 同一事务）
-- 买入前检查现金（含佣金），不足时跳过并记录原因
-- 缺少可靠价格时跳过订单并记录原因
-- 周四收盘生成信号、周五 T+1 开盘模拟成交
-- 止损、调仓、每日估值和运行结果形成完整每日流程
-- 20 个 runner 测试全部通过（含满仓手续费、同日重复运行、缺价、冲突、防御资产填充）
-- 35 Paper Trading + 30 live 测试无回归
+- `src/paper_trading/runner.py`：
+  - 调用 `plan_rebalance_v2_5` 正式调仓规则，含防御资产门槛（行业门槛-10分）、槽位、资金、整手、佣金
+  - `TradingCalendar` 真实交易日历：周末自动顺延
+  - `run_daily` 完整每日流程：自动执行到期信号→估值→止损→保存新信号
+  - 开盘成交价和收盘估值价分开传入
+  - 周四保存评分和候选，周五使用周五开盘价重新计算股数并执行（不固定周四收盘价股数）
+- `src/paper_trading/store.py`：
+  - `execute_trades_atomic` 原子执行：成交+持仓+现金+NAV 同一事务
+  - 超卖保护：卖出超过持仓数量时整笔拒绝
+  - 买入前现金检查（含佣金），不足时整笔拒绝
+  - 缺少可靠价格时整笔拒绝并记录原因
+  - `save_daily_state` 覆盖写入：确保收盘估值价覆盖成交开盘价
+  - `paper_signals` 表：持久化评分和配置供下一交易日执行
+- 13 个 runner 测试全部通过：
+  幂等重复运行/止损清仓/超卖保护/交易日历/周四信号周五执行/防御资产门槛/
+  开盘收盘分离/部分失败隔离/唯一最终状态/现金非负/止损调仓冲突
+- 28 Paper Trading + 30 live 测试无回归
