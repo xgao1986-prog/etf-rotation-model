@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 
 
 class DuplicateLedgerEvent(RuntimeError):
@@ -247,8 +248,218 @@ class PaperTradingStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def execute_trades_atomic(self, account_id, trade_date, orders, prices, commission_rate=0.0003, min_commission=5.0):
+        """
+        原子执行订单：在同一事务中写入成交、更新持仓、更新 NAV。
+        买入前检查现金（含佣金），不足时跳过该订单。
+        缺少可靠价格时跳过该订单。
+        返回: (executed_trades, skipped_reasons)
+        """
+        executed = []
+        skipped = []
+        now = datetime.now().isoformat(timespec="seconds")
+
+        with self.connect() as conn:
+            # 获取当前状态
+            prev_row = conn.execute(
+                """
+                SELECT MAX(nav_date) as prev_date
+                FROM paper_daily_nav
+                WHERE account_id = ? AND nav_date < ?
+                """,
+                (account_id, trade_date),
+            ).fetchone()
+            prev_date = prev_row["prev_date"] if prev_row and prev_row["prev_date"] else None
+            if prev_date is None:
+                # 回退到 start_date
+                acct_row = conn.execute(
+                    "SELECT start_date FROM paper_accounts WHERE account_id = ?",
+                    (account_id,),
+                ).fetchone()
+                prev_date = acct_row["start_date"] if acct_row else trade_date
+
+            nav_row = conn.execute(
+                "SELECT * FROM paper_daily_nav WHERE account_id = ? AND nav_date = ?",
+                (account_id, prev_date),
+            ).fetchone()
+            if nav_row is None:
+                raise KeyError(f"missing NAV: {account_id} {prev_date}")
+            cash = nav_row["cash"]
+
+            pos_rows = conn.execute(
+                "SELECT * FROM paper_positions WHERE account_id = ? AND as_of_date = ?",
+                (account_id, prev_date),
+            ).fetchall()
+            positions = {p["ticker"]: dict(p) for p in pos_rows}
+
+            for order in orders:
+                ticker = order["ticker"]
+                action = order["action"]
+                price = prices.get(ticker)
+                if price is None or price <= 0:
+                    skipped.append((order["order_id"], f"missing price for {ticker}"))
+                    continue
+
+                shares = abs(order["delta_shares"])
+                if shares <= 0:
+                    continue
+
+                commission = max(shares * price * commission_rate, min_commission)
+
+                if action == "BUY":
+                    cost = shares * price + commission
+                    if cash < cost:
+                        skipped.append((order["order_id"], f"insufficient cash: need {cost:.2f}, have {cash:.2f}"))
+                        continue
+                    cash -= cost
+                elif action in ("SELL", "STOP_LOSS"):
+                    cash += shares * price - commission
+                else:
+                    continue
+
+                # 确保 order_id 存在于 paper_orders 中（外键约束）
+                order_id = order.get("order_id")
+                if order_id:
+                    existing_order = conn.execute(
+                        "SELECT 1 FROM paper_orders WHERE order_id = ?",
+                        (order_id,),
+                    ).fetchone()
+                    if not existing_order:
+                        conn.execute(
+                            """
+                            INSERT INTO paper_orders (
+                                order_id, dedupe_key, account_id, signal_date,
+                                trade_date, ticker, action, current_shares,
+                                target_shares, delta_shares, reference_price,
+                                reason, status, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                order_id,
+                                order.get("dedupe_key", f"{account_id}:{trade_date}:{ticker}:{action}"),
+                                account_id,
+                                order.get("signal_date", trade_date),
+                                trade_date,
+                                ticker,
+                                action,
+                                order.get("current_shares", 0),
+                                order.get("target_shares", 0),
+                                order.get("delta_shares", 0),
+                                order.get("reference_price", price),
+                                order.get("reason", "auto-inserted"),
+                                "EXECUTED",
+                                now,
+                            ),
+                        )
+
+                trade = {
+                    "trade_id": f"trade-{order_id}",
+                    "dedupe_key": f"{account_id}:{trade_date}:{ticker}:{action}",
+                    "order_id": order_id,
+                    "account_id": account_id,
+                    "trade_date": trade_date,
+                    "ticker": ticker,
+                    "action": action,
+                    "shares": shares,
+                    "price": price,
+                    "commission": commission,
+                    "source": "SIMULATED",
+                    "created_at": now,
+                }
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO paper_trades (
+                            trade_id, dedupe_key, order_id, account_id,
+                            trade_date, ticker, action, shares, price,
+                            commission, source, created_at
+                        ) VALUES (
+                            :trade_id, :dedupe_key, :order_id, :account_id,
+                            :trade_date, :ticker, :action, :shares, :price,
+                            :commission, :source, :created_at
+                        )
+                        """,
+                        trade,
+                    )
+                    executed.append(trade)
+                except sqlite3.IntegrityError as exc:
+                    # dedupe_key 或 trade_id 重复：同日已成交，跳过
+                    skipped.append((order["order_id"], f"duplicate trade for {ticker}:{action}: {exc}"))
+                    # 回滚 cash 变化
+                    if action == "BUY":
+                        cash += shares * price + commission
+                    elif action in ("SELL", "STOP_LOSS"):
+                        cash -= shares * price - commission
+                    continue
+
+                # 更新持仓内存状态
+                if action == "BUY":
+                    if ticker in positions:
+                        p = positions[ticker]
+                        total_cost = p["cost_price"] * p["shares"] + price * shares
+                        p["shares"] += shares
+                        p["cost_price"] = total_cost / p["shares"] if p["shares"] > 0 else 0
+                        p["last_price"] = price
+                    else:
+                        positions[ticker] = {
+                            "ticker": ticker, "shares": shares,
+                            "cost_price": price, "last_price": price,
+                        }
+                elif action in ("SELL", "STOP_LOSS"):
+                    if ticker in positions:
+                        p = positions[ticker]
+                        p["shares"] -= shares
+                        if p["shares"] <= 0:
+                            del positions[ticker]
+
+            # 写入更新后的持仓
+            for ticker, p in positions.items():
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO paper_positions (
+                        account_id, as_of_date, ticker, shares,
+                        cost_price, last_price, market_value
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        account_id, trade_date, ticker,
+                        p["shares"], p["cost_price"], p["last_price"],
+                        p["shares"] * p["last_price"],
+                    ),
+                )
+
+            # 写入 NAV
+            positions_value = sum(p["shares"] * p["last_price"] for p in positions.values())
+            nav = cash + positions_value
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO paper_daily_nav (
+                    account_id, nav_date, cash, positions_value,
+                    nav, data_date, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (account_id, trade_date, cash, positions_value, nav, trade_date, now),
+            )
+
+        return executed, skipped
+
+    def insert_nav(self, row):
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO paper_daily_nav (
+                    account_id, nav_date, cash, positions_value,
+                    nav, data_date, created_at
+                ) VALUES (
+                    :account_id, :nav_date, :cash, :positions_value,
+                    :nav, :data_date, :created_at
+                )
+                """,
+                row,
+            )
+
     def _insert_positions(self, position_rows):
-        """批量插入持仓（内部使用，不检查唯一性，供 runner 更新持仓）。"""
+        """批量插入或替换持仓（内部使用，供 runner 更新持仓）。"""
         with self.connect() as conn:
             conn.executemany(
                 """
@@ -263,20 +474,24 @@ class PaperTradingStore:
                 position_rows,
             )
 
-    def insert_nav(self, row):
+    def get_previous_nav_date(self, account_id, date):
+        """获取账户最近一个记录日期。"""
         with self.connect() as conn:
-            conn.execute(
+            row = conn.execute(
                 """
-                INSERT INTO paper_daily_nav (
-                    account_id, nav_date, cash, positions_value,
-                    nav, data_date, created_at
-                ) VALUES (
-                    :account_id, :nav_date, :cash, :positions_value,
-                    :nav, :data_date, :created_at
-                )
+                SELECT MAX(nav_date) as prev_date
+                FROM paper_daily_nav
+                WHERE account_id = ? AND nav_date < ?
                 """,
-                row,
-            )
+                (account_id, date),
+            ).fetchone()
+            if row and row["prev_date"]:
+                return row["prev_date"]
+            acct = conn.execute(
+                "SELECT start_date FROM paper_accounts WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            return acct["start_date"] if acct else None
 
     def get_nav(self, account_id, nav_date):
         with self.connect() as conn:

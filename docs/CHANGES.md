@@ -3072,9 +3072,11 @@ python scripts/phase6_7_holiday_rebalance_experiment.py
 
 ## 2026-06-30 — Paper Trading Phase 2：每日运行流程、止损检查、每周调仓、模拟成交
 
-- `src/paper_trading/runner.py`：新增每日估值、止损检查、每周调仓、模拟成交
-- 每日估值：更新持仓市值，记录 NAV 到 paper_daily_nav
-- 止损检查：每个交易日检查持仓，触发时生成 STOP_LOSS 订单
-- 每周调仓：周四生成信号，周五 T+1 开盘模拟成交
-- 模拟成交：计算佣金（max 0.03%, 5元），更新持仓和现金，同日去重
-- 新增 11 个 runner 测试，全部通过。26 Paper Trading + 30 live 测试无回归。
+- `src/paper_trading/runner.py`：调用 `plan_rebalance_v2_5` 正式调仓规则，含防御资产、槽位、资金、整手和佣金
+- `src/paper_trading/store.py`：`execute_trades_atomic` 原子执行（成交+持仓+现金+NAV 同一事务）
+- 买入前检查现金（含佣金），不足时跳过并记录原因
+- 缺少可靠价格时跳过订单并记录原因
+- 周四收盘生成信号、周五 T+1 开盘模拟成交
+- 止损、调仓、每日估值和运行结果形成完整每日流程
+- 20 个 runner 测试全部通过（含满仓手续费、同日重复运行、缺价、冲突、防御资产填充）
+- 35 Paper Trading + 30 live 测试无回归
