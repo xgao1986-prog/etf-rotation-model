@@ -247,6 +247,22 @@ class PaperTradingStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def _insert_positions(self, position_rows):
+        """批量插入持仓（内部使用，不检查唯一性，供 runner 更新持仓）。"""
+        with self.connect() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO paper_positions (
+                    account_id, as_of_date, ticker, shares,
+                    cost_price, last_price, market_value
+                ) VALUES (
+                    :account_id, :as_of_date, :ticker, :shares,
+                    :cost_price, :last_price, :market_value
+                )
+                """,
+                position_rows,
+            )
+
     def insert_nav(self, row):
         with self.connect() as conn:
             conn.execute(
