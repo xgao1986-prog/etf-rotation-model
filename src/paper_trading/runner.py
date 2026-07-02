@@ -30,32 +30,46 @@ class PaperTradingRunner:
         """
         完整每日流程（幂等）。
 
-        核心原则：一天的所有计算先在内存完成，最后一次性保存成交、现金、
-        持仓、总资产和运行结果。中途不得单独写入账户状态。
+        核心原则：一天的所有计算先在内存完成，最后一次性保存订单、成交、现金、
+        持仓、总资产、运行结果和信号。中途不得单独写入账户状态。
 
-        1. 如果当天已处理，直接返回已有结果。
-        2. 获取上一交易日状态作为基线。
-        3. 执行今天到期的调仓信号（使用 open_prices）。
-        4. 止损检查与执行（使用 open_prices）。
-        5. 每日估值（使用 close_prices，只更新市值，不修改股数）。
-        6. 如果是调仓日，保存信号供下一交易日执行（使用账户冻结配置）。
-        7. 原子保存最终状态。
+        1. 检查 date 是否为交易日且在日历范围内。
+        2. 如果当天已处理，直接返回已有结果。
+        3. 获取上一交易日状态作为基线。
+        4. 执行今天到期的调仓信号（使用 open_prices，先卖后买）。
+        5. 止损检查与执行（使用 open_prices）。
+        6. 每日估值（使用 close_prices，只更新市值，不修改股数）。
+        7. 如果是调仓日，准备信号供下一交易日执行（使用账户冻结配置）。
+        8. 原子保存最终状态。
 
         返回：{"cash": float, "positions": dict, "nav": float, "trades": list, "skipped": list}
         """
-        # 1. 幂等检查
+        # 1. 交易日与日历范围检查
+        if not self.calendar._days:
+            raise RuntimeError("trading calendar is empty")
+        if date < self.calendar.min_date or date > self.calendar.max_date:
+            raise ValueError(
+                f"{date} is outside trading calendar range "
+                f"[{self.calendar.min_date} ~ {self.calendar.max_date}]; "
+                f"please update the calendar cache"
+            )
+        if not self.calendar.is_trading_day(date):
+            raise ValueError(f"{date} is not a trading day")
+
+        # 2. 幂等检查
         if self.service.store.is_day_processed(account_id, date):
             return self._build_result_from_db(account_id, date)
 
-        # 2. 获取基线状态
+        # 3. 获取基线状态
         prev_date = self.calendar.previous_trading_day(date)
         baseline = self._get_baseline_state(account_id, prev_date)
 
         trades: List[Dict] = []
         skipped: List[Dict] = []
-        order_refs: List[Dict] = []
+        orders: List[Dict] = []
+        signals: List[Dict] = []
 
-        # 3. 执行今天到期的调仓信号
+        # 4. 执行今天到期的调仓信号
         pending_signals = self.service.store.load_pending_signals(account_id, date)
         for signal in pending_signals:
             signal_trades, signal_skipped, signal_orders = self._execute_signal(
@@ -63,43 +77,42 @@ class PaperTradingRunner:
             )
             trades.extend(signal_trades)
             skipped.extend(signal_skipped)
-            order_refs.extend(signal_orders)
+            orders.extend(signal_orders)
             baseline = self._apply_trades_to_state(baseline, signal_trades, open_prices)
 
-        # 4. 止损检查与执行（使用开盘价）
-        sl_orders, sl_skipped = self._check_stop_loss(baseline, open_prices)
+        # 5. 止损检查与执行（使用开盘价）
+        sl_orders, sl_skipped = self._check_stop_loss(account_id, date, baseline, open_prices)
         skipped.extend(sl_skipped)
         if sl_orders:
-            sl_trades, sl_skipped, sl_order_refs = self._execute_orders_in_memory(
-                baseline, sl_orders, open_prices
+            sl_trades, sl_skipped, sl_orders_out = self._execute_orders_in_memory(
+                account_id, date, baseline, sl_orders, open_prices
             )
             trades.extend(sl_trades)
             skipped.extend(sl_skipped)
-            order_refs.extend(sl_order_refs)
+            orders.extend(sl_orders_out)
             baseline = self._apply_trades_to_state(baseline, sl_trades, open_prices)
 
-        # 5. 每日估值（使用收盘价，只更新市值）
+        # 6. 每日估值（使用收盘价，只更新市值）
         baseline = self._apply_valuation(baseline, close_prices)
 
-        # 6. 如果是调仓日，保存信号（使用账户创建时的冻结配置）
+        # 7. 如果是调仓日，准备信号（与当天状态一起保存）
         if self.calendar.is_rebalance_day(date) and scores_df is not None:
             account = self.service.store.get_account(account_id)
             if account is None:
                 raise KeyError(f"missing account: {account_id}")
             cfg = json.loads(account["config_json"])
             next_day = self.calendar.next_trading_day(date)
-            self._save_rebalance_signal(account_id, date, next_day, scores_df, cfg)
+            signals.append(self._prepare_rebalance_signal(account_id, date, next_day, scores_df, cfg))
 
-        # 7. 原子保存最终状态
-        for trade in trades:
-            trade["account_id"] = account_id
-            trade["trade_date"] = date
+        # 8. 原子保存最终状态
         self.service.store.save_daily_state(
             account_id, date,
             cash=baseline["cash"],
             positions=baseline["positions"],
             trades=trades,
             skipped=skipped,
+            orders=orders,
+            signals=signals,
         )
 
         return self._build_result_from_db(account_id, date)
@@ -138,10 +151,11 @@ class PaperTradingRunner:
             pos["last_price"] = price
         return state
 
-    def _check_stop_loss(self, state, prices, stop_loss=-0.08):
+    def _check_stop_loss(self, account_id, trade_date, state, prices, stop_loss=-0.08):
         """检查持仓是否触发止损。缺少开盘价的记录未执行原因。"""
         orders = []
         skipped = []
+        now = datetime.now().isoformat(timespec="seconds")
         for ticker, pos in state["positions"].items():
             cost_price = pos["cost_price"]
             if cost_price <= 0:
@@ -157,27 +171,46 @@ class PaperTradingRunner:
             current_price = prices[ticker]
             loss_pct = (current_price - cost_price) / cost_price
             if loss_pct < stop_loss - 1e-9:
+                order_id = f"sl-{account_id}-{trade_date}-{ticker}"
                 orders.append({
-                    "order_id": f"sl-{ticker}-{date_str()}",
+                    "order_id": order_id,
+                    "dedupe_key": f"{account_id}:{trade_date}:{ticker}:STOP_LOSS",
+                    "account_id": account_id,
+                    "signal_date": trade_date,
+                    "trade_date": trade_date,
                     "ticker": ticker,
                     "action": "STOP_LOSS",
+                    "current_shares": pos["shares"],
+                    "target_shares": 0,
                     "delta_shares": -pos["shares"],
+                    "reference_price": current_price,
+                    "reason": "stop-loss triggered at open",
+                    "status": "PENDING",
+                    "created_at": now,
                 })
         return orders, skipped
 
     def _execute_orders_in_memory(
-        self, state, orders, prices
+        self, account_id, trade_date, state, orders, prices
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         """
-        在内存中检查并生成成交记录，返回 (trades, skipped, order_refs)。
-        不修改 state，也不写入数据库；数据库写入由 run_daily 最后统一完成。
+        在内存中按"先卖后买"顺序执行订单，返回 (trades, skipped, orders)。
+        卖出所得立即释放到可用现金，可用于当天后续买入。
+        不写入数据库；数据库写入由 run_daily 最后统一完成。
         """
         trades: List[Dict] = []
         skipped: List[Dict] = []
-        order_refs: List[Dict] = []
         now = datetime.now().isoformat(timespec="seconds")
 
-        for order in orders:
+        # 先卖后买：确保卖出释放的现金可用于当天买入
+        def _sort_key(o):
+            action = o.get("action", "")
+            return (0 if action in ("SELL", "STOP_LOSS") else 1, o.get("ticker", ""))
+
+        sorted_orders = sorted(orders, key=_sort_key)
+        available_cash = state["cash"]
+
+        for order in sorted_orders:
             ticker = order["ticker"]
             action = order["action"]
             price = prices.get(ticker)
@@ -207,16 +240,18 @@ class PaperTradingRunner:
                         "reason": f"oversell: want {shares}, have {available}",
                     })
                     continue
+                available_cash += shares * price - commission
             elif action == "BUY":
                 cost = shares * price + commission
-                if state["cash"] < cost:
+                if available_cash < cost:
                     skipped.append({
                         "order_id": order.get("order_id"),
                         "ticker": ticker,
                         "action": action,
-                        "reason": f"insufficient cash: need {cost:.2f}, have {state['cash']:.2f}",
+                        "reason": f"insufficient cash: need {cost:.2f}, have {available_cash:.2f}",
                     })
                     continue
+                available_cash -= cost
             else:
                 skipped.append({
                     "order_id": order.get("order_id"),
@@ -227,24 +262,24 @@ class PaperTradingRunner:
                 continue
 
             order_id = order.get("order_id")
+            trade_id = f"trade-{account_id}-{trade_date}-{ticker}-{action}"
             trade = {
-                "trade_id": f"trade-{ticker}-{action}-{date_str()}-{now.replace(':', '')}",
-                "dedupe_key": f"{ticker}:{action}:{date_str()}",
+                "trade_id": trade_id,
+                "dedupe_key": f"{account_id}:{trade_date}:{ticker}:{action}",
                 "order_id": order_id,
-                "account_id": None,  # filled by caller before persistence
+                "account_id": account_id,
+                "trade_date": trade_date,
                 "ticker": ticker,
                 "action": action,
                 "shares": shares,
                 "price": price,
                 "commission": commission,
                 "source": "SIMULATED",
-                "trade_date": None,  # filled by caller before persistence
                 "created_at": now,
             }
             trades.append(trade)
-            order_refs.append({"order_id": order_id, "trade_id": trade["trade_id"]})
 
-        return trades, skipped, order_refs
+        return trades, skipped, sorted_orders
 
     def _apply_trades_to_state(self, state, trades, prices):
         """将成交记录应用到状态（内存更新，不写入数据库）。"""
@@ -282,38 +317,55 @@ class PaperTradingRunner:
         """执行保存的信号：强制使用账户创建时保存的冻结配置。"""
         from io import StringIO
         scores_df = pd.read_json(StringIO(signal["scores_json"]))
+        signal_date = signal["signal_date"]
+        now = datetime.now().isoformat(timespec="seconds")
 
         account = self.service.store.get_account(account_id)
         if account is None:
             raise KeyError(f"missing account: {account_id}")
         cfg = json.loads(account["config_json"])
 
-        trades, _ = self._run_planner(baseline, scores_df, open_prices, cfg)
+        planner_trades, _ = self._run_planner(baseline, scores_df, open_prices, cfg)
 
         orders = []
-        for trade in trades:
+        for trade in planner_trades:
             action = trade["action"]
             ticker = trade["ticker"]
             shares = trade["shares"]
             delta = shares if action == "BUY" else -shares
+            current_shares = baseline["positions"].get(ticker, {}).get("shares", 0)
+            target_shares = current_shares + delta
+            order_id = f"{action.lower()}-{account_id}-{trade_date}-{ticker}"
             orders.append({
-                "order_id": f"{action.lower()}-{account_id}-{trade_date}-{ticker}",
+                "order_id": order_id,
+                "dedupe_key": f"{account_id}:{trade_date}:{ticker}:{action}",
+                "account_id": account_id,
+                "signal_date": signal_date,
+                "trade_date": trade_date,
                 "ticker": ticker,
                 "action": action,
+                "current_shares": current_shares,
+                "target_shares": target_shares,
                 "delta_shares": delta,
+                "reference_price": trade["price"],
+                "reason": trade.get("reason", "rebalance"),
+                "status": "PENDING",
+                "created_at": now,
             })
 
-        return self._execute_orders_in_memory(baseline, orders, open_prices)
+        return self._execute_orders_in_memory(account_id, trade_date, baseline, orders, open_prices)
 
     # ============== Rebalance Planner ==============
 
     def _run_planner(self, state, scores_df, prices, cfg=None):
-        """使用 plan_rebalance_v2_5 生成调仓计划。"""
+        """使用 plan_rebalance_v2_5 生成调仓计划。NAV 使用当日开盘价重新计算。"""
         from config import ETF_UNIVERSE, DEFENSE_UNIVERSE
 
         cash = state["cash"]
+        # 使用当日开盘价重新计算持仓总值，不再使用前一日收盘市值
         nav = cash + sum(
-            p["shares"] * p["last_price"] for p in state["positions"].values()
+            p["shares"] * prices.get(t, p["last_price"])
+            for t, p in state["positions"].items()
         )
         current_positions = {t: p["shares"] for t, p in state["positions"].items()}
 
@@ -370,11 +422,17 @@ class PaperTradingRunner:
 
     # ============== Signal Persistence ==============
 
-    def _save_rebalance_signal(self, account_id, signal_date, trade_date, scores_df, cfg):
-        """保存评分和配置，供下一交易日执行。"""
+    def _prepare_rebalance_signal(self, account_id, signal_date, trade_date, scores_df, cfg):
+        """准备调仓信号，由 run_daily 最终统一保存。"""
         scores_json = scores_df.to_json(orient="records")
         config_json = json.dumps(cfg, sort_keys=True)
-        self.service.store.save_signals(account_id, signal_date, trade_date, scores_json, config_json)
+        return {
+            "account_id": account_id,
+            "signal_date": signal_date,
+            "trade_date": trade_date,
+            "scores_json": scores_json,
+            "config_json": config_json,
+        }
 
     # ============== Result Building ==============
 
@@ -404,7 +462,7 @@ class PaperTradingRunner:
         if prev_date is None:
             return []
         state = self._get_baseline_state(account_id, prev_date)
-        orders, _ = self._check_stop_loss(state, prices, stop_loss)
+        orders, _ = self._check_stop_loss(account_id, date, state, prices, stop_loss)
         return orders
 
     def simulate_execution(self, account_id, trade_date, orders, prices):
@@ -413,7 +471,9 @@ class PaperTradingRunner:
         if prev_date is None:
             prev_date = self.service.store.get_account(account_id)["start_date"]
         state = self._get_baseline_state(account_id, prev_date)
-        trades, skipped, _ = self._execute_orders_in_memory(state, orders, prices)
+        trades, skipped, _ = self._execute_orders_in_memory(
+            account_id, trade_date, state, orders, prices
+        )
         return trades, skipped
 
 

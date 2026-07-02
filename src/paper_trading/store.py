@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     commission REAL NOT NULL CHECK(commission >= 0),
     source TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    FOREIGN KEY (order_id) REFERENCES paper_orders(order_id),
     FOREIGN KEY (account_id) REFERENCES paper_accounts(account_id)
 );
 
@@ -134,12 +135,107 @@ END;
 
 
 class PaperTradingStore:
+    CURRENT_SCHEMA_VERSION = 2
+
     def __init__(self, db_path: str):
         self.db_path = db_path
         parent = os.path.dirname(os.path.abspath(db_path))
         os.makedirs(parent, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn):
+        """升级 Phase 1 旧数据库到当前 schema。"""
+        # 确保 schema_version 元数据表存在
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paper_schema_version (
+                version INTEGER PRIMARY KEY,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        row = conn.execute(
+            "SELECT version FROM paper_schema_version ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        current = row["version"] if row else 1
+
+        if current >= self.CURRENT_SCHEMA_VERSION:
+            return
+
+        now = datetime.now().isoformat(timespec="seconds")
+
+        # Phase 1 -> Phase 2：添加 paper_signals, paper_skipped；重建 paper_trades 以恢复 FK
+        if current < 2:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_signals (
+                    signal_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    signal_date TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    scores_json TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (account_id) REFERENCES paper_accounts(account_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_skipped (
+                    skipped_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    order_id TEXT,
+                    ticker TEXT,
+                    action TEXT,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (account_id) REFERENCES paper_accounts(account_id)
+                )
+                """
+            )
+            # 重建 paper_trades 以恢复 order_id 外键（兼容旧数据 order_id=NULL）
+            conn.execute(
+                """
+                CREATE TABLE paper_trades_new (
+                    trade_id TEXT PRIMARY KEY,
+                    dedupe_key TEXT NOT NULL UNIQUE,
+                    order_id TEXT,
+                    account_id TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    shares INTEGER NOT NULL CHECK(shares > 0),
+                    price REAL NOT NULL CHECK(price > 0),
+                    commission REAL NOT NULL CHECK(commission >= 0),
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (order_id) REFERENCES paper_orders(order_id),
+                    FOREIGN KEY (account_id) REFERENCES paper_accounts(account_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO paper_trades_new
+                SELECT trade_id, dedupe_key, order_id, account_id, trade_date,
+                       ticker, action, shares, price, commission, source, created_at
+                FROM paper_trades
+                """
+            )
+            conn.execute("DROP TABLE paper_trades")
+            conn.execute("ALTER TABLE paper_trades_new RENAME TO paper_trades")
+
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO paper_schema_version (version, updated_at)
+            VALUES (?, ?)
+            """,
+            (self.CURRENT_SCHEMA_VERSION, now),
+        )
 
     @contextmanager
     def connect(self):
@@ -259,19 +355,26 @@ class PaperTradingStore:
             ).fetchone()
         return row is not None
 
-    def save_daily_state(self, account_id, date, cash, positions, trades, skipped=None, task_type='DAILY'):
+    def save_daily_state(self, account_id, date, cash, positions, trades, skipped=None,
+                         orders=None, signals=None, task_type='DAILY'):
         """
-        原子保存每日最终状态：成交、持仓、NAV、运行记录、未执行原因。
+        原子保存每日最终状态：订单、成交、持仓、NAV、运行记录、未执行原因、信号。
         一天的所有计算完成后，最后通过本方法一次性写入；中途不得单独写入账户状态。
         失败时整个事务回滚，不会留下半套记录。
         """
         skipped = skipped or []
+        orders = orders or []
+        signals = signals or []
         with self.connect() as conn:
             now = datetime.now().isoformat(timespec="seconds")
 
             # 先删除该日旧数据，确保最终状态唯一
             conn.execute(
                 "DELETE FROM paper_trades WHERE account_id = ? AND trade_date = ?",
+                (account_id, date),
+            )
+            conn.execute(
+                "DELETE FROM paper_orders WHERE account_id = ? AND trade_date = ?",
                 (account_id, date),
             )
             conn.execute(
@@ -290,6 +393,23 @@ class PaperTradingStore:
                 "DELETE FROM paper_skipped WHERE account_id = ? AND trade_date = ?",
                 (account_id, date),
             )
+
+            # 保存订单（必须在成交之前，因为成交外键依赖订单）
+            for order in orders:
+                conn.execute(
+                    """
+                    INSERT INTO paper_orders (
+                        order_id, dedupe_key, account_id, signal_date, trade_date,
+                        ticker, action, current_shares, target_shares, delta_shares,
+                        reference_price, reason, status, created_at
+                    ) VALUES (
+                        :order_id, :dedupe_key, :account_id, :signal_date, :trade_date,
+                        :ticker, :action, :current_shares, :target_shares, :delta_shares,
+                        :reference_price, :reason, :status, :created_at
+                    )
+                    """,
+                    order,
+                )
 
             # 保存成交
             for trade in trades:
@@ -325,6 +445,25 @@ class PaperTradingStore:
                 """,
                 (account_id, date, cash, positions_value, nav, date, now),
             )
+
+            # 保存调仓信号（与当天状态一起成功或失败）
+            for signal in signals:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO paper_signals (
+                        signal_id, account_id, signal_date, trade_date, scores_json, config_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"signal-{signal['account_id']}-{signal['signal_date']}",
+                        signal["account_id"],
+                        signal["signal_date"],
+                        signal["trade_date"],
+                        signal["scores_json"],
+                        signal["config_json"],
+                        now,
+                    ),
+                )
 
             # 保存未执行原因
             for item in skipped:

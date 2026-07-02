@@ -124,3 +124,11 @@ class ChinaTradingCalendar:
     def is_rebalance_day(self, date: str) -> bool:
         """Thursday is the rebalance day."""
         return datetime.strptime(date, "%Y-%m-%d").weekday() == 3
+
+    @property
+    def min_date(self) -> str:
+        return min(self._days) if self._days else ""
+
+    @property
+    def max_date(self) -> str:
+        return max(self._days) if self._days else ""

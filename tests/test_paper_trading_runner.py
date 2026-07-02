@@ -396,7 +396,7 @@ class TestCodexFinalReview:
                                holdings=[OpeningPosition('512400.SH', 10_000, 10.0, 10.0)])
         result = runner.run_daily(acct, '2026-06-30', {'512400.SH': 9.1}, {'512400.SH': 9.1})
         trade = result['trades'][0]
-        assert trade['order_id'].startswith('sl-512400.SH-')
+        assert trade['order_id'] == f"sl-{acct}-2026-06-30-512400.SH"
 
     def test_skipped_reasons_persist_after_repeated_reads(self, runner, service):
         """缺价、资金不足、超卖等未执行原因必须保存，重复查看时不能丢失。"""
@@ -410,6 +410,236 @@ class TestCodexFinalReview:
         result2 = runner.run_daily(acct, '2026-06-30', {}, {'512400.SH': 9.1})
         assert len(result2['skipped']) == 1
         assert result2['skipped'][0]['reason'] == result1['skipped'][0]['reason']
+
+
+# ============== Codex Final Review v2: Orders, Sell-First, Calendar ==============
+
+class TestCodexFinalReviewV2:
+    def _create_phase1_db(self, db_path):
+        """创建一个 Phase 1 旧数据库（无 paper_signals / paper_skipped / schema_version）。"""
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE IF NOT EXISTS paper_accounts (
+                account_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                account_type TEXT NOT NULL,
+                group_id TEXT,
+                strategy_name TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                config_hash TEXT NOT NULL,
+                initial_capital REAL NOT NULL CHECK(initial_capital > 0),
+                start_mode TEXT NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS paper_positions (
+                account_id TEXT NOT NULL,
+                as_of_date TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                shares INTEGER NOT NULL CHECK(shares >= 0),
+                cost_price REAL NOT NULL CHECK(cost_price >= 0),
+                last_price REAL NOT NULL CHECK(last_price >= 0),
+                market_value REAL NOT NULL CHECK(market_value >= 0),
+                PRIMARY KEY (account_id, as_of_date, ticker),
+                FOREIGN KEY (account_id) REFERENCES paper_accounts(account_id)
+            );
+            CREATE TABLE IF NOT EXISTS paper_orders (
+                order_id TEXT PRIMARY KEY,
+                dedupe_key TEXT NOT NULL UNIQUE,
+                account_id TEXT NOT NULL,
+                signal_date TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                action TEXT NOT NULL,
+                current_shares INTEGER NOT NULL,
+                target_shares INTEGER NOT NULL,
+                delta_shares INTEGER NOT NULL,
+                reference_price REAL,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (account_id) REFERENCES paper_accounts(account_id)
+            );
+            CREATE TABLE IF NOT EXISTS paper_trades (
+                trade_id TEXT PRIMARY KEY,
+                dedupe_key TEXT NOT NULL UNIQUE,
+                order_id TEXT,
+                account_id TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                action TEXT NOT NULL,
+                shares INTEGER NOT NULL CHECK(shares > 0),
+                price REAL NOT NULL CHECK(price > 0),
+                commission REAL NOT NULL CHECK(commission >= 0),
+                source TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (order_id) REFERENCES paper_orders(order_id),
+                FOREIGN KEY (account_id) REFERENCES paper_accounts(account_id)
+            );
+            CREATE TABLE IF NOT EXISTS paper_daily_nav (
+                account_id TEXT NOT NULL,
+                nav_date TEXT NOT NULL,
+                cash REAL NOT NULL CHECK(cash >= -0.01),
+                positions_value REAL NOT NULL CHECK(positions_value >= 0),
+                nav REAL NOT NULL CHECK(nav >= 0),
+                data_date TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (account_id, nav_date),
+                FOREIGN KEY (account_id) REFERENCES paper_accounts(account_id)
+            );
+            CREATE TABLE IF NOT EXISTS paper_runs (
+                run_id TEXT PRIMARY KEY,
+                dedupe_key TEXT NOT NULL UNIQUE,
+                account_id TEXT NOT NULL,
+                run_date TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                data_date TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (account_id) REFERENCES paper_accounts(account_id)
+            );
+            CREATE TRIGGER IF NOT EXISTS paper_accounts_config_immutable
+            BEFORE UPDATE OF config_json, config_hash ON paper_accounts
+            BEGIN
+                SELECT RAISE(ABORT, 'configuration is immutable');
+            END;
+        """)
+        conn.commit()
+        conn.close()
+
+    def test_phase1_db_upgrade_can_trade(self, tmp_path):
+        """Phase 1 旧数据库升级后可以正常成交。"""
+        import sqlite3
+        db_path = str(tmp_path / 'phase1.db')
+        self._create_phase1_db(db_path)
+        store = PaperTradingStore(db_path)
+        service = PaperTradingService(store)
+        runner = PaperTradingRunner(service)
+        acct = _make_account(service, cash=1_000_000)
+
+        # 验证升级后 schema_version 表存在
+        with sqlite3.connect(db_path) as conn:
+            tables = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+            assert 'paper_schema_version' in tables
+            assert 'paper_signals' in tables
+            assert 'paper_skipped' in tables
+
+        scores = _make_scores(['512400.SH'], [65])
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        result = runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+        assert '512400.SH' in result['positions']
+        assert len(result['trades']) == 1
+
+    def test_zero_cash_sells_old_to_buy_new(self, runner, service):
+        """零现金账户卖出旧 ETF 后能买入新 ETF。"""
+        acct = _make_account(
+            service, cash=0, start_mode=StartMode.IMPORTED,
+            holdings=[OpeningPosition('512400.SH', 10_000, 1.0, 1.0)],
+            strategy_config={'max_holdings': 5, 'min_total_score': 40, 'max_position_per_etf': 0.20},
+        )
+        # 周四：512400.SH 落选，515230.SH 入选
+        scores = _make_scores(['512400.SH', '515230.SH'], [30, 65])
+        runner.run_daily(acct, '2026-07-02',
+                         {'512400.SH': 1.0, '515230.SH': 1.0},
+                         {'512400.SH': 1.0, '515230.SH': 1.0}, scores)
+        # 周五：卖出 512400.SH，买入 515230.SH
+        result = runner.run_daily(acct, '2026-07-03',
+                                  {'512400.SH': 1.0, '515230.SH': 1.0},
+                                  {'512400.SH': 1.0, '515230.SH': 1.0})
+        assert '512400.SH' not in result['positions']
+        assert '515230.SH' in result['positions']
+
+    def test_every_trade_maps_to_real_order(self, runner, service):
+        """每笔成交对应订单表中的真实订单。"""
+        acct = _make_account(service, cash=1_000_000)
+        scores = _make_scores(['512400.SH'], [65])
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        result = runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+        for trade in result['trades']:
+            order_id = trade['order_id']
+            with service.store.connect() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM paper_orders WHERE order_id = ?", (order_id,)
+                ).fetchone()
+            assert row is not None, f"missing order {order_id} for trade {trade['trade_id']}"
+
+    def test_signal_rollback_when_save_fails(self, runner, service):
+        """周四最终保存失败后不留下周五信号。"""
+        acct = _make_account(service, cash=1_000_000)
+        scores = _make_scores(['512400.SH'], [65])
+
+        original_save = service.store.save_daily_state
+        def failing_save(*args, **kwargs):
+            raise RuntimeError("simulated save failure")
+
+        service.store.save_daily_state = failing_save
+        with pytest.raises(RuntimeError, match="simulated save failure"):
+            runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        service.store.save_daily_state = original_save
+
+        signals = service.store.load_pending_signals(acct, '2026-07-03')
+        assert len(signals) == 0
+
+    def test_gap_open_uses_open_nav_for_position_sizing(self, runner, service):
+        """开盘大幅跳空时按开盘总资产计算仓位。"""
+        acct = _make_account(
+            service, cash=0, start_mode=StartMode.IMPORTED,
+            holdings=[OpeningPosition('512400.SH', 10_000, 10.0, 10.0)],
+            strategy_config={'max_holdings': 2, 'min_total_score': 40, 'max_position_per_etf': 0.50},
+        )
+        # 周四收盘价 10，周五开盘价跳空到 20
+        scores = _make_scores(['515230.SH'], [65])
+        runner.run_daily(acct, '2026-07-02',
+                         {'512400.SH': 10.0, '515230.SH': 10.0},
+                         {'512400.SH': 10.0, '515230.SH': 10.0}, scores)
+        result = runner.run_daily(acct, '2026-07-03',
+                                  {'512400.SH': 20.0, '515230.SH': 10.0},
+                                  {'512400.SH': 20.0, '515230.SH': 10.0})
+        # 开盘总资产 = 10_000 * 20 = 200,000；单只上限 50% => 100,000
+        # 515230.SH 买入金额应接近 100,000，而不是按周四收盘总资产 100,000 计算的 50,000
+        trade = [t for t in result['trades'] if t['ticker'] == '515230.SH' and t['action'] == 'BUY'][0]
+        assert trade['shares'] * trade['price'] >= 90_000
+
+    def test_two_accounts_same_day_no_id_collision(self, runner, service):
+        """两个账户同日交易不会编号冲突。"""
+        acct1 = _make_account(service, account_id='acct-1', cash=1_000_000)
+        acct2 = _make_account(service, account_id='acct-2', cash=1_000_000)
+        scores = _make_scores(['512400.SH'], [65])
+        runner.run_daily(acct1, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        runner.run_daily(acct2, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        r1 = runner.run_daily(acct1, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+        r2 = runner.run_daily(acct2, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+
+        trade_ids_1 = {t['trade_id'] for t in r1['trades']}
+        trade_ids_2 = {t['trade_id'] for t in r2['trades']}
+        assert not trade_ids_1 & trade_ids_2
+
+        with service.store.connect() as conn:
+            orders_1 = {r['order_id'] for r in conn.execute(
+                "SELECT order_id FROM paper_orders WHERE account_id = ?", (acct1,)
+            ).fetchall()}
+            orders_2 = {r['order_id'] for r in conn.execute(
+                "SELECT order_id FROM paper_orders WHERE account_id = ?", (acct2,)
+            ).fetchall()}
+        assert not orders_1 & orders_2
+
+    def test_non_trading_day_and_out_of_range_fail(self, runner, service):
+        """超出日历范围和非交易日必须明确失败。"""
+        acct = _make_account(service, cash=1_000_000)
+        # 非交易日（周六）
+        with pytest.raises(ValueError, match="not a trading day"):
+            runner.run_daily(acct, '2026-06-27', {}, {})
+        # 超出日历范围
+        with pytest.raises(ValueError, match="outside trading calendar range"):
+            runner.run_daily(acct, '2030-01-01', {}, {})
 
 
 if __name__ == '__main__':
