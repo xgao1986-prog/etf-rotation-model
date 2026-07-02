@@ -642,5 +642,144 @@ class TestCodexFinalReviewV2:
             runner.run_daily(acct, '2030-01-01', {}, {})
 
 
+
+
+# ============== Order Status Tracking ==============
+
+class TestOrderStatus:
+    """测试 _execute_orders_in_memory 为每笔订单正确标记 status 字段。"""
+
+    def _run_execute(self, runner, account_id, orders, prices, cash=1_000_000, positions=None):
+        state = {
+            "cash": cash,
+            "positions": positions or {},
+        }
+        return runner._execute_orders_in_memory(
+            account_id, '2026-07-03', state, orders, prices
+        )
+
+    def test_buy_filled(self, runner, service):
+        """正常买入订单标记为 FILLED。"""
+        acct = _make_account(service, cash=1_000_000)
+        orders = [{
+            'order_id': 'buy-1', 'ticker': '512400.SH', 'action': 'BUY',
+            'delta_shares': 100,
+        }]
+        trades, skipped, out_orders = self._run_execute(
+            runner, acct, orders, {'512400.SH': 1.0}
+        )
+        assert len(trades) == 1
+        assert len(skipped) == 0
+        assert out_orders[0]['status'] == 'FILLED'
+
+    def test_sell_filled(self, runner, service):
+        """正常卖出订单标记为 FILLED。"""
+        acct = _make_account(service, cash=0, start_mode=StartMode.IMPORTED,
+                               holdings=[OpeningPosition('512400.SH', 100, 1.0, 1.0)])
+        orders = [{
+            'order_id': 'sell-1', 'ticker': '512400.SH', 'action': 'SELL',
+            'delta_shares': -100,
+        }]
+        trades, skipped, out_orders = self._run_execute(
+            runner, acct, orders, {'512400.SH': 1.0}, cash=0,
+            positions={'512400.SH': {'shares': 100}}
+        )
+        assert len(trades) == 1
+        assert len(skipped) == 0
+        assert out_orders[0]['status'] == 'FILLED'
+
+    def test_missing_price_skipped(self, runner, service):
+        """缺少有效价格时标记为 SKIPPED。"""
+        acct = _make_account(service, cash=1_000_000)
+        orders = [{
+            'order_id': 'buy-1', 'ticker': '512400.SH', 'action': 'BUY',
+            'delta_shares': 100,
+        }]
+        trades, skipped, out_orders = self._run_execute(
+            runner, acct, orders, {}
+        )
+        assert len(trades) == 0
+        assert len(skipped) == 1
+        assert out_orders[0]['status'] == 'SKIPPED'
+
+    def test_zero_shares_cancelled(self, runner, service):
+        """delta_shares 为 0 时标记为 CANCELLED。"""
+        acct = _make_account(service, cash=1_000_000)
+        orders = [{
+            'order_id': 'buy-1', 'ticker': '512400.SH', 'action': 'BUY',
+            'delta_shares': 0,
+        }]
+        trades, skipped, out_orders = self._run_execute(
+            runner, acct, orders, {'512400.SH': 1.0}
+        )
+        assert len(trades) == 0
+        assert len(skipped) == 0
+        assert out_orders[0]['status'] == 'CANCELLED'
+
+    def test_oversell_skipped(self, runner, service):
+        """卖出数量超过持仓时标记为 SKIPPED。"""
+        acct = _make_account(service, cash=0, start_mode=StartMode.IMPORTED,
+                               holdings=[OpeningPosition('512400.SH', 100, 1.0, 1.0)])
+        orders = [{
+            'order_id': 'sell-1', 'ticker': '512400.SH', 'action': 'SELL',
+            'delta_shares': -200,
+        }]
+        trades, skipped, out_orders = self._run_execute(
+            runner, acct, orders, {'512400.SH': 1.0}, cash=0,
+            positions={'512400.SH': {'shares': 100}}
+        )
+        assert len(trades) == 0
+        assert len(skipped) == 1
+        assert out_orders[0]['status'] == 'SKIPPED'
+
+    def test_insufficient_cash_skipped(self, runner, service):
+        """现金不足时买入订单标记为 SKIPPED。"""
+        acct = _make_account(service, cash=1_000)
+        orders = [{
+            'order_id': 'buy-1', 'ticker': '512400.SH', 'action': 'BUY',
+            'delta_shares': 10000,
+        }]
+        trades, skipped, out_orders = self._run_execute(
+            runner, acct, orders, {'512400.SH': 1.0}, cash=1_000
+        )
+        assert len(trades) == 0
+        assert len(skipped) == 1
+        assert out_orders[0]['status'] == 'SKIPPED'
+
+    def test_unknown_action_skipped(self, runner, service):
+        """未知 action 时标记为 SKIPPED。"""
+        acct = _make_account(service, cash=1_000_000)
+        orders = [{
+            'order_id': 'bad-1', 'ticker': '512400.SH', 'action': 'HOLD',
+            'delta_shares': 100,
+        }]
+        trades, skipped, out_orders = self._run_execute(
+            runner, acct, orders, {'512400.SH': 1.0}
+        )
+        assert len(trades) == 0
+        assert len(skipped) == 1
+        assert out_orders[0]['status'] == 'SKIPPED'
+
+    def test_mixed_orders_have_correct_status(self, runner, service):
+        """同一批订单中不同结果分别标记正确状态。"""
+        acct = _make_account(service, cash=10_000)
+        orders = [
+            {'order_id': 'buy-1', 'ticker': '512400.SH', 'action': 'BUY', 'delta_shares': 100},
+            {'order_id': 'zero-1', 'ticker': '515230.SH', 'action': 'BUY', 'delta_shares': 0},
+            {'order_id': 'buy-2', 'ticker': '518880.SH', 'action': 'BUY', 'delta_shares': 100000},
+        ]
+        trades, skipped, out_orders = self._run_execute(
+            runner, acct, orders,
+            {'512400.SH': 1.0, '515230.SH': 1.0, '518880.SH': 1.0},
+            cash=10_000
+        )
+        statuses = {o['order_id']: o['status'] for o in out_orders}
+        assert statuses['buy-1'] == 'FILLED'
+        assert statuses['zero-1'] == 'CANCELLED'
+        assert statuses['buy-2'] == 'SKIPPED'
+        assert len(trades) == 1
+        assert len(skipped) == 1
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

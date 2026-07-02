@@ -5,6 +5,63 @@
 
 ---
 
+## 2026-07-02（Phase 2 v0.2.2 最终收口）
+
+**目标：** 完成单个 B0.4 虚拟账户自动运行 Phase 2 的小版本收尾，修复日历假期、补齐订单状态测试，并恢复被误改的数据检查报告。
+
+### 一、2026 年端午节假期修正
+
+- 文件：`src/paper_trading/calendar.py`
+- 修正：fallback 假期中 2026 年端午节从 `2026-06-19/22/23` 改为 `2026-06-19/20/21`，与国务院节假日安排一致。
+- 影响：周五（6-19）收盘后的下一交易日仍为 6-22（周一），交易日历逻辑不变；但显式标注假期更准确。
+
+### 二、订单状态字段补齐
+
+- 文件：`src/paper_trading/runner.py`
+- 内容：`_execute_orders_in_memory` 现在为每笔记名订单写入 `status`：
+  - `PENDING`：初始状态
+  - `FILLED`：正常成交
+  - `SKIPPED`：缺价、超卖、现金不足、未知 action 等原因未执行
+  - `CANCELLED`：`delta_shares == 0` 被取消
+- 用途：便于重跑审计和订单级对账。
+
+### 三、订单状态测试
+
+- 文件：`tests/test_paper_trading_runner.py`
+- 新增 `TestOrderStatus` 类，8 个测试覆盖：
+  - 正常买入/卖出标记为 `FILLED`
+  - 缺价标记为 `SKIPPED`
+  - 零股订单标记为 `CANCELLED`
+  - 超卖标记为 `SKIPPED`
+  - 现金不足标记为 `SKIPPED`
+  - 未知 action 标记为 `SKIPPED`
+  - 混合订单批次中各订单状态分别正确
+
+### 四、文档更新
+
+- `docs/CURRENT_STATE.md`：
+  - 更新最后更新日期为 2026-07-02
+  - 虚拟实盘版本号更新为 v0.2.2
+  - 修正 Phase 2 测试数量：37 paper + 38 live = 75 专项测试；paper/live/rebalance 共 115 项全部通过
+  - 新增 Phase 2 v0.2.2 收口记录章节
+- `docs/B0_DATA_ADMISSION_CHECK_v1.md`：恢复到本阶段开始前版本，移除本次意外引入的时间戳更新。
+
+### 五、验证结果
+
+- `tests/test_paper_trading_models.py`：4 passed
+- `tests/test_paper_trading_runner.py`：37 passed（含新增 8 个订单状态测试）
+- `tests/test_paper_trading_service.py`：6 passed
+- `tests/test_paper_trading_store.py`：4 passed
+- `tests/test_paper_account_admin.py`：1 passed
+- `tests/test_rebalance_planner.py`：25 passed
+- `tests/test_live_trading.py`：24 passed
+- `tests/test_live_daily_workflow.py`：6 passed
+- `tests/test_live_generate_trade_plan.py`：8 passed
+- **paper/live/rebalance 相关合计：115 passed**
+- 30 个现有核心测试无回归。
+
+---
+
 ## 2026-06-26（本次 - B1 候选收敛验证 Milestone）
 
 **目标：** 不要继续扩展新策略，以 B0.4 作为唯一冻结基线，验证是否存在更稳、更少噪音、更适合实盘跟踪的 B1 候选。

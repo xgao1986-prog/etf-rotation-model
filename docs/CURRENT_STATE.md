@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-06-30
+**最后更新**：2026-07-02
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/paper-trading-v0.2`
 **当前版本**：v1.2.3
@@ -99,12 +99,12 @@
 - `tests/test_app_b0_signature.py`：13 passed（默认签名、因子开关偏离、参数修改偏离）
 - `tests/test_b0_4_slippage.py`：9 passed（冻结快照版）。0bp 复现 NAV=2,761,288.07，交易 804 笔；3bp 无静默跳过；NAV 单调递减；SHA-256 哈希校验通过。不再依赖当前数据库。
 - `tests/test_v1_3_step6_dynamic_fifth_slot.py`：16 passed（LOO、配置、NaN 回退、regime 标签、B/C 勾稽）
-- `tests/test_live_trading.py`：26 passed（持仓、校验、止损、交易计划、报告生成）
+- `tests/test_live_trading.py`：24 passed（持仓、校验、止损、交易计划、报告生成）
 - `tests/test_live_daily_workflow.py`：6 passed（每日工作流、纸面日志）
-- `tests/test_paper_trading_runner.py`：13 passed（原子成交、满仓手续费、重复运行、缺价、冲突、防御资产填充、T+1 日期分离、超卖保护、交易日历、开盘收盘分离、止损清仓、唯一最终状态）
+- `tests/test_paper_trading_runner.py`：37 passed（原子成交、满仓手续费、重复运行、缺价、冲突、防御资产填充、T+1 日期分离、超卖保护、交易日历、开盘收盘分离、止损清仓、唯一最终状态、订单状态 FILLED/SKIPPED/CANCELLED）
 - `tests/test_paper_trading_models.py`：4 passed（配置哈希、现金启动验证、导入验证）
 - `tests/test_paper_trading_store.py`：4 passed（schema、重复事件、配置不可变）
-- `tests/test_paper_trading_service.py`：7 passed（账户创建、NAV 勾稽、重复订单、对账）
+- `tests/test_paper_trading_service.py`：6 passed（账户创建、NAV 勾稽、重复订单、对账）
 - `tests/test_paper_account_admin.py`：1 passed（命令行创建/列示）
 - A/B 数据补齐实验：完整数据 NAV=2,761,288.07；排除补齐 NAV=2,809,091.21。首次分歧：2026-06-08。
 
@@ -123,9 +123,17 @@
 - 开盘成交价和收盘估值价分开传入
 - 真实交易日历：周末及节假日自动顺延
 - 重复运行幂等：现金、持仓、总资产与首次运行完全一致
-- 28 Paper Trading 测试 + 30 live 测试无回归
+- 52 Paper Trading 测试 + 38 live 测试无回归
 
 **下一步唯一任务**：Phase 3 多策略并行、影子盘确认（未来）
+
+---
+
+## 8. Phase 2 v0.2.2 收口记录
+
+- **交易日历修复**：2026 年端午节从 `2026-06-19/22/23` 修正为 `2026-06-19/20/21`（周六日虽非交易日，但显式标注假期）。
+- **订单状态字段**：订单执行流程现在为每笔记名订单写入 `status`：`PENDING` / `FILLED` / `SKIPPED` / `CANCELLED`，便于重跑审计。
+- **验证**：115 项 paper/live/rebalance 相关测试通过，30 个现有测试无回归。
 
 **Phase 2 开始前的前置任务（已完成）**：
 - B0.4 冻结快照测试口径修复：`test_0bp_matches_baseline` 使用冻结快照，运行前校验 SHA-256
@@ -162,4 +170,4 @@
 **版本口径**：
 - 策略版本：v1.2.3（B0.4 基线）
 - 调仓引擎：v2.5
-- 虚拟实盘：v0.2.0（Phase 2 运行流程）
+- 虚拟实盘：v0.2.2（Phase 2 运行流程 + 2026 端午日历修复 + 订单状态字段）

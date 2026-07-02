@@ -211,11 +211,13 @@ class PaperTradingRunner:
         available_cash = state["cash"]
 
         for order in sorted_orders:
+            order.setdefault("status", "PENDING")
             ticker = order["ticker"]
             action = order["action"]
             price = prices.get(ticker)
 
             if price is None or price <= 0:
+                order["status"] = "SKIPPED"
                 skipped.append({
                     "order_id": order.get("order_id"),
                     "ticker": ticker,
@@ -226,6 +228,7 @@ class PaperTradingRunner:
 
             shares = abs(order["delta_shares"])
             if shares <= 0:
+                order["status"] = "CANCELLED"
                 continue
 
             commission = max(shares * price * self.COMMISSION_RATE, self.MIN_COMMISSION)
@@ -233,6 +236,7 @@ class PaperTradingRunner:
             if action in ("SELL", "STOP_LOSS"):
                 available = state["positions"].get(ticker, {}).get("shares", 0)
                 if shares > available:
+                    order["status"] = "SKIPPED"
                     skipped.append({
                         "order_id": order.get("order_id"),
                         "ticker": ticker,
@@ -244,6 +248,7 @@ class PaperTradingRunner:
             elif action == "BUY":
                 cost = shares * price + commission
                 if available_cash < cost:
+                    order["status"] = "SKIPPED"
                     skipped.append({
                         "order_id": order.get("order_id"),
                         "ticker": ticker,
@@ -253,6 +258,7 @@ class PaperTradingRunner:
                     continue
                 available_cash -= cost
             else:
+                order["status"] = "SKIPPED"
                 skipped.append({
                     "order_id": order.get("order_id"),
                     "ticker": ticker,
@@ -278,6 +284,7 @@ class PaperTradingRunner:
                 "created_at": now,
             }
             trades.append(trade)
+            order["status"] = "FILLED"
 
         return trades, skipped, sorted_orders
 
