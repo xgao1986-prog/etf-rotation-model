@@ -18,6 +18,7 @@ from paper_trading.service import PaperTradingService
 from paper_trading.store import PaperTradingStore
 from paper_trading.runner import PaperTradingRunner
 from paper_trading.calendar import ChinaTradingCalendar
+from paper_trading.ui_service import PaperTradingUIService
 
 
 def _make_account(service, account_id='acct-test', start_mode=StartMode.CASH, cash=1_000_000,
@@ -779,6 +780,109 @@ class TestOrderStatus:
         assert statuses['buy-2'] == 'SKIPPED'
         assert len(trades) == 1
         assert len(skipped) == 1
+
+
+
+# ============== Comparison vs Shadow Execution ==============
+
+class TestComparisonShadowExecution:
+    """对比账户自动成交，影子账户只生成 PENDING 订单。"""
+
+    def _make_ui(self, service):
+        return PaperTradingUIService(service, PaperTradingRunner(service))
+
+    def _b04_preset(self):
+        return {
+            "weights": {"trend": 0.30, "confirm": 0.20, "momentum": 0.25, "volume": 0.15, "volatility": 0.10},
+            "min_trend_score": 15,
+            "min_confirm_score": 4,
+            "min_total_score": 40,
+            "max_holdings": 5,
+            "max_position_per_etf": 0.20,
+            "stop_loss": -0.08,
+        }
+
+    def test_comparison_account_executes_signal_automatically(self, runner, service):
+        """对比账户在调仓日自动模拟成交。"""
+        ui = self._make_ui(service)
+        ids = ui.create_comparison_accounts(
+            preset_names=["B0.4"],
+            presets={"B0.4": self._b04_preset()},
+            initial_capital=1_000_000,
+            start_date="2026-06-29",
+        )
+        acct = ids[0]
+        scores = _make_scores(['512400.SH'], [65])
+        # 周四生成信号
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        # 周五自动执行
+        result = runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+        assert len(result['trades']) > 0
+        orders = service.store.list_orders(acct, start_date='2026-07-03', end_date='2026-07-03')
+        assert all(o['status'] == 'FILLED' for o in orders)
+
+    def test_shadow_account_produces_pending_orders_no_trades(self, runner, service):
+        """影子账户生成 PENDING 订单，在确认前不成交、不改变持仓现金。"""
+        ui = self._make_ui(service)
+        acct = ui.create_shadow_account(
+            name="Shadow",
+            preset_name="B0.4",
+            preset=self._b04_preset(),
+            initial_capital=1_000_000,
+            opening_cash=1_000_000,
+            opening_positions=(),
+            start_date="2026-06-29",
+        )
+        scores = _make_scores(['512400.SH'], [65])
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        result = runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+        assert len(result['trades']) == 0
+        orders = service.store.list_orders(acct, start_date='2026-07-03', end_date='2026-07-03')
+        assert len(orders) > 0
+        assert all(o['status'] == 'PENDING' for o in orders)
+        nav = service.store.get_nav(acct, '2026-07-03')
+        assert nav['cash'] == 1_000_000
+        assert nav['positions_value'] == 0
+
+    def test_shadow_pending_order_expires_next_trading_day(self, runner, service):
+        """前一天未处理的影子订单在下一交易日自动过期。"""
+        ui = self._make_ui(service)
+        acct = ui.create_shadow_account(
+            name="Shadow",
+            preset_name="B0.4",
+            preset=self._b04_preset(),
+            initial_capital=1_000_000,
+            opening_cash=1_000_000,
+            opening_positions=(),
+            start_date="2026-06-29",
+        )
+        scores = _make_scores(['512400.SH'], [65])
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+        old_order = service.store.list_orders(acct, start_date='2026-07-03', end_date='2026-07-03')[0]
+        assert old_order['status'] == 'PENDING'
+        # 下一交易日（7-6）运行前应先过期 7-3 的 PENDING 订单
+        runner.run_daily(acct, '2026-07-06', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+        updated = service.store.get_order(old_order['order_id'])
+        assert updated['status'] == 'EXPIRED'
+
+    def test_comparison_orders_are_not_expired(self, runner, service):
+        """对比账户的订单不应被影子订单过期规则影响。"""
+        ui = self._make_ui(service)
+        ids = ui.create_comparison_accounts(
+            preset_names=["B0.4"],
+            presets={"B0.4": self._b04_preset()},
+            initial_capital=1_000_000,
+            start_date="2026-06-29",
+        )
+        acct = ids[0]
+        scores = _make_scores(['512400.SH'], [65])
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+        # 再次运行 7-3 应该幂等，订单仍然是 FILLED
+        runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+        orders = service.store.list_orders(acct, start_date='2026-07-03', end_date='2026-07-03')
+        assert all(o['status'] == 'FILLED' for o in orders)
 
 
 if __name__ == '__main__':

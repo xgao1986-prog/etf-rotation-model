@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from .calendar import ChinaTradingCalendar
+from .models import AccountType, OrderStatus
 
 
 class PaperTradingRunner:
@@ -60,7 +61,18 @@ class PaperTradingRunner:
         if self.service.store.is_day_processed(account_id, date):
             return self._build_result_from_db(account_id, date)
 
-        # 3. 获取基线状态
+        # 2.5 获取账户类型
+        account = self.service.store.get_account(account_id)
+        if account is None:
+            raise KeyError(f"missing account: {account_id}")
+        account_type = AccountType(account["account_type"])
+        is_shadow = account_type is AccountType.SHADOW
+
+        # 3. 影子账户：先过期上一交易日的 PENDING 订单
+        if is_shadow:
+            self.service.store.expire_pending_orders(account_id, before_trade_date=date)
+
+        # 4. 获取基线状态
         prev_date = self.calendar.previous_trading_day(date)
         baseline = self._get_baseline_state(account_id, prev_date)
 
@@ -69,42 +81,50 @@ class PaperTradingRunner:
         orders: List[Dict] = []
         signals: List[Dict] = []
 
-        # 4. 执行今天到期的调仓信号
+        # 5. 执行今天到期的调仓信号
         pending_signals = self.service.store.load_pending_signals(account_id, date)
         for signal in pending_signals:
-            signal_trades, signal_skipped, signal_orders = self._execute_signal(
-                account_id, date, baseline, signal, open_prices
-            )
-            trades.extend(signal_trades)
-            skipped.extend(signal_skipped)
-            orders.extend(signal_orders)
-            baseline = self._apply_trades_to_state(baseline, signal_trades, open_prices)
+            if is_shadow:
+                signal_orders = self._build_signal_orders(
+                    account_id, date, baseline, signal, open_prices
+                )
+                orders.extend(signal_orders)
+            else:
+                signal_trades, signal_skipped, signal_orders = self._execute_signal(
+                    account_id, date, baseline, signal, open_prices
+                )
+                trades.extend(signal_trades)
+                skipped.extend(signal_skipped)
+                orders.extend(signal_orders)
+                baseline = self._apply_trades_to_state(baseline, signal_trades, open_prices)
 
-        # 5. 止损检查与执行（使用开盘价）
+        # 6. 止损检查与执行（使用开盘价）
         sl_orders, sl_skipped = self._check_stop_loss(account_id, date, baseline, open_prices)
         skipped.extend(sl_skipped)
         if sl_orders:
-            sl_trades, sl_skipped, sl_orders_out = self._execute_orders_in_memory(
-                account_id, date, baseline, sl_orders, open_prices
-            )
-            trades.extend(sl_trades)
-            skipped.extend(sl_skipped)
-            orders.extend(sl_orders_out)
-            baseline = self._apply_trades_to_state(baseline, sl_trades, open_prices)
+            if is_shadow:
+                for order in sl_orders:
+                    order["status"] = OrderStatus.PENDING.value
+                orders.extend(sl_orders)
+            else:
+                sl_trades, sl_skipped, sl_orders_out = self._execute_orders_in_memory(
+                    account_id, date, baseline, sl_orders, open_prices
+                )
+                trades.extend(sl_trades)
+                skipped.extend(sl_skipped)
+                orders.extend(sl_orders_out)
+                baseline = self._apply_trades_to_state(baseline, sl_trades, open_prices)
 
-        # 6. 每日估值（使用收盘价，只更新市值）
+        # 7. 每日估值（使用收盘价，只更新市值）
         baseline = self._apply_valuation(baseline, close_prices)
 
-        # 7. 如果是调仓日，准备信号（与当天状态一起保存）
+        # 8. 如果是调仓日，准备信号（与当天状态一起保存）
         if self.calendar.is_rebalance_day(date) and scores_df is not None:
-            account = self.service.store.get_account(account_id)
-            if account is None:
-                raise KeyError(f"missing account: {account_id}")
             cfg = json.loads(account["config_json"])
             next_day = self.calendar.next_trading_day(date)
             signals.append(self._prepare_rebalance_signal(account_id, date, next_day, scores_df, cfg))
 
-        # 8. 原子保存最终状态
+        # 9. 原子保存最终状态
         self.service.store.save_daily_state(
             account_id, date,
             cash=baseline["cash"],
@@ -320,18 +340,14 @@ class PaperTradingRunner:
 
     # ============== Signal Execution ==============
 
-    def _execute_signal(self, account_id, trade_date, baseline, signal, open_prices):
-        """执行保存的信号：强制使用账户创建时保存的冻结配置。"""
+    def _build_signal_orders(self, account_id, trade_date, baseline, signal, open_prices):
+        """生成调仓信号对应的 PENDING 订单（用于影子账户，不执行）。"""
         from io import StringIO
         scores_df = pd.read_json(StringIO(signal["scores_json"]))
         signal_date = signal["signal_date"]
         now = datetime.now().isoformat(timespec="seconds")
 
-        account = self.service.store.get_account(account_id)
-        if account is None:
-            raise KeyError(f"missing account: {account_id}")
-        cfg = json.loads(account["config_json"])
-
+        cfg = json.loads(self.service.store.get_account(account_id)["config_json"])
         planner_trades, _ = self._run_planner(baseline, scores_df, open_prices, cfg)
 
         orders = []
@@ -356,10 +372,14 @@ class PaperTradingRunner:
                 "delta_shares": delta,
                 "reference_price": trade["price"],
                 "reason": trade.get("reason", "rebalance"),
-                "status": "PENDING",
+                "status": OrderStatus.PENDING.value,
                 "created_at": now,
             })
+        return orders
 
+    def _execute_signal(self, account_id, trade_date, baseline, signal, open_prices):
+        """执行保存的信号：强制使用账户创建时保存的冻结配置。"""
+        orders = self._build_signal_orders(account_id, trade_date, baseline, signal, open_prices)
         return self._execute_orders_in_memory(account_id, trade_date, baseline, orders, open_prices)
 
     # ============== Rebalance Planner ==============
