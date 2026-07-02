@@ -24,6 +24,7 @@ from config import (BACKTEST_CONFIG, BENCHMARK, ETF_UNIVERSE, DEFENSE_UNIVERSE,
                     TRADING_RULES_CONFIG, DEFENSE_CONFIG, build_config)
 from database import ETFDatabase
 from strategy import StrategyEngine
+from strategy_presets import load_strategy_presets, save_strategy_presets
 from utils import cfg_signature
 
 
@@ -120,37 +121,13 @@ def normalize_weights(raw_weights):
 
 
 def load_presets():
-    """加载参数预设"""
-    preset_path = os.path.join(os.path.dirname(__file__), "presets", "strategy_presets.json")
-    if os.path.exists(preset_path):
-        with open(preset_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {
-        "v1.0 原始参数": {
-            "weights": {"trend": 0.30, "confirm": 0.20, "momentum": 0.25, "volume": 0.15, "volatility": 0.10},
-            "min_trend_score": 15, "min_confirm_score": 4, "min_total_score": 40,
-            "max_holdings": 5, "max_position_per_etf": 0.15, "stop_loss": -0.08,
-        },
-        "保守型": {
-            "weights": {"trend": 0.40, "confirm": 0.30, "momentum": 0.15, "volume": 0.10, "volatility": 0.05},
-            "min_trend_score": 20, "min_confirm_score": 8, "min_total_score": 50,
-            "max_holdings": 3, "max_position_per_etf": 0.10, "stop_loss": -0.05,
-        },
-        "激进型": {
-            "weights": {"trend": 0.20, "confirm": 0.10, "momentum": 0.40, "volume": 0.20, "volatility": 0.10},
-            "min_trend_score": 10, "min_confirm_score": 2, "min_total_score": 35,
-            "max_holdings": 7, "max_position_per_etf": 0.20, "stop_loss": -0.12,
-        },
-    }
+    """加载参数预设（兼容旧入口，使用共享加载函数）。"""
+    return load_strategy_presets()
 
 
 def save_presets(presets):
-    """保存参数预设"""
-    preset_dir = os.path.join(os.path.dirname(__file__), "presets")
-    os.makedirs(preset_dir, exist_ok=True)
-    preset_path = os.path.join(preset_dir, "strategy_presets.json")
-    with open(preset_path, "w", encoding="utf-8") as f:
-        json.dump(presets, f, ensure_ascii=False, indent=2)
+    """保存参数预设（兼容旧入口，使用共享保存函数）。"""
+    save_strategy_presets(presets)
 
 
 def build_sidebar_config():
