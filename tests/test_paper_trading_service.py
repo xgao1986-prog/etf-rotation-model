@@ -13,7 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from paper_trading.models import (
     AccountCreate,
     AccountType,
+    ManualFill,
     OpeningPosition,
+    OrderStatus,
     StartMode,
 )
 from paper_trading.service import PaperTradingService
@@ -169,3 +171,184 @@ def test_reconcile_detects_bad_nav(service):
     result = service.reconcile("acct-reconcile", "2026-06-30")
     assert not result["ok"]
     assert result["difference"] == -50_000
+
+
+# ============== Shadow-Order Service Lifecycle ==============
+
+
+def _seed_shadow_order(service):
+    service.create_account(
+        AccountCreate(
+            account_id="shadow-1",
+            name="Shadow",
+            account_type=AccountType.SHADOW,
+            strategy_name="B0.4",
+            strategy_config={"max_holdings": 5},
+            initial_capital=1_000_000,
+            start_mode=StartMode.IMPORTED,
+            start_date="2026-06-29",
+            opening_cash=900_000,
+            opening_positions=(OpeningPosition("512400.SH", 10_000, 10.0, 10.0),),
+        )
+    )
+    order = {
+        "order_id": "order-1",
+        "dedupe_key": "shadow-1:2026-07-03:512400.SH:BUY",
+        "account_id": "shadow-1",
+        "signal_date": "2026-07-02",
+        "trade_date": "2026-07-03",
+        "ticker": "512400.SH",
+        "action": "BUY",
+        "current_shares": 0,
+        "target_shares": 100,
+        "delta_shares": 100,
+        "reference_price": 1.0,
+        "reason": "B0.4 selected",
+        "status": OrderStatus.PENDING.value,
+        "created_at": "2026-07-02T16:00:00",
+    }
+    service.append_order(order)
+    return order
+
+
+def test_confirm_shadow_order_fills_trade_updates_state(service):
+    _seed_shadow_order(service)
+    fill = ManualFill(
+        account_id="shadow-1",
+        order_id="order-1",
+        trade_date="2026-07-03",
+        actual_price=1.05,
+        actual_shares=100,
+    )
+    service.confirm_shadow_order(fill)
+    order = service.store.get_order("order-1")
+    assert order["status"] == OrderStatus.FILLED.value
+    nav = service.store.get_nav("shadow-1", "2026-07-03")
+    assert nav is not None
+    positions = service.store.list_positions("shadow-1", "2026-07-03")
+    assert len(positions) == 1
+    assert positions[0]["shares"] == 10_100
+
+
+def test_confirm_shadow_order_requires_shadow_account(service):
+    service.create_account(
+        AccountCreate(
+            account_id="compare-1",
+            name="Compare",
+            account_type=AccountType.COMPARISON,
+            strategy_name="B0.4",
+            strategy_config={"max_holdings": 5},
+            initial_capital=1_000_000,
+            start_mode=StartMode.CASH,
+            start_date="2026-06-29",
+        )
+    )
+    with pytest.raises(ValueError, match="shadow"):
+        service.confirm_shadow_order(
+            ManualFill("compare-1", "order-1", "2026-07-03", 1.0, 100)
+        )
+
+
+def test_confirm_requires_pending_order(service):
+    _seed_shadow_order(service)
+    service.store.update_order_status("order-1", OrderStatus.CANCELLED.value)
+    with pytest.raises(ValueError, match="PENDING"):
+        service.confirm_shadow_order(
+            ManualFill("shadow-1", "order-1", "2026-07-03", 1.0, 100)
+        )
+
+
+def test_confirm_rejects_wrong_account(service):
+    _seed_shadow_order(service)
+    service.create_account(
+        AccountCreate(
+            account_id="shadow-2",
+            name="Shadow 2",
+            account_type=AccountType.SHADOW,
+            strategy_name="B0.4",
+            strategy_config={"max_holdings": 5},
+            initial_capital=1_000_000,
+            start_mode=StartMode.CASH,
+            start_date="2026-06-29",
+        )
+    )
+    with pytest.raises(ValueError, match="account"):
+        service.confirm_shadow_order(
+            ManualFill("shadow-2", "order-1", "2026-07-03", 1.0, 100)
+        )
+
+
+def test_confirm_rejects_non_100_share_quantity(service):
+    _seed_shadow_order(service)
+    with pytest.raises(ValueError, match="100"):
+        service.confirm_shadow_order(
+            ManualFill("shadow-1", "order-1", "2026-07-03", 1.0, 150)
+        )
+
+
+def test_confirm_rejects_insufficient_cash(service):
+    _seed_shadow_order(service)
+    with pytest.raises(ValueError, match="cash"):
+        service.confirm_shadow_order(
+            ManualFill("shadow-1", "order-1", "2026-07-03", 1.0, 1_000_000_000)
+        )
+
+
+def test_confirm_rejects_oversell(service):
+    _seed_shadow_order(service)
+    service.store.update_order_status("order-1", OrderStatus.PENDING.value)
+    # Replace order with SELL for 20_000 shares (more than available 10_000)
+    with service.store.connect() as conn:
+        conn.execute(
+            "DELETE FROM paper_orders WHERE order_id = ?",
+            ("order-1",),
+        )
+        conn.execute(
+            """
+            INSERT INTO paper_orders (
+                order_id, dedupe_key, account_id, signal_date, trade_date, ticker,
+                action, current_shares, target_shares, delta_shares, reference_price,
+                reason, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "order-1", "shadow-1:2026-07-03:512400.SH:SELL", "shadow-1",
+                "2026-07-02", "2026-07-03", "512400.SH", "SELL", 10_000, 0,
+                -20_000, 1.0, "B0.4 exit", OrderStatus.PENDING.value,
+                "2026-07-02T16:00:00",
+            ),
+        )
+    with pytest.raises(ValueError, match="oversell"):
+        service.confirm_shadow_order(
+            ManualFill("shadow-1", "order-1", "2026-07-03", 1.0, 20_000)
+        )
+
+
+def test_reject_shadow_order(service):
+    _seed_shadow_order(service)
+    service.reject_shadow_order("shadow-1", "order-1", "manual skip")
+    order = service.store.get_order("order-1")
+    assert order["status"] == OrderStatus.REJECTED.value
+    assert "manual skip" in order.get("reason", "")
+
+
+def test_cancel_shadow_order(service):
+    _seed_shadow_order(service)
+    service.cancel_shadow_order("shadow-1", "order-1", "user cancelled")
+    order = service.store.get_order("order-1")
+    assert order["status"] == OrderStatus.CANCELLED.value
+
+
+def test_expired_shadow_orders(service):
+    _seed_shadow_order(service)
+    service.expire_shadow_orders("shadow-1", "2026-07-04")
+    order = service.store.get_order("order-1")
+    assert order["status"] == OrderStatus.EXPIRED.value
+
+
+def test_repeated_confirmation_is_rejected(service):
+    _seed_shadow_order(service)
+    fill = ManualFill("shadow-1", "order-1", "2026-07-03", 1.05, 100)
+    service.confirm_shadow_order(fill)
+    with pytest.raises(ValueError, match="PENDING"):
+        service.confirm_shadow_order(fill)

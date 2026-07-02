@@ -6,6 +6,9 @@ from datetime import datetime
 from .models import (
     AccountCreate,
     AccountStatus,
+    AccountType,
+    ManualFill,
+    OrderStatus,
     StartMode,
     canonical_config,
     config_hash,
@@ -121,3 +124,162 @@ class PaperTradingService:
         if account is None:
             raise KeyError(account_id)
         return account
+
+    def confirm_shadow_order(self, fill: ManualFill):
+        account = self.store.get_account(fill.account_id)
+        if account is None:
+            raise KeyError(fill.account_id)
+        if account["account_type"] != AccountType.SHADOW.value:
+            raise ValueError("manual fill is only allowed for shadow accounts")
+
+        order = self.store.get_order(fill.order_id)
+        if order is None:
+            raise KeyError(fill.order_id)
+        if order["account_id"] != fill.account_id:
+            raise ValueError("order does not belong to account")
+        if order["status"] != OrderStatus.PENDING.value:
+            raise ValueError("only PENDING orders can be confirmed")
+        if order["trade_date"] != fill.trade_date:
+            raise ValueError("fill trade_date does not match order trade_date")
+
+        action = order["action"]
+        ticker = order["ticker"]
+        shares = fill.actual_shares
+        price = fill.actual_price
+        commission = max(shares * price * self.COMMISSION_RATE, self.MIN_COMMISSION)
+
+        prev_date = self.store.get_previous_nav_date(fill.account_id, fill.trade_date)
+        prev_nav = self.store.get_nav(fill.account_id, prev_date)
+        if prev_nav is None:
+            raise ValueError(f"missing previous NAV for {fill.account_id}")
+
+        prev_positions = {
+            p["ticker"]: dict(p)
+            for p in self.store.list_positions(fill.account_id, prev_date)
+        }
+        cash = prev_nav["cash"]
+        positions_value = 0.0
+
+        if action == "BUY":
+            cost = shares * price + commission
+            if cash < cost:
+                raise ValueError(f"insufficient cash: need {cost:.2f}, have {cash:.2f}")
+            cash -= cost
+            pos = prev_positions.get(ticker, {
+                "shares": 0,
+                "cost_price": price,
+                "last_price": price,
+            })
+            total_shares = pos["shares"] + shares
+            pos["shares"] = total_shares
+            pos["last_price"] = price
+            prev_positions[ticker] = pos
+        elif action in ("SELL", "STOP_LOSS"):
+            available = prev_positions.get(ticker, {}).get("shares", 0)
+            if shares > available:
+                raise ValueError(f"oversell: want {shares}, have {available}")
+            cash += shares * price - commission
+            pos = prev_positions.get(ticker, {"shares": 0})
+            pos["shares"] -= shares
+            pos["last_price"] = price
+            if pos["shares"] <= 0:
+                prev_positions.pop(ticker, None)
+            else:
+                prev_positions[ticker] = pos
+        else:
+            raise ValueError(f"unknown action: {action}")
+
+        position_rows = []
+        for t, pos in prev_positions.items():
+            if pos["shares"] <= 0:
+                continue
+            mv = pos["shares"] * pos["last_price"]
+            positions_value += mv
+            position_rows.append({
+                "account_id": fill.account_id,
+                "as_of_date": fill.trade_date,
+                "ticker": t,
+                "shares": pos["shares"],
+                "cost_price": pos.get("cost_price", pos["last_price"]),
+                "last_price": pos["last_price"],
+                "market_value": mv,
+            })
+
+        nav = cash + positions_value
+        nav_row = {
+            "account_id": fill.account_id,
+            "nav_date": fill.trade_date,
+            "cash": cash,
+            "positions_value": positions_value,
+            "nav": nav,
+            "data_date": fill.trade_date,
+        }
+
+        trade_id = f"trade-{fill.account_id}-{fill.trade_date}-{ticker}-{action}"
+        trade_row = {
+            "trade_id": trade_id,
+            "dedupe_key": f"{fill.account_id}:{fill.trade_date}:{ticker}:{action}",
+            "order_id": fill.order_id,
+            "account_id": fill.account_id,
+            "trade_date": fill.trade_date,
+            "ticker": ticker,
+            "action": action,
+            "shares": shares,
+            "price": price,
+            "commission": commission,
+            "source": "MANUAL",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+        self.store.apply_manual_fill(
+            fill_row={
+                "order_id": fill.order_id,
+                "status": OrderStatus.FILLED.value,
+                "reason": order.get("reason", ""),
+            },
+            trade_row=trade_row,
+            position_rows=position_rows,
+            nav_row=nav_row,
+        )
+        return self.store.get_order(fill.order_id)
+
+    def reject_shadow_order(self, account_id: str, order_id: str, reason: str):
+        order = self._require_pending_shadow_order(account_id, order_id)
+        self.store.update_order_status(
+            order_id, OrderStatus.REJECTED.value, reason=reason
+        )
+        return self.store.get_order(order_id)
+
+    def cancel_shadow_order(self, account_id: str, order_id: str, reason: str):
+        order = self._require_pending_shadow_order(account_id, order_id)
+        self.store.update_order_status(
+            order_id, OrderStatus.CANCELLED.value, reason=reason
+        )
+        return self.store.get_order(order_id)
+
+    def expire_shadow_orders(self, account_id: str, trade_date: str):
+        account = self.store.get_account(account_id)
+        if account is None:
+            raise KeyError(account_id)
+        if account["account_type"] != AccountType.SHADOW.value:
+            raise ValueError("expire only applies to shadow accounts")
+        self.store.expire_pending_orders(account_id, before_trade_date=trade_date)
+        return self.store.list_orders(account_id, status=OrderStatus.EXPIRED.value)
+
+    def _require_pending_shadow_order(self, account_id: str, order_id: str):
+        account = self.store.get_account(account_id)
+        if account is None:
+            raise KeyError(account_id)
+        if account["account_type"] != AccountType.SHADOW.value:
+            raise ValueError("manual actions are only allowed for shadow accounts")
+        order = self.store.get_order(order_id)
+        if order is None:
+            raise KeyError(order_id)
+        if order["account_id"] != account_id:
+            raise ValueError("order does not belong to account")
+        if order["status"] != OrderStatus.PENDING.value:
+            raise ValueError("order is not PENDING")
+        return order
+
+    COMMISSION_RATE = 0.0003
+    MIN_COMMISSION = 5.0

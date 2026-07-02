@@ -662,3 +662,125 @@ class PaperTradingStore:
             if "dedupe_key" in str(exc):
                 raise DuplicateLedgerEvent(dedupe_key) from exc
             raise
+
+    def list_orders(self, account_id, status=None, start_date=None, end_date=None):
+        query = "SELECT * FROM paper_orders WHERE account_id = ?"
+        params = [account_id]
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status)
+        if start_date is not None:
+            query += " AND trade_date >= ?"
+            params.append(start_date)
+        if end_date is not None:
+            query += " AND trade_date <= ?"
+            params.append(end_date)
+        query += " ORDER BY trade_date, ticker"
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_order(self, order_id):
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM paper_orders WHERE order_id = ?",
+                (order_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_order_status(self, order_id, status, reason=None):
+        with self.connect() as conn:
+            if reason is not None:
+                conn.execute(
+                    "UPDATE paper_orders SET status = ?, reason = ? WHERE order_id = ?",
+                    (status, reason, order_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE paper_orders SET status = ? WHERE order_id = ?",
+                    (status, order_id),
+                )
+
+    def expire_pending_orders(self, account_id, before_trade_date):
+        """将所有 trade_date < before_trade_date 的 PENDING 订单设为 EXPIRED。"""
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE paper_orders
+                SET status = 'EXPIRED'
+                WHERE account_id = ? AND status = 'PENDING' AND trade_date < ?
+                """,
+                (account_id, before_trade_date),
+            )
+
+    def apply_manual_fill(
+        self,
+        fill_row,
+        trade_row,
+        position_rows,
+        nav_row,
+    ):
+        """原子执行一笔手工确认成交：更新订单、写入成交、替换持仓、写入 NAV。"""
+        with self.connect() as conn:
+            now = datetime.now().isoformat(timespec="seconds")
+            # 更新订单状态
+            conn.execute(
+                "UPDATE paper_orders SET status = ?, reason = ? WHERE order_id = ?",
+                (fill_row["status"], fill_row.get("reason", ""), fill_row["order_id"]),
+            )
+            # 写入成交
+            conn.execute(
+                """
+                INSERT INTO paper_trades (
+                    trade_id, dedupe_key, order_id, account_id, trade_date, ticker,
+                    action, shares, price, commission, source, created_at
+                ) VALUES (
+                    :trade_id, :dedupe_key, :order_id, :account_id, :trade_date, :ticker,
+                    :action, :shares, :price, :commission, :source, :created_at
+                )
+                """,
+                trade_row,
+            )
+            # 删除旧持仓并写入新持仓
+            account_id = nav_row["account_id"]
+            trade_date = nav_row["nav_date"]
+            conn.execute(
+                "DELETE FROM paper_positions WHERE account_id = ? AND as_of_date = ?",
+                (account_id, trade_date),
+            )
+            for row in position_rows:
+                conn.execute(
+                    """
+                    INSERT INTO paper_positions (
+                        account_id, as_of_date, ticker, shares, cost_price, last_price, market_value
+                    ) VALUES (
+                        :account_id, :as_of_date, :ticker, :shares, :cost_price, :last_price, :market_value
+                    )
+                    """,
+                    row,
+                )
+            # 写入 NAV
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO paper_daily_nav (
+                    account_id, nav_date, cash, positions_value, nav, data_date, created_at
+                ) VALUES (
+                    :account_id, :nav_date, :cash, :positions_value, :nav, :data_date, :created_at
+                )
+                """,
+                dict(nav_row, created_at=nav_row.get("created_at", now)),
+            )
+
+    def list_nav_history(self, account_id, start_date=None, end_date=None):
+        query = "SELECT * FROM paper_daily_nav WHERE account_id = ?"
+        params = [account_id]
+        if start_date is not None:
+            query += " AND nav_date >= ?"
+            params.append(start_date)
+        if end_date is not None:
+            query += " AND nav_date <= ?"
+            params.append(end_date)
+        query += " ORDER BY nav_date"
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]

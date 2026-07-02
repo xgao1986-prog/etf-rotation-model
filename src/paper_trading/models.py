@@ -21,6 +21,15 @@ class AccountStatus(str, Enum):
     ERROR = "ERROR"
 
 
+class OrderStatus(str, Enum):
+    PENDING = "PENDING"
+    FILLED = "FILLED"
+    SKIPPED = "SKIPPED"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+
+
 class StartMode(str, Enum):
     CASH = "CASH"
     IMPORTED = "IMPORTED"
@@ -58,6 +67,27 @@ class OpeningPosition:
     @property
     def market_value(self) -> float:
         return self.shares * self.last_price
+
+
+@dataclass(frozen=True)
+class ManualFill:
+    account_id: str
+    order_id: str
+    trade_date: str
+    actual_price: float
+    actual_shares: int
+
+    def __post_init__(self):
+        if not self.account_id:
+            raise ValueError("account_id is required")
+        if not self.order_id:
+            raise ValueError("order_id is required")
+        if not self.trade_date:
+            raise ValueError("trade_date is required")
+        if self.actual_price <= 0:
+            raise ValueError("actual_price must be positive")
+        if self.actual_shares <= 0 or self.actual_shares % 100 != 0:
+            raise ValueError("actual_shares must be a positive multiple of 100")
 
 
 @dataclass(frozen=True)
