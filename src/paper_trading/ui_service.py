@@ -33,32 +33,55 @@ class PaperTradingUIService:
             raise ValueError("initial capital must be positive")
 
         group_id = group_id or f"grp-{uuid.uuid4().hex[:8]}"
-        created_ids: List[str] = []
 
+        # Phase 1: resolve and validate all account IDs before creating any.
+        resolved: List[Tuple[str, str, Mapping[str, Any]]] = []
         for preset_name in preset_names:
             preset = presets.get(preset_name)
             if preset is None:
                 raise ValueError(f"preset not found: {preset_name}")
-
             account_id = self._make_account_id(
                 AccountType.COMPARISON, preset_name, start_date, preset
             )
             if self.service.store.get_account(account_id):
                 raise ValueError(f"account already exists: {account_id}")
+            resolved.append((preset_name, account_id, preset))
 
-            request = AccountCreate(
-                account_id=account_id,
-                name=f"{preset_name} {start_date}",
-                account_type=AccountType.COMPARISON,
-                strategy_name=preset_name,
-                strategy_config=dict(preset),
-                initial_capital=initial_capital,
-                start_mode=StartMode.CASH,
-                start_date=start_date,
-                group_id=group_id,
-            )
-            self.service.create_account(request)
-            created_ids.append(account_id)
+        # Phase 2: create all accounts; failures here are unlikely but leave a
+        # record of successfully created IDs so callers can roll back if needed.
+        created_ids: List[str] = []
+        try:
+            for preset_name, account_id, preset in resolved:
+                request = AccountCreate(
+                    account_id=account_id,
+                    name=f"{preset_name} {start_date}",
+                    account_type=AccountType.COMPARISON,
+                    strategy_name=preset_name,
+                    strategy_config=dict(preset),
+                    initial_capital=initial_capital,
+                    start_mode=StartMode.CASH,
+                    start_date=start_date,
+                    group_id=group_id,
+                )
+                self.service.create_account(request)
+                created_ids.append(account_id)
+        except Exception:
+            # Roll back any accounts already created in this batch.
+            for account_id in created_ids:
+                with self.service.store.connect() as conn:
+                    conn.execute(
+                        "DELETE FROM paper_accounts WHERE account_id = ?",
+                        (account_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM paper_positions WHERE account_id = ?",
+                        (account_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM paper_daily_nav WHERE account_id = ?",
+                        (account_id,),
+                    )
+            raise
 
         return created_ids
 

@@ -148,16 +148,22 @@ class PaperTradingService:
         price = fill.actual_price
         commission = max(shares * price * self.COMMISSION_RATE, self.MIN_COMMISSION)
 
-        prev_date = self.store.get_previous_nav_date(fill.account_id, fill.trade_date)
-        prev_nav = self.store.get_nav(fill.account_id, prev_date)
-        if prev_nav is None:
-            raise ValueError(f"missing previous NAV for {fill.account_id}")
+        # Use the latest state already recorded for trade_date (if any) so that
+        # multiple shadow fills on the same day accumulate instead of overwriting.
+        current_nav = self.store.get_nav(fill.account_id, fill.trade_date)
+        if current_nav is not None:
+            base_date = fill.trade_date
+            cash = current_nav["cash"]
+            base_positions = self.store.list_positions(fill.account_id, base_date)
+        else:
+            base_date = self.store.get_previous_nav_date(fill.account_id, fill.trade_date)
+            prev_nav = self.store.get_nav(fill.account_id, base_date)
+            if prev_nav is None:
+                raise ValueError(f"missing previous NAV for {fill.account_id}")
+            cash = prev_nav["cash"]
+            base_positions = self.store.list_positions(fill.account_id, base_date)
 
-        prev_positions = {
-            p["ticker"]: dict(p)
-            for p in self.store.list_positions(fill.account_id, prev_date)
-        }
-        cash = prev_nav["cash"]
+        prev_positions = {p["ticker"]: dict(p) for p in base_positions}
         positions_value = 0.0
 
         if action == "BUY":
@@ -170,8 +176,12 @@ class PaperTradingService:
                 "cost_price": price,
                 "last_price": price,
             })
-            total_shares = pos["shares"] + shares
+            old_shares = pos["shares"]
+            total_shares = old_shares + shares
+            old_cost = pos.get("cost_price", price) * old_shares
+            new_cost = price * shares
             pos["shares"] = total_shares
+            pos["cost_price"] = (old_cost + new_cost) / total_shares if total_shares > 0 else price
             pos["last_price"] = price
             prev_positions[ticker] = pos
         elif action in ("SELL", "STOP_LOSS"):
@@ -244,6 +254,8 @@ class PaperTradingService:
         return self.store.get_order(fill.order_id)
 
     def reject_shadow_order(self, account_id: str, order_id: str, reason: str):
+        if not reason or not reason.strip():
+            raise ValueError("reason is required to reject an order")
         order = self._require_pending_shadow_order(account_id, order_id)
         self.store.update_order_status(
             order_id, OrderStatus.REJECTED.value, reason=reason
@@ -251,6 +263,8 @@ class PaperTradingService:
         return self.store.get_order(order_id)
 
     def cancel_shadow_order(self, account_id: str, order_id: str, reason: str):
+        if not reason or not reason.strip():
+            raise ValueError("reason is required to cancel an order")
         order = self._require_pending_shadow_order(account_id, order_id)
         self.store.update_order_status(
             order_id, OrderStatus.CANCELLED.value, reason=reason

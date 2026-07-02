@@ -352,3 +352,100 @@ def test_repeated_confirmation_is_rejected(service):
     service.confirm_shadow_order(fill)
     with pytest.raises(ValueError, match="PENDING"):
         service.confirm_shadow_order(fill)
+
+
+def test_confirm_two_shadow_orders_same_day_accumulates(service):
+    """同一天确认两笔影子买入，现金、持仓、总资产和成本必须累计。"""
+    service.create_account(
+        AccountCreate(
+            account_id="shadow-1",
+            name="Shadow",
+            account_type=AccountType.SHADOW,
+            strategy_name="B0.4",
+            strategy_config={"max_holdings": 5},
+            initial_capital=1_000_000,
+            start_mode=StartMode.CASH,
+            start_date="2026-06-29",
+        )
+    )
+    for i, ticker in enumerate(("512400.SH", "515230.SH")):
+        order = {
+            "order_id": f"order-{i}",
+            "dedupe_key": f"shadow-1:2026-07-03:{ticker}:BUY:{i}",
+            "account_id": "shadow-1",
+            "signal_date": "2026-07-02",
+            "trade_date": "2026-07-03",
+            "ticker": ticker,
+            "action": "BUY",
+            "current_shares": 0,
+            "target_shares": 100,
+            "delta_shares": 100,
+            "reference_price": 1.0,
+            "reason": "B0.4 selected",
+            "status": OrderStatus.PENDING.value,
+            "created_at": "2026-07-02T16:00:00",
+        }
+        service.append_order(order)
+
+    service.confirm_shadow_order(ManualFill("shadow-1", "order-0", "2026-07-03", 1.0, 100))
+    service.confirm_shadow_order(ManualFill("shadow-1", "order-1", "2026-07-03", 2.0, 100))
+
+    nav = service.store.get_nav("shadow-1", "2026-07-03")
+    commission = max(100 * 1.0 * 0.0003, 5) + max(100 * 2.0 * 0.0003, 5)
+    assert nav["cash"] == pytest.approx(1_000_000 - 100 * 1.0 - 100 * 2.0 - commission, abs=0.01)
+    assert nav["positions_value"] == pytest.approx(100 * 1.0 + 100 * 2.0, abs=0.01)
+    positions = {p["ticker"]: p for p in service.store.list_positions("shadow-1", "2026-07-03")}
+    assert positions["512400.SH"]["shares"] == 100
+    assert positions["515230.SH"]["shares"] == 100
+
+
+def test_confirm_buy_updates_average_cost(service):
+    """对已有 ETF 继续买入后，平均持仓成本必须重新计算。"""
+    service.create_account(
+        AccountCreate(
+            account_id="shadow-1",
+            name="Shadow",
+            account_type=AccountType.SHADOW,
+            strategy_name="B0.4",
+            strategy_config={"max_holdings": 5},
+            initial_capital=1_000_000,
+            start_mode=StartMode.IMPORTED,
+            start_date="2026-06-29",
+            opening_cash=900_000,
+            opening_positions=(OpeningPosition("512400.SH", 10_000, 10.0, 10.0),),
+        )
+    )
+    order = {
+        "order_id": "order-1",
+        "dedupe_key": "shadow-1:2026-07-03:512400.SH:BUY",
+        "account_id": "shadow-1",
+        "signal_date": "2026-07-02",
+        "trade_date": "2026-07-03",
+        "ticker": "512400.SH",
+        "action": "BUY",
+        "current_shares": 10_000,
+        "target_shares": 10_100,
+        "delta_shares": 100,
+        "reference_price": 1.0,
+        "reason": "B0.4 selected",
+        "status": OrderStatus.PENDING.value,
+        "created_at": "2026-07-02T16:00:00",
+    }
+    service.append_order(order)
+    service.confirm_shadow_order(ManualFill("shadow-1", "order-1", "2026-07-03", 1.0, 100))
+    positions = {p["ticker"]: p for p in service.store.list_positions("shadow-1", "2026-07-03")}
+    pos = positions["512400.SH"]
+    expected_cost = (10_000 * 10.0 + 100 * 1.0) / 10_100
+    assert pos["cost_price"] == pytest.approx(expected_cost, abs=0.0001)
+
+
+def test_reject_requires_reason(service):
+    _seed_shadow_order(service)
+    with pytest.raises(ValueError, match="reason"):
+        service.reject_shadow_order("shadow-1", "order-1", "")
+
+
+def test_cancel_requires_reason(service):
+    _seed_shadow_order(service)
+    with pytest.raises(ValueError, match="reason"):
+        service.cancel_shadow_order("shadow-1", "order-1", "   ")

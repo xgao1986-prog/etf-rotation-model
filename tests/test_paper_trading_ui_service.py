@@ -227,5 +227,29 @@ def test_list_pending_shadow_orders(ui_service):
     assert pending == []
 
 
+def test_batch_creation_rolls_back_on_failure(ui_service):
+    """批量创建任一项失败时不得留下任何账户。"""
+    presets = _make_presets()
+    # 先创建第一个预设对应的账户
+    ui_service.create_comparison_accounts(
+        preset_names=["B0.4"],
+        presets=presets,
+        initial_capital=1_000_000,
+        start_date="2026-06-29",
+    )
+    # 再次批量创建（包含已存在的 B0.4 和一个新预设）应整体失败并回滚
+    with pytest.raises(ValueError, match="exists"):
+        ui_service.create_comparison_accounts(
+            preset_names=["B0.4", "保守型"],
+            presets=presets,
+            initial_capital=1_000_000,
+            start_date="2026-06-29",
+        )
+    accounts = ui_service.service.list_accounts()
+    # 只保留第一次创建的账户，第二次不应留下保守型
+    assert len(accounts) == 1
+    assert accounts[0]["strategy_name"] == "B0.4"
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

@@ -63,13 +63,19 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
 
 
 def load_strategy_presets(path: str = DEFAULT_PRESET_PATH) -> Dict[str, Any]:
-    """Load saved strategy presets from JSON.
+    """Load saved strategy presets from JSON and validate each one.
 
     Returns built-in defaults when the file does not exist.
     """
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            presets = json.load(f)
+        for name, preset in presets.items():
+            try:
+                validate_strategy_preset(preset)
+            except ValueError as exc:
+                raise ValueError(f"invalid preset '{name}': {exc}") from exc
+        return presets
     return BUILTIN_DEFAULTS.copy()
 
 

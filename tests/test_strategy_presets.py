@@ -112,5 +112,36 @@ def test_validate_rejects_zero_stop_loss():
         validate_strategy_preset(bad)
 
 
+def test_load_invalid_preset_file_raises():
+    """加载包含无效预设的 JSON 文件时必须报错。"""
+    bad_presets = {
+        "bad": {
+            "weights": {"trend": 0.30, "confirm": 0.20, "momentum": 0.25, "volume": 0.15, "volatility": 0.10},
+            "max_holdings": 0,
+            "stop_loss": -0.08,
+        }
+    }
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'bad_presets.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(bad_presets, f)
+        with pytest.raises(ValueError):
+            load_strategy_presets(path)
+
+
+def test_load_presets_validates_each_preset():
+    """加载多预设文件时，任一无效预设都使整个加载失败。"""
+    mixed_presets = {
+        "good": VALID_PRESET.copy(),
+        "bad": {"weights": VALID_PRESET["weights"].copy(), "max_holdings": -1, "stop_loss": -0.08},
+    }
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'mixed_presets.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(mixed_presets, f)
+        with pytest.raises(ValueError):
+            load_strategy_presets(path)
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
