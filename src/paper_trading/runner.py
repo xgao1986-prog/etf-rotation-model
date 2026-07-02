@@ -2,40 +2,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from .store import DuplicateLedgerEvent
-
-
-class TradingCalendar:
-    """简单交易日历：跳过周末。"""
-
-    @staticmethod
-    def is_trading_day(date: str) -> bool:
-        dt = pd.to_datetime(date)
-        return dt.weekday() < 5  # Monday=0, Friday=4
-
-    @staticmethod
-    def next_trading_day(date: str) -> str:
-        dt = pd.to_datetime(date) + timedelta(days=1)
-        while dt.weekday() >= 5:
-            dt += timedelta(days=1)
-        return dt.strftime("%Y-%m-%d")
-
-    @staticmethod
-    def previous_trading_day(date: str) -> str:
-        dt = pd.to_datetime(date) - timedelta(days=1)
-        while dt.weekday() >= 5:
-            dt -= timedelta(days=1)
-        return dt.strftime("%Y-%m-%d")
-
-    @staticmethod
-    def is_rebalance_day(date: str) -> bool:
-        """周四为调仓日。"""
-        return pd.to_datetime(date).weekday() == 3
+from .calendar import ChinaTradingCalendar
 
 
 class PaperTradingRunner:
@@ -50,22 +22,24 @@ class PaperTradingRunner:
     def __init__(self, service, rebalance_planner=None):
         self.service = service
         self.rebalance_planner = rebalance_planner
-        self.calendar = TradingCalendar()
+        self.calendar = ChinaTradingCalendar()
 
     # ============== Daily Flow (single entry point) ==============
 
-    def run_daily(self, account_id, date, open_prices, close_prices, scores_df=None, cfg=None):
+    def run_daily(self, account_id, date, open_prices, close_prices, scores_df=None):
         """
         完整每日流程（幂等）。
+
+        核心原则：一天的所有计算先在内存完成，最后一次性保存成交、现金、
+        持仓、总资产和运行结果。中途不得单独写入账户状态。
 
         1. 如果当天已处理，直接返回已有结果。
         2. 获取上一交易日状态作为基线。
         3. 执行今天到期的调仓信号（使用 open_prices）。
-        4. 每日估值（使用 close_prices）。
-        5. 止损检查（使用 close_prices）。
-        6. 执行止损（使用 close_prices）。
-        7. 如果是调仓日，保存信号供下一交易日执行。
-        8. 原子保存最终状态。
+        4. 止损检查与执行（使用 open_prices）。
+        5. 每日估值（使用 close_prices，只更新市值，不修改股数）。
+        6. 如果是调仓日，保存信号供下一交易日执行（使用账户冻结配置）。
+        7. 原子保存最终状态。
 
         返回：{"cash": float, "positions": dict, "nav": float, "trades": list, "skipped": list}
         """
@@ -77,45 +51,55 @@ class PaperTradingRunner:
         prev_date = self.calendar.previous_trading_day(date)
         baseline = self._get_baseline_state(account_id, prev_date)
 
-        trades = []
-        skipped = []
+        trades: List[Dict] = []
+        skipped: List[Dict] = []
+        order_refs: List[Dict] = []
 
         # 3. 执行今天到期的调仓信号
         pending_signals = self.service.store.load_pending_signals(account_id, date)
         for signal in pending_signals:
-            signal_trades, signal_skipped = self._execute_signal(
+            signal_trades, signal_skipped, signal_orders = self._execute_signal(
                 account_id, date, baseline, signal, open_prices
             )
             trades.extend(signal_trades)
             skipped.extend(signal_skipped)
+            order_refs.extend(signal_orders)
+            baseline = self._apply_trades_to_state(baseline, signal_trades, open_prices)
 
-        # 4. 每日估值（更新持仓市值，不修改股数）
-        baseline = self._apply_valuation(baseline, close_prices)
-
-        # 5. 止损检查
-        sl_orders = self._check_stop_loss(baseline, close_prices)
-
-        # 6. 执行止损
+        # 4. 止损检查与执行（使用开盘价）
+        sl_orders, sl_skipped = self._check_stop_loss(baseline, open_prices)
+        skipped.extend(sl_skipped)
         if sl_orders:
-            sl_trades, sl_skipped = self._execute_orders(
-                account_id, date, sl_orders, close_prices
+            sl_trades, sl_skipped, sl_order_refs = self._execute_orders_in_memory(
+                baseline, sl_orders, open_prices
             )
             trades.extend(sl_trades)
             skipped.extend(sl_skipped)
-            # 更新基线状态（止损已执行）
-            baseline = self._apply_trades_to_state(baseline, sl_trades, close_prices)
+            order_refs.extend(sl_order_refs)
+            baseline = self._apply_trades_to_state(baseline, sl_trades, open_prices)
 
-        # 7. 如果是调仓日，保存信号
-        if self.calendar.is_rebalance_day(date) and scores_df is not None and cfg is not None:
+        # 5. 每日估值（使用收盘价，只更新市值）
+        baseline = self._apply_valuation(baseline, close_prices)
+
+        # 6. 如果是调仓日，保存信号（使用账户创建时的冻结配置）
+        if self.calendar.is_rebalance_day(date) and scores_df is not None:
+            account = self.service.store.get_account(account_id)
+            if account is None:
+                raise KeyError(f"missing account: {account_id}")
+            cfg = json.loads(account["config_json"])
             next_day = self.calendar.next_trading_day(date)
             self._save_rebalance_signal(account_id, date, next_day, scores_df, cfg)
 
-        # 8. 原子保存最终状态
+        # 7. 原子保存最终状态
+        for trade in trades:
+            trade["account_id"] = account_id
+            trade["trade_date"] = date
         self.service.store.save_daily_state(
             account_id, date,
             cash=baseline["cash"],
             positions=baseline["positions"],
             trades=trades,
+            skipped=skipped,
         )
 
         return self._build_result_from_db(account_id, date)
@@ -126,7 +110,6 @@ class PaperTradingRunner:
         """获取上一交易日状态作为今日基线。如果 prev_date 无记录，回退到最近可用记录。"""
         nav = self.service.store.get_nav(account_id, prev_date)
         if nav is None:
-            # 回退到最近可用 NAV
             nav_date = self.service.store.get_previous_nav_date(account_id, prev_date)
             if nav_date is None:
                 raise KeyError(f"missing NAV: {account_id} {prev_date}")
@@ -147,39 +130,121 @@ class PaperTradingRunner:
         }
 
     def _apply_valuation(self, state, prices):
-        """更新持仓市值（不修改股数）。"""
+        """更新持仓市值（不修改股数）。缺少价格时保留最近有效价格。"""
         for ticker, pos in state["positions"].items():
             price = prices.get(ticker, pos["last_price"])
+            if price is None or price <= 0:
+                continue
             pos["last_price"] = price
         return state
 
     def _check_stop_loss(self, state, prices, stop_loss=-0.08):
-        """检查持仓是否触发止损。缺少价格的不检查。"""
+        """检查持仓是否触发止损。缺少开盘价的记录未执行原因。"""
         orders = []
+        skipped = []
         for ticker, pos in state["positions"].items():
             cost_price = pos["cost_price"]
             if cost_price <= 0:
                 continue
             if ticker not in prices or prices[ticker] <= 0:
+                skipped.append({
+                    "order_id": None,
+                    "ticker": ticker,
+                    "action": "STOP_LOSS",
+                    "reason": f"missing price for {ticker}",
+                })
                 continue
             current_price = prices[ticker]
             loss_pct = (current_price - cost_price) / cost_price
             if loss_pct < stop_loss - 1e-9:
                 orders.append({
-                    "order_id": f"sl-{ticker}-{datetime.now().strftime('%Y%m%d')}",
+                    "order_id": f"sl-{ticker}-{date_str()}",
                     "ticker": ticker,
                     "action": "STOP_LOSS",
                     "delta_shares": -pos["shares"],
                 })
-        return orders
+        return orders, skipped
 
-    def _execute_orders(self, account_id, trade_date, orders, prices):
-        """执行订单，返回 (trades, skipped)。"""
-        return self.service.store.execute_trades_atomic(
-            account_id, trade_date, orders, prices,
-            commission_rate=self.COMMISSION_RATE,
-            min_commission=self.MIN_COMMISSION,
-        )
+    def _execute_orders_in_memory(
+        self, state, orders, prices
+    ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+        """
+        在内存中检查并生成成交记录，返回 (trades, skipped, order_refs)。
+        不修改 state，也不写入数据库；数据库写入由 run_daily 最后统一完成。
+        """
+        trades: List[Dict] = []
+        skipped: List[Dict] = []
+        order_refs: List[Dict] = []
+        now = datetime.now().isoformat(timespec="seconds")
+
+        for order in orders:
+            ticker = order["ticker"]
+            action = order["action"]
+            price = prices.get(ticker)
+
+            if price is None or price <= 0:
+                skipped.append({
+                    "order_id": order.get("order_id"),
+                    "ticker": ticker,
+                    "action": action,
+                    "reason": f"missing price for {ticker}",
+                })
+                continue
+
+            shares = abs(order["delta_shares"])
+            if shares <= 0:
+                continue
+
+            commission = max(shares * price * self.COMMISSION_RATE, self.MIN_COMMISSION)
+
+            if action in ("SELL", "STOP_LOSS"):
+                available = state["positions"].get(ticker, {}).get("shares", 0)
+                if shares > available:
+                    skipped.append({
+                        "order_id": order.get("order_id"),
+                        "ticker": ticker,
+                        "action": action,
+                        "reason": f"oversell: want {shares}, have {available}",
+                    })
+                    continue
+            elif action == "BUY":
+                cost = shares * price + commission
+                if state["cash"] < cost:
+                    skipped.append({
+                        "order_id": order.get("order_id"),
+                        "ticker": ticker,
+                        "action": action,
+                        "reason": f"insufficient cash: need {cost:.2f}, have {state['cash']:.2f}",
+                    })
+                    continue
+            else:
+                skipped.append({
+                    "order_id": order.get("order_id"),
+                    "ticker": ticker,
+                    "action": action,
+                    "reason": f"unknown action: {action}",
+                })
+                continue
+
+            order_id = order.get("order_id")
+            trade = {
+                "trade_id": f"trade-{ticker}-{action}-{date_str()}-{now.replace(':', '')}",
+                "dedupe_key": f"{ticker}:{action}:{date_str()}",
+                "order_id": order_id,
+                "account_id": None,  # filled by caller before persistence
+                "ticker": ticker,
+                "action": action,
+                "shares": shares,
+                "price": price,
+                "commission": commission,
+                "source": "SIMULATED",
+                "trade_date": None,  # filled by caller before persistence
+                "created_at": now,
+            }
+            trades.append(trade)
+            order_refs.append({"order_id": order_id, "trade_id": trade["trade_id"]})
+
+        return trades, skipped, order_refs
 
     def _apply_trades_to_state(self, state, trades, prices):
         """将成交记录应用到状态（内存更新，不写入数据库）。"""
@@ -214,20 +279,22 @@ class PaperTradingRunner:
     # ============== Signal Execution ==============
 
     def _execute_signal(self, account_id, trade_date, baseline, signal, open_prices):
-        """执行保存的信号：重新运行 planner，使用当日开盘价。"""
+        """执行保存的信号：强制使用账户创建时保存的冻结配置。"""
         from io import StringIO
         scores_df = pd.read_json(StringIO(signal["scores_json"]))
-        cfg = json.loads(signal["config_json"])
+
+        account = self.service.store.get_account(account_id)
+        if account is None:
+            raise KeyError(f"missing account: {account_id}")
+        cfg = json.loads(account["config_json"])
 
         trades, _ = self._run_planner(baseline, scores_df, open_prices, cfg)
 
-        # 将 planner trades 转换为 orders
         orders = []
         for trade in trades:
             action = trade["action"]
             ticker = trade["ticker"]
             shares = trade["shares"]
-            current_shares = baseline["positions"].get(ticker, {}).get("shares", 0)
             delta = shares if action == "BUY" else -shares
             orders.append({
                 "order_id": f"{action.lower()}-{account_id}-{trade_date}-{ticker}",
@@ -236,11 +303,11 @@ class PaperTradingRunner:
                 "delta_shares": delta,
             })
 
-        return self._execute_orders(account_id, trade_date, orders, open_prices)
+        return self._execute_orders_in_memory(baseline, orders, open_prices)
 
     # ============== Rebalance Planner ==============
 
-    def _run_planner(self, state, scores_df, prices, cfg):
+    def _run_planner(self, state, scores_df, prices, cfg=None):
         """使用 plan_rebalance_v2_5 生成调仓计划。"""
         from config import ETF_UNIVERSE, DEFENSE_UNIVERSE
 
@@ -250,16 +317,18 @@ class PaperTradingRunner:
         )
         current_positions = {t: p["shares"] for t, p in state["positions"].items()}
 
-        min_score = cfg.get("min_total_score", 40)
+        # 使用账户冻结配置；如显式传入 cfg（向后兼容）则合并
+        account_cfg = {}
+        if cfg is not None:
+            account_cfg = cfg
+        min_score = account_cfg.get("min_total_score", 40)
 
-        # 行业候选
         industry_scores = scores_df[scores_df["ticker"].isin(ETF_UNIVERSE.keys())]
         qualified = industry_scores[industry_scores["total_score"] >= min_score].sort_values(
             "total_score", ascending=False
         )
         industry_candidates = [(row["ticker"], float(row["total_score"])) for _, row in qualified.iterrows()]
 
-        # 防御候选：门槛 = 行业门槛 - 10
         defense_min_score = min_score - self.DEFENSE_THRESHOLD_DELTA
         defense_scores = scores_df[scores_df["ticker"].isin(DEFENSE_UNIVERSE.keys())]
         defense_qualified = defense_scores[defense_scores["total_score"] >= defense_min_score].sort_values(
@@ -267,7 +336,6 @@ class PaperTradingRunner:
         )
         defense_candidates = [(row["ticker"], float(row["total_score"])) for _, row in defense_qualified.iterrows()]
 
-        # 构建价格映射
         price_map = {}
         for t in set(ETF_UNIVERSE.keys()) | set(DEFENSE_UNIVERSE.keys()):
             price_map[t] = prices.get(t, 0.0)
@@ -285,10 +353,10 @@ class PaperTradingRunner:
             prices=price_map,
             industry_tickers=set(ETF_UNIVERSE.keys()),
             defense_tickers=set(DEFENSE_UNIVERSE.keys()),
-            max_industry_holdings=cfg.get("max_holdings", 5),
+            max_industry_holdings=account_cfg.get("max_holdings", 5),
             max_defense_holdings=2,
-            max_total_holdings=cfg.get("max_holdings", 5),
-            max_position_per_etf=cfg.get("max_position_per_etf", 0.20),
+            max_total_holdings=account_cfg.get("max_holdings", 5),
+            max_position_per_etf=account_cfg.get("max_position_per_etf", 0.20),
             max_total_position=1.0,
             commission_rate=self.COMMISSION_RATE,
             min_commission=self.MIN_COMMISSION,
@@ -315,12 +383,13 @@ class PaperTradingRunner:
         nav = self.service.store.get_nav(account_id, date)
         positions = self.service.store.list_positions(account_id, date)
         trades = self.service.store.list_trades(account_id, date)
+        skipped = self.service.store.list_skipped(account_id, date)
         return {
             "cash": nav["cash"] if nav else 0.0,
             "positions": {p["ticker"]: p for p in positions},
             "nav": nav["nav"] if nav else 0.0,
             "trades": trades,
-            "skipped": [],
+            "skipped": skipped,
         }
 
     # ============== Backward-compatible helpers ==============
@@ -335,8 +404,18 @@ class PaperTradingRunner:
         if prev_date is None:
             return []
         state = self._get_baseline_state(account_id, prev_date)
-        return self._check_stop_loss(state, prices, stop_loss)
+        orders, _ = self._check_stop_loss(state, prices, stop_loss)
+        return orders
 
     def simulate_execution(self, account_id, trade_date, orders, prices):
-        """向后兼容：执行订单。"""
-        return self._execute_orders(account_id, trade_date, orders, prices)
+        """向后兼容：在内存中执行订单，不写入数据库。"""
+        prev_date = self.service.store.get_previous_nav_date(account_id, trade_date)
+        if prev_date is None:
+            prev_date = self.service.store.get_account(account_id)["start_date"]
+        state = self._get_baseline_state(account_id, prev_date)
+        trades, skipped, _ = self._execute_orders_in_memory(state, orders, prices)
+        return trades, skipped
+
+
+def date_str() -> str:
+    return datetime.now().strftime("%Y%m%d")

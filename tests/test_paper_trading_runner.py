@@ -8,7 +8,7 @@ trading calendar, defense threshold, T+1 signal execution, open/close prices,
 partial failure isolation.
 """
 
-import os, sys, tempfile, pytest
+import json, os, sys, tempfile, pytest
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -17,19 +17,22 @@ from paper_trading.models import AccountCreate, AccountType, OpeningPosition, St
 from paper_trading.service import PaperTradingService
 from paper_trading.store import PaperTradingStore
 from paper_trading.runner import PaperTradingRunner
+from paper_trading.calendar import ChinaTradingCalendar
 
 
-def _make_account(service, account_id='acct-test', start_mode=StartMode.CASH, cash=1_000_000, holdings=None):
+def _make_account(service, account_id='acct-test', start_mode=StartMode.CASH, cash=1_000_000,
+                    holdings=None, strategy_config=None):
     holdings = holdings or []
     positions_value = sum(h.market_value for h in holdings)
     if start_mode is StartMode.IMPORTED:
         initial_capital = cash + positions_value
     else:
         initial_capital = cash
+    strategy_config = strategy_config or {'max_holdings': 5, 'stop_loss': -0.08}
     request = AccountCreate(
         account_id=account_id, name='Test',
         account_type=AccountType.COMPARISON, strategy_name='B0.4',
-        strategy_config={'max_holdings': 5, 'stop_loss': -0.08},
+        strategy_config=strategy_config,
         initial_capital=initial_capital, start_mode=start_mode,
         start_date='2026-06-29',
         opening_cash=cash if start_mode is StartMode.IMPORTED else None,
@@ -87,10 +90,10 @@ class TestIdempotency:
 
 class TestStopLoss:
     def test_stop_loss_clears_position(self, runner, service):
-        """止损清仓后持仓确实消失。"""
+        """止损清仓后持仓确实消失。止损按开盘价检查并成交。"""
         acct = _make_account(service, cash=900_000, start_mode=StartMode.IMPORTED,
                                holdings=[OpeningPosition('512400.SH', 10_000, 10.0, 10.0)])
-        result = runner.run_daily(acct, '2026-06-30', {}, {'512400.SH': 9.1})
+        result = runner.run_daily(acct, '2026-06-30', {'512400.SH': 9.1}, {'512400.SH': 9.1})
 
         # 止损触发，持仓应消失
         assert '512400.SH' not in result['positions']
@@ -103,7 +106,7 @@ class TestStopLoss:
     def test_exact_threshold_not_triggered(self, runner, service):
         acct = _make_account(service, cash=900_000, start_mode=StartMode.IMPORTED,
                                holdings=[OpeningPosition('512400.SH', 10_000, 10.0, 10.0)])
-        result = runner.run_daily(acct, '2026-06-30', {}, {'512400.SH': 9.2})
+        result = runner.run_daily(acct, '2026-06-30', {'512400.SH': 9.2}, {'512400.SH': 9.2})
         assert '512400.SH' in result['positions']
         assert len(result['trades']) == 0
 
@@ -124,12 +127,12 @@ class TestOverSell:
         executed, skipped = runner.simulate_execution(acct, '2026-06-30', orders, {'512400.SH': 1.0})
         assert len(executed) == 0
         assert len(skipped) == 1
-        assert 'oversell' in skipped[0][1]
+        assert 'oversell' in skipped[0]['reason']
 
-        # 验证持仓未变
+        # simulate_execution 现在只在内存执行，不单独写入账户状态；
+        # 因此当日无持仓记录，上一日持仓应保持不变。
         positions = service.store.list_positions(acct, '2026-06-30')
-        # 由于 execute_trades_atomic 会清除旧持仓并重新写入，
-        # 如果没有成交，就不会写入新持仓。需要检查前一日的持仓。
+        assert len(positions) == 0
         prev_positions = service.store.list_positions(acct, '2026-06-29')
         assert prev_positions[0]['shares'] == 100
 
@@ -139,8 +142,7 @@ class TestOverSell:
 class TestTradingCalendar:
     def test_weekend_skipped(self, runner, service):
         """周五的下一交易日是周一。"""
-        from paper_trading.runner import TradingCalendar
-        cal = TradingCalendar()
+        cal = ChinaTradingCalendar()
         # 2026-06-26 is Friday, next trading day is Monday 2026-06-29
         assert cal.next_trading_day('2026-06-26') == '2026-06-29'
         # 2026-06-27 is Saturday, next trading day is Monday 2026-06-29
@@ -151,14 +153,16 @@ class TestTradingCalendar:
         """周四信号在周五自动执行。"""
         acct = _make_account(service, cash=1_000_000)
         scores = _make_scores(['512400.SH'], [65])
-        cfg = {'min_total_score': 40, 'max_holdings': 5, 'max_position_per_etf': 0.20}
 
         # 周四(2026-07-02)：生成信号（使用周四收盘价）
-        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores, cfg)
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
 
-        # 验证信号已保存
+        # 验证信号已保存，且配置使用账户冻结配置
         signals = service.store.load_pending_signals(acct, '2026-07-03')
         assert len(signals) == 1
+        saved_cfg = json.loads(signals[0]['config_json'])
+        account = service.store.get_account(acct)
+        assert saved_cfg == json.loads(account['config_json'])
 
         # 周五(2026-07-03)：自动执行周四信号（使用周五开盘价）
         result = runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
@@ -182,10 +186,8 @@ class TestDefenseThreshold:
             ['512400.SH', '515230.SH', '518880.SH'],
             [65, 62, 25]  # 518880.SH = 25 < 30
         )
-        cfg = {'min_total_score': 40, 'max_holdings': 5, 'max_position_per_etf': 0.20}
-
         runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0, '515230.SH': 1.0, '518880.SH': 1.0},
-                         {'512400.SH': 1.0, '515230.SH': 1.0, '518880.SH': 1.0}, scores, cfg)
+                         {'512400.SH': 1.0, '515230.SH': 1.0, '518880.SH': 1.0}, scores)
         runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.0, '515230.SH': 1.0, '518880.SH': 1.0},
                          {'512400.SH': 1.0, '515230.SH': 1.0, '518880.SH': 1.0})
 
@@ -201,9 +203,8 @@ class TestOpenClosePrices:
         """开盘成交与收盘估值使用不同价格。"""
         acct = _make_account(service, cash=1_000_000)
         scores = _make_scores(['512400.SH'], [65])
-        cfg = {'min_total_score': 40, 'max_holdings': 5, 'max_position_per_etf': 0.20}
 
-        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores, cfg)
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
         result = runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.10}, {'512400.SH': 1.20})
 
         # 成交使用开盘价
@@ -265,9 +266,8 @@ class TestUniqueFinalState:
         """买入前检查现金，禁止负现金。"""
         acct = _make_account(service, cash=1_000)
         scores = _make_scores(['512400.SH'], [65])
-        cfg = {'min_total_score': 40, 'max_holdings': 5, 'max_position_per_etf': 0.20}
 
-        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores, cfg)
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
         result = runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.0}, {'512400.SH': 1.0})
 
         # 现金不足，订单被拒绝，现金不应为负
@@ -282,11 +282,134 @@ class TestConflict:
         """止损与调仓冲突：止损先执行。"""
         acct = _make_account(service, cash=900_000, start_mode=StartMode.IMPORTED,
                                holdings=[OpeningPosition('512400.SH', 10_000, 10.0, 10.0)])
-        # 周二：持有 512400.SH，触发止损
+        # 周二：持有 512400.SH，开盘触发止损
         runner.run_daily(acct, '2026-06-30', {'512400.SH': 9.1}, {'512400.SH': 9.1})
         # 周三：止损已执行，持仓已清空
         result = runner.run_daily(acct, '2026-07-01', {'512400.SH': 9.0}, {'512400.SH': 9.0})
         assert '512400.SH' not in result['positions']
+
+
+# ============== Codex Final Review: Atomic Save & Open/Close Separation ==============
+
+class TestCodexFinalReview:
+    def test_friday_trade_updates_state_with_close_valuation(self, runner, service):
+        """周五成交后必须持有对应股份，现金扣减正确，收盘总资产按收盘价计算。"""
+        acct = _make_account(service, cash=1_000_000)
+        scores = _make_scores(['512400.SH'], [65])
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        result = runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.20})
+
+        assert '512400.SH' in result['positions']
+        trade = [t for t in result['trades'] if t['ticker'] == '512400.SH'][0]
+        shares = trade['shares']
+        assert trade['price'] == 1.05  # 成交价用开盘价
+
+        expected_cash = 1_000_000 - shares * 1.05 - trade['commission']
+        assert result['cash'] == pytest.approx(expected_cash, abs=0.01)
+
+        nav = service.store.get_nav(acct, '2026-07-03')
+        expected_nav = result['cash'] + shares * 1.20  # 收盘总资产用收盘价
+        assert nav['nav'] == pytest.approx(expected_nav, abs=0.01)
+
+    def test_stop_loss_on_open_even_if_close_recovered(self, runner, service):
+        """开盘跌破止损线、收盘恢复时仍应按开盘价止损。"""
+        acct = _make_account(service, cash=900_000, start_mode=StartMode.IMPORTED,
+                               holdings=[OpeningPosition('512400.SH', 10_000, 10.0, 10.0)])
+        result = runner.run_daily(acct, '2026-06-30', {'512400.SH': 9.1}, {'512400.SH': 10.0})
+        assert '512400.SH' not in result['positions']
+        assert len(result['trades']) == 1
+        assert result['trades'][0]['price'] == 9.1
+
+    def test_no_stop_loss_when_only_close_falls(self, runner, service):
+        """开盘未跌破、仅收盘跌破时不得当天止损。"""
+        acct = _make_account(service, cash=900_000, start_mode=StartMode.IMPORTED,
+                               holdings=[OpeningPosition('512400.SH', 10_000, 10.0, 10.0)])
+        result = runner.run_daily(acct, '2026-06-30', {'512400.SH': 9.3}, {'512400.SH': 9.0})
+        assert '512400.SH' in result['positions']
+        assert len(result['trades']) == 0
+
+    def test_june_18_2026_next_trading_day_is_june_22(self, runner, service):
+        """2026年6月18日的下一交易日必须是6月22日（端午节假期）。"""
+        cal = ChinaTradingCalendar()
+        assert cal.next_trading_day('2026-06-18') == '2026-06-22'
+
+    def test_external_config_cannot_override_account_config(self, runner, service):
+        """运行配置必须读取账户创建时保存的冻结配置，不允许调用时临时替换。"""
+        acct = _make_account(
+            service, cash=1_000_000,
+            strategy_config={'max_holdings': 1, 'min_total_score': 40, 'max_position_per_etf': 0.20},
+        )
+        scores = _make_scores(['512400.SH', '515230.SH'], [65, 60])
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0, '515230.SH': 1.0},
+                         {'512400.SH': 1.0, '515230.SH': 1.0}, scores)
+
+        # 篡改信号中保存的配置，模拟外部传入不同配置
+        with service.store.connect() as conn:
+            conn.execute(
+                "UPDATE paper_signals SET config_json = ? WHERE account_id = ?",
+                (json.dumps({'max_holdings': 5, 'min_total_score': 40, 'max_position_per_etf': 0.20}, sort_keys=True), acct),
+            )
+
+        result = runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.0, '515230.SH': 1.0},
+                                  {'512400.SH': 1.0, '515230.SH': 1.0})
+        # 账户冻结配置 max_holdings=1，因此只能持有1只
+        held_tickers = set(result['positions'].keys())
+        assert len(held_tickers) == 1
+
+    def test_save_failure_leaves_no_partial_records(self, runner, service):
+        """保存过程故意失败时，不得留下成交或半套账户记录。"""
+        acct = _make_account(service, cash=900_000, start_mode=StartMode.IMPORTED,
+                               holdings=[OpeningPosition('512400.SH', 10_000, 10.0, 10.0)])
+
+        def failing_save(*args, **kwargs):
+            raise RuntimeError("simulated save failure")
+
+        original_save = service.store.save_daily_state
+        service.store.save_daily_state = failing_save
+        with pytest.raises(RuntimeError, match="simulated save failure"):
+            runner.run_daily(acct, '2026-06-30', {'512400.SH': 9.1}, {'512400.SH': 9.1})
+
+        service.store.save_daily_state = original_save
+        assert service.store.list_trades(acct, '2026-06-30') == []
+        assert service.store.list_positions(acct, '2026-06-30') == []
+        assert service.store.get_nav(acct, '2026-06-30') is None
+        with service.store.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_runs WHERE account_id = ? AND run_date = ?",
+                (acct, '2026-06-30'),
+            ).fetchall()
+            assert len(rows) == 0
+
+    def test_trade_can_be_traced_to_order(self, runner, service):
+        """每笔成交必须能够追溯到原始建议。"""
+        acct = _make_account(service, cash=1_000_000)
+        scores = _make_scores(['512400.SH'], [65])
+        runner.run_daily(acct, '2026-07-02', {'512400.SH': 1.0}, {'512400.SH': 1.0}, scores)
+        result = runner.run_daily(acct, '2026-07-03', {'512400.SH': 1.05}, {'512400.SH': 1.05})
+        for trade in result['trades']:
+            assert trade['order_id'] is not None
+            assert trade['order_id'].startswith(trade['action'].lower())
+
+    def test_stop_loss_trade_can_be_traced_to_order(self, runner, service):
+        """止损成交同样可以追溯到原始建议。"""
+        acct = _make_account(service, cash=900_000, start_mode=StartMode.IMPORTED,
+                               holdings=[OpeningPosition('512400.SH', 10_000, 10.0, 10.0)])
+        result = runner.run_daily(acct, '2026-06-30', {'512400.SH': 9.1}, {'512400.SH': 9.1})
+        trade = result['trades'][0]
+        assert trade['order_id'].startswith('sl-512400.SH-')
+
+    def test_skipped_reasons_persist_after_repeated_reads(self, runner, service):
+        """缺价、资金不足、超卖等未执行原因必须保存，重复查看时不能丢失。"""
+        acct = _make_account(service, cash=900_000, start_mode=StartMode.IMPORTED,
+                               holdings=[OpeningPosition('512400.SH', 10_000, 10.0, 10.0)])
+        # 开盘缺价，止损无法执行
+        result1 = runner.run_daily(acct, '2026-06-30', {}, {'512400.SH': 9.1})
+        assert len(result1['skipped']) == 1
+        assert 'missing price' in result1['skipped'][0]['reason']
+
+        result2 = runner.run_daily(acct, '2026-06-30', {}, {'512400.SH': 9.1})
+        assert len(result2['skipped']) == 1
+        assert result2['skipped'][0]['reason'] == result1['skipped'][0]['reason']
 
 
 if __name__ == '__main__':
