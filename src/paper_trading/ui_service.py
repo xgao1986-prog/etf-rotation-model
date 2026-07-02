@@ -47,11 +47,19 @@ class PaperTradingUIService:
                 raise ValueError(f"account already exists: {account_id}")
             resolved.append((preset_name, account_id, preset))
 
-        # Phase 2: create all accounts; failures here are unlikely but leave a
-        # record of successfully created IDs so callers can roll back if needed.
+        # Phase 2: create all accounts inside a single database transaction.
+        # If any creation fails, the entire batch is rolled back automatically.
         created_ids: List[str] = []
-        try:
+        with self.service.store.connect() as conn:
             for preset_name, account_id, preset in resolved:
+                # Re-check existence inside the transaction to avoid race conditions.
+                row = conn.execute(
+                    "SELECT 1 FROM paper_accounts WHERE account_id = ?",
+                    (account_id,),
+                ).fetchone()
+                if row is not None:
+                    raise ValueError(f"account already exists: {account_id}")
+
                 request = AccountCreate(
                     account_id=account_id,
                     name=f"{preset_name} {start_date}",
@@ -63,25 +71,9 @@ class PaperTradingUIService:
                     start_date=start_date,
                     group_id=group_id,
                 )
-                self.service.create_account(request)
+                self.service.create_account(request, conn=conn)
                 created_ids.append(account_id)
-        except Exception:
-            # Roll back any accounts already created in this batch.
-            for account_id in created_ids:
-                with self.service.store.connect() as conn:
-                    conn.execute(
-                        "DELETE FROM paper_accounts WHERE account_id = ?",
-                        (account_id,),
-                    )
-                    conn.execute(
-                        "DELETE FROM paper_positions WHERE account_id = ?",
-                        (account_id,),
-                    )
-                    conn.execute(
-                        "DELETE FROM paper_daily_nav WHERE account_id = ?",
-                        (account_id,),
-                    )
-            raise
+            # Commit happens automatically when the context manager exits.
 
         return created_ids
 

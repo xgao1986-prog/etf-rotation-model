@@ -22,7 +22,7 @@ class PaperTradingService:
     def __init__(self, store):
         self.store = store
 
-    def create_account(self, request: AccountCreate):
+    def create_account(self, request: AccountCreate, conn=None):
         if self.store.get_account(request.account_id):
             raise ValueError(f"account already exists: {request.account_id}")
 
@@ -80,7 +80,7 @@ class PaperTradingService:
             "data_date": request.start_date,
             "created_at": now,
         }
-        self.store.create_account_snapshot(account_row, position_rows, nav_row)
+        self.store.create_account_snapshot(account_row, position_rows, nav_row, conn=conn)
         return self.store.get_account(request.account_id)
 
     def get_nav(self, account_id, nav_date):

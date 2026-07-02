@@ -251,5 +251,32 @@ def test_batch_creation_rolls_back_on_failure(ui_service):
     assert accounts[0]["strategy_name"] == "B0.4"
 
 
+def test_batch_creation_is_atomic_on_midway_failure(ui_service, monkeypatch):
+    """第一个账户创建成功后、第二个失败时，第一个也不应残留，并保留原错误。"""
+    presets = _make_presets()
+    original_create_account = ui_service.service.create_account
+    call_count = 0
+
+    def failing_create_account(request, conn=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("injected midway failure")
+        return original_create_account(request, conn=conn)
+
+    monkeypatch.setattr(ui_service.service, "create_account", failing_create_account)
+
+    with pytest.raises(RuntimeError, match="injected midway failure"):
+        ui_service.create_comparison_accounts(
+            preset_names=["B0.4", "保守型"],
+            presets=presets,
+            initial_capital=1_000_000,
+            start_date="2026-06-29",
+        )
+
+    accounts = ui_service.service.list_accounts()
+    assert len(accounts) == 0
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

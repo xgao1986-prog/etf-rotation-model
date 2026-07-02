@@ -496,9 +496,9 @@ class PaperTradingStore:
                 (f"run-{account_id}-{date}", f"{account_id}:{date}:{task_type}", account_id, date, task_type, "SUCCESS", date, now),
             )
 
-    def create_account_snapshot(self, account_row, position_rows, nav_row):
-        with self.connect() as conn:
-            conn.execute(
+    def create_account_snapshot(self, account_row, position_rows, nav_row, conn=None):
+        def _do_insert(_conn):
+            _conn.execute(
                 """
                 INSERT INTO paper_accounts (
                     account_id, name, account_type, group_id, strategy_name,
@@ -513,7 +513,7 @@ class PaperTradingStore:
                 account_row,
             )
             if position_rows:
-                conn.executemany(
+                _conn.executemany(
                     """
                     INSERT INTO paper_positions (
                         account_id, as_of_date, ticker, shares,
@@ -525,7 +525,7 @@ class PaperTradingStore:
                     """,
                     position_rows,
                 )
-            conn.execute(
+            _conn.execute(
                 """
                 INSERT INTO paper_daily_nav (
                     account_id, nav_date, cash, positions_value,
@@ -537,6 +537,12 @@ class PaperTradingStore:
                 """,
                 nav_row,
             )
+
+        if conn is None:
+            with self.connect() as conn:
+                _do_insert(conn)
+        else:
+            _do_insert(conn)
 
     def get_account(self, account_id):
         with self.connect() as conn:
