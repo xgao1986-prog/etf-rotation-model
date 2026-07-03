@@ -309,16 +309,15 @@ class PaperTradingStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_trades(self, account_id, trade_date):
+    def list_trades(self, account_id, trade_date=None):
+        query = "SELECT * FROM paper_trades WHERE account_id = ?"
+        params = [account_id]
+        if trade_date is not None:
+            query += " AND trade_date = ?"
+            params.append(trade_date)
+        query += " ORDER BY trade_date, ticker, action"
         with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM paper_trades
-                WHERE account_id = ? AND trade_date = ?
-                ORDER BY ticker, action
-                """,
-                (account_id, trade_date),
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
 
     def list_accounts(self):

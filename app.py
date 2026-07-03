@@ -23,6 +23,11 @@ from config import (BACKTEST_CONFIG, BENCHMARK, ETF_UNIVERSE, DEFENSE_UNIVERSE,
                     FALLBACK_EQUITY_UNIVERSE, ALL_TRADABLE_ETFS, STRATEGY_CONFIG,
                     TRADING_RULES_CONFIG, DEFENSE_CONFIG, build_config)
 from database import ETFDatabase
+from paper_trading.store import PaperTradingStore
+from paper_trading.service import PaperTradingService
+from paper_trading.runner import PaperTradingRunner
+from paper_trading.ui_service import PaperTradingUIService
+from paper_trading.ui import render_paper_trading_page
 from strategy import StrategyEngine
 from strategy_presets import load_strategy_presets, save_strategy_presets
 from utils import cfg_signature
@@ -128,6 +133,101 @@ def load_presets():
 def save_presets(presets):
     """保存参数预设（兼容旧入口，使用共享保存函数）。"""
     save_strategy_presets(presets)
+
+
+@st.cache_resource
+def get_paper_trading_ui_service():
+    """Return a cached PaperTradingUIService singleton for the Streamlit page."""
+    db_path = os.path.join("database", "paper_trading.db")
+    store = PaperTradingStore(db_path)
+    service = PaperTradingService(store)
+    runner = PaperTradingRunner(service)
+    return PaperTradingUIService(service, runner)
+
+
+def _paper_trading_data_provider():
+    """Provide latest open/close prices, ETF scores, data date, and coverage info."""
+
+    def _valid_price(value):
+        if value is None:
+            return False
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return False
+        return np.isfinite(value) and value > 0
+
+    def _valid_score(value):
+        if value is None:
+            return False
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return False
+        return np.isfinite(value)
+
+    db = get_database()
+    latest = db.get_latest_date()
+    expected_tickers = set(ETF_UNIVERSE.keys()) | set(DEFENSE_UNIVERSE.keys())
+    if not latest:
+        coverage = {
+            "expected_price_count": len(expected_tickers),
+            "actual_price_count": 0,
+            "missing_prices": sorted(expected_tickers),
+            "invalid_prices": [],
+            "actual_score_count": 0,
+            "missing_scores": sorted(expected_tickers),
+            "invalid_scores": [],
+        }
+        return {}, {}, pd.DataFrame(), None, coverage
+
+    tickers = list(expected_tickers)
+    prices = load_market_data(ticker=tickers, start_date=latest, end_date=latest)
+    open_prices = {}
+    close_prices = {}
+    if not prices.empty:
+        if "ticker" in prices.columns and "open" in prices.columns:
+            open_prices = prices.set_index("ticker")["open"].to_dict()
+        if "ticker" in prices.columns and "close" in prices.columns:
+            close_prices = prices.set_index("ticker")["close"].to_dict()
+
+    invalid_prices = []
+    for ticker in expected_tickers:
+        open_val = open_prices.get(ticker)
+        close_val = close_prices.get(ticker)
+        reasons = []
+        if not _valid_price(open_val):
+            reasons.append(f"开盘价无效 ({open_val})")
+        if not _valid_price(close_val):
+            reasons.append(f"收盘价无效 ({close_val})")
+        if reasons:
+            invalid_prices.append({"ticker": ticker, "reason": "；".join(reasons)})
+
+    scores = load_scores(date=latest)
+    score_tickers = set(scores["ticker"].unique()) if not scores.empty else set()
+    invalid_scores = []
+    if not scores.empty and "total_score" in scores.columns:
+        score_map = scores.set_index("ticker")["total_score"].to_dict()
+        for ticker in expected_tickers:
+            total_score = score_map.get(ticker)
+            if not _valid_score(total_score):
+                invalid_scores.append({
+                    "ticker": ticker,
+                    "reason": f"total_score 无效 ({total_score})",
+                })
+
+    coverage = {
+        "expected_price_count": len(expected_tickers),
+        "actual_price_count": len(open_prices),
+        "missing_prices": sorted(expected_tickers - set(open_prices.keys())),
+        "invalid_prices": invalid_prices,
+        "actual_score_count": len(scores),
+        "missing_scores": sorted(expected_tickers - score_tickers),
+        "invalid_scores": invalid_scores,
+    }
+    if scores.empty:
+        return open_prices, close_prices, pd.DataFrame(), latest, coverage
+    return open_prices, close_prices, scores, latest, coverage
 
 
 def build_sidebar_config():
@@ -2295,8 +2395,8 @@ def main():
     cfg, is_b0_18 = build_sidebar_config()
     render_header()
 
-    tab_dashboard, tab_backtest, tab_etf, tab_data, tab_config, tab_live = st.tabs(
-        ["仪表盘", "回测结果", "ETF分析", "数据管理", "策略配置", "实盘助手"]
+    tab_dashboard, tab_backtest, tab_etf, tab_data, tab_config, tab_live, tab_paper = st.tabs(
+        ["仪表盘", "回测结果", "ETF分析", "数据管理", "策略配置", "实盘助手", "虚拟盘"]
     )
 
     with tab_dashboard:
@@ -2311,6 +2411,8 @@ def main():
         render_strategy_config(cfg, is_b0_18)
     with tab_live:
         render_live_trading(cfg, is_b0_18)
+    with tab_paper:
+        render_paper_trading_page(get_paper_trading_ui_service(), _paper_trading_data_provider)
 
     st.divider()
     st.caption("B0-18 主线 | 18只行业ETF轮动 | 概念池已封存 | 参数来自侧边栏实时状态")

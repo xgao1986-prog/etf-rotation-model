@@ -70,7 +70,7 @@ def calculate_account_metrics(
         if returns.std() > 1e-12 else np.nan
     )
 
-    cumulative = (1 + returns).cumprod()
+    cumulative = df['nav'] / start_nav
     running_max = cumulative.cummax()
     drawdown = (cumulative - running_max) / running_max
     max_drawdown = float(drawdown.min())

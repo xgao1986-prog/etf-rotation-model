@@ -109,6 +109,13 @@ def test_empty_and_one_day_histories():
     assert pd.isna(metrics['sharpe']) or metrics['sharpe'] == 0.0
 
 
+def test_maximum_drawdown_on_first_day_decline():
+    # First day drop from 100 to 90 should produce -10% drawdown.
+    nav = _nav_series([100, 90])
+    metrics = calculate_account_metrics(nav, [])
+    assert metrics['max_drawdown'] == pytest.approx(-0.10, abs=0.001)
+
+
 def test_b0_4_reference_in_comparison():
     metrics = {
         'B0.4': {'total_return': 0.20, 'annualized_return': 0.20, 'sharpe': 0.90, 'max_drawdown': -0.15, 'calmar': 1.33},
