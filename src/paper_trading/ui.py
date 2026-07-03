@@ -89,7 +89,11 @@ def _render_account_overview(ui_service, summaries: List[Dict[str, Any]]):
         'nav', '收益', '年化收益', '夏普', '最大回撤', 'Calmar',
         '胜率', '换手', '佣金', 'latest_nav_date', 'status',
     ]
-    st.dataframe(df[[c for c in display_cols if c in df.columns]], use_container_width=True)
+    display_df = df[[c for c in display_cols if c in df.columns]].copy()
+    # Ensure consistent types so Streamlit's Arrow serialization does not fail
+    # when numeric columns are mixed with formatted strings (e.g. "20%").
+    display_df = display_df.astype(str)
+    st.dataframe(display_df, width='stretch')
 
 
 def _render_account_creation(ui_service, presets: Mapping[str, Mapping[str, Any]]):
@@ -221,7 +225,7 @@ def _render_daily_run(
         format_func=lambda x: next((s['name'] for s in summaries if s['account_id'] == x), x),
     )
 
-    if st.button("运行选中账户", use_container_width=True):
+    if st.button("运行选中账户", width='stretch'):
         if data_date is None:
             st.error("无法获取行情数据日期，请检查数据库。")
             return
@@ -373,19 +377,19 @@ def _render_account_details(ui_service, summaries: List[Dict[str, Any]]):
     if nav_history:
         positions = ui_service.service.store.list_positions(selected_id, nav_history[-1]['nav_date'])
         if positions:
-            st.dataframe(pd.DataFrame(positions), use_container_width=True)
+            st.dataframe(pd.DataFrame(positions), width='stretch')
         else:
             st.write("无持仓")
 
     st.write("**历史订单**")
     if orders:
-        st.dataframe(pd.DataFrame(orders), use_container_width=True)
+        st.dataframe(pd.DataFrame(orders), width='stretch')
     else:
         st.write("无订单")
 
     st.write("**历史成交**")
     if trades:
-        st.dataframe(pd.DataFrame(trades), use_container_width=True)
+        st.dataframe(pd.DataFrame(trades), width='stretch')
     else:
         st.write("无成交")
 
@@ -408,7 +412,7 @@ def _render_account_details(ui_service, summaries: List[Dict[str, Any]]):
             height=400,
             margin=dict(l=10, r=16, t=40, b=10),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         dd_fig = go.Figure()
         dd_fig.add_trace(go.Scatter(
@@ -423,7 +427,7 @@ def _render_account_details(ui_service, summaries: List[Dict[str, Any]]):
             height=320,
             margin=dict(l=10, r=16, t=40, b=10),
         )
-        st.plotly_chart(dd_fig, use_container_width=True)
+        st.plotly_chart(dd_fig, width='stretch')
     else:
         st.write("历史净值不足，无法绘制曲线。")
 
@@ -456,4 +460,4 @@ def _render_account_details(ui_service, summaries: List[Dict[str, Any]]):
                     all_metrics[s['name']] = calculate_account_metrics(history, account_trades)
             if all_metrics:
                 comparison = build_account_comparison(all_metrics, reference_name=ref_summary['name'])
-                st.dataframe(comparison, use_container_width=True)
+                st.dataframe(comparison, width='stretch')
