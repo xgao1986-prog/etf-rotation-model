@@ -138,7 +138,9 @@ def save_presets(presets):
 @st.cache_resource
 def get_paper_trading_ui_service():
     """Return a cached PaperTradingUIService singleton for the Streamlit page."""
-    db_path = os.path.join("database", "paper_trading.db")
+    db_path = os.environ.get(
+        "PAPER_TRADING_DB_PATH", os.path.join("database", "paper_trading.db")
+    )
     store = PaperTradingStore(db_path)
     service = PaperTradingService(store)
     runner = PaperTradingRunner(service)
@@ -2150,6 +2152,9 @@ def render_strategy_config(cfg, is_b0_18=True):
                 {"参数": "防御比例(0.5)", "当前值": f"{_config_module.DEFENSE_ALLOCATION.get(0.5, 0):.0%}" if cfg.get("defense_enabled", False) else "N/A"},
             ]
         )
+        # Avoid Arrow mixed-type serialization failures by coercing display
+        # values to strings before rendering.
+        param_df["当前值"] = param_df["当前值"].astype(str)
         st.dataframe(param_df, use_container_width=True, hide_index=True)
 
     with right:

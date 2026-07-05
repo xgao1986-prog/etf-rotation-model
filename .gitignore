@@ -43,6 +43,7 @@ database/backups/
 # 环境
 .env
 .venv/
+.venv-browser-test/
 venv/
 
 # IDE

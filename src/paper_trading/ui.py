@@ -93,54 +93,84 @@ def _render_account_overview(ui_service, summaries: List[Dict[str, Any]]):
     # Ensure consistent types so Streamlit's Arrow serialization does not fail
     # when numeric columns are mixed with formatted strings (e.g. "20%").
     display_df = display_df.astype(str)
-    st.dataframe(display_df, width='stretch')
+    st.dataframe(display_df, use_container_width=True)
 
 
 def _render_account_creation(ui_service, presets: Mapping[str, Mapping[str, Any]]):
     st.subheader("创建账户")
 
-    creation_type = st.radio("账户类型", ["对比账户", "影子账户"], horizontal=True)
+    creation_type = st.selectbox(
+        "账户类型", ["对比账户", "影子账户"], key="account_creation_type"
+    )
 
     if creation_type == "对比账户":
         with st.form("create_comparison_accounts"):
             selected_presets = st.multiselect(
-                "选择策略预设", options=list(presets.keys()), default=[]
+                "选择策略预设",
+                options=list(presets.keys()),
+                default=[],
+                key="comparison_selected_presets",
             )
             initial_capital = st.number_input(
-                "统一初始资金", min_value=10_000.0, value=1_000_000.0, step=10_000.0
+                "统一初始资金",
+                min_value=10_000.0,
+                value=1_000_000.0,
+                step=10_000.0,
+                key="comparison_initial_capital",
             )
-            start_date = st.date_input("起始日期", value=pd.Timestamp('2026-06-29'))
+            start_date = st.date_input(
+                "起始日期",
+                value=pd.Timestamp('2026-06-29'),
+                key="comparison_start_date",
+            )
             submitted = st.form_submit_button("批量创建")
 
         if submitted:
             if not selected_presets:
                 st.warning("请至少选择一个策略预设。")
-                return
-            try:
-                ids = ui_service.create_comparison_accounts(
-                    preset_names=selected_presets,
-                    presets=presets,
-                    initial_capital=float(initial_capital),
-                    start_date=start_date.strftime('%Y-%m-%d'),
-                )
-                st.success(f"已创建 {len(ids)} 个对比账户：{', '.join(ids)}")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"创建失败：{exc}")
+            else:
+                try:
+                    ids = ui_service.create_comparison_accounts(
+                        preset_names=selected_presets,
+                        presets=presets,
+                        initial_capital=float(initial_capital),
+                        start_date=start_date.strftime('%Y-%m-%d'),
+                    )
+                    st.success(f"已创建 {len(ids)} 个对比账户：{', '.join(ids)}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"创建失败：{exc}")
 
     else:
         with st.form("create_shadow_account"):
-            preset_name = st.selectbox("策略预设", options=list(presets.keys()))
-            name = st.text_input("账户名称", value="我的实盘")
-            total_nav = st.number_input(
-                "总资产（现金 + 持仓市值）", min_value=0.0, value=1_000_000.0, step=10_000.0
+            preset_name = st.selectbox(
+                "策略预设", options=list(presets.keys()), key="shadow_preset_name"
             )
-            cash = st.number_input("现金", min_value=0.0, value=900_000.0, step=10_000.0)
+            name = st.text_input("账户名称", value="我的实盘", key="shadow_name")
+            total_nav = st.number_input(
+                "总资产（现金 + 持仓市值）",
+                min_value=0.0,
+                value=1_000_000.0,
+                step=10_000.0,
+                key="shadow_total_nav",
+            )
+            cash = st.number_input(
+                "现金",
+                min_value=0.0,
+                value=900_000.0,
+                step=10_000.0,
+                key="shadow_cash",
+            )
             holdings_text = st.text_area(
                 "持仓（每行：代码,股数,成本价,现价）",
                 value="512400.SH,10000,10.0,10.0",
+                key="shadow_holdings_text",
             )
-            start_date = st.date_input("起始日期", value=pd.Timestamp('2026-06-29'), key='shadow_start')
+            start_date = st.date_input(
+                "起始日期",
+                value=pd.Timestamp('2026-06-26'),
+                key="shadow_start_date",
+            )
             submitted = st.form_submit_button("创建影子账户")
 
         if submitted:
@@ -158,22 +188,21 @@ def _render_account_creation(ui_service, presets: Mapping[str, Mapping[str, Any]
                     )
             except Exception as exc:
                 st.error(f"持仓解析失败：{exc}")
-                return
-
-            try:
-                account_id = ui_service.create_shadow_account(
-                    name=name,
-                    preset_name=preset_name,
-                    preset=presets[preset_name],
-                    initial_capital=float(total_nav),
-                    opening_cash=float(cash),
-                    opening_positions=tuple(positions),
-                    start_date=start_date.strftime('%Y-%m-%d'),
-                )
-                st.success(f"已创建影子账户：{account_id}")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"创建失败：{exc}")
+            else:
+                try:
+                    account_id = ui_service.create_shadow_account(
+                        name=name,
+                        preset_name=preset_name,
+                        preset=presets[preset_name],
+                        initial_capital=float(total_nav),
+                        opening_cash=float(cash),
+                        opening_positions=tuple(positions),
+                        start_date=start_date.strftime('%Y-%m-%d'),
+                    )
+                    st.success(f"已创建影子账户：{account_id}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"创建失败：{exc}")
 
 
 def _render_daily_run(
@@ -182,6 +211,17 @@ def _render_daily_run(
     data_provider,
 ):
     st.subheader("今日运行")
+
+    # Display results from the previous run so success/failure details remain
+    # visible after the automatic rerun.
+    if 'paper_trading_run_results' in st.session_state:
+        prev_results = st.session_state['paper_trading_run_results']
+        if prev_results['success']:
+            st.success(f"成功运行 {len(prev_results['success'])} 个账户")
+        if prev_results['failure']:
+            st.error(f"{len(prev_results['failure'])} 个账户运行失败")
+            for account_id, reason in prev_results['failure'].items():
+                st.error(f"{account_id}: {reason}")
 
     if not summaries:
         st.info("暂无账户可运行。")
@@ -225,7 +265,7 @@ def _render_daily_run(
         format_func=lambda x: next((s['name'] for s in summaries if s['account_id'] == x), x),
     )
 
-    if st.button("运行选中账户", width='stretch'):
+    if st.button("运行选中账户", use_container_width=True):
         if data_date is None:
             st.error("无法获取行情数据日期，请检查数据库。")
             return
@@ -264,12 +304,7 @@ def _render_daily_run(
             close_prices=close_prices,
             scores_df=scores_df,
         )
-        if results['success']:
-            st.success(f"成功运行 {len(results['success'])} 个账户")
-        if results['failure']:
-            st.error(f"{len(results['failure'])} 个账户运行失败")
-            for account_id, reason in results['failure'].items():
-                st.error(f"{account_id}: {reason}")
+        st.session_state['paper_trading_run_results'] = results
         st.rerun()
 
 
@@ -377,19 +412,19 @@ def _render_account_details(ui_service, summaries: List[Dict[str, Any]]):
     if nav_history:
         positions = ui_service.service.store.list_positions(selected_id, nav_history[-1]['nav_date'])
         if positions:
-            st.dataframe(pd.DataFrame(positions), width='stretch')
+            st.dataframe(pd.DataFrame(positions), use_container_width=True)
         else:
             st.write("无持仓")
 
     st.write("**历史订单**")
     if orders:
-        st.dataframe(pd.DataFrame(orders), width='stretch')
+        st.dataframe(pd.DataFrame(orders), use_container_width=True)
     else:
         st.write("无订单")
 
     st.write("**历史成交**")
     if trades:
-        st.dataframe(pd.DataFrame(trades), width='stretch')
+        st.dataframe(pd.DataFrame(trades), use_container_width=True)
     else:
         st.write("无成交")
 
@@ -412,7 +447,7 @@ def _render_account_details(ui_service, summaries: List[Dict[str, Any]]):
             height=400,
             margin=dict(l=10, r=16, t=40, b=10),
         )
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
         dd_fig = go.Figure()
         dd_fig.add_trace(go.Scatter(
@@ -427,7 +462,7 @@ def _render_account_details(ui_service, summaries: List[Dict[str, Any]]):
             height=320,
             margin=dict(l=10, r=16, t=40, b=10),
         )
-        st.plotly_chart(dd_fig, width='stretch')
+        st.plotly_chart(dd_fig, use_container_width=True)
     else:
         st.write("历史净值不足，无法绘制曲线。")
 
@@ -460,4 +495,4 @@ def _render_account_details(ui_service, summaries: List[Dict[str, Any]]):
                     all_metrics[s['name']] = calculate_account_metrics(history, account_trades)
             if all_metrics:
                 comparison = build_account_comparison(all_metrics, reference_name=ref_summary['name'])
-                st.dataframe(comparison, width='stretch')
+                st.dataframe(comparison, use_container_width=True)

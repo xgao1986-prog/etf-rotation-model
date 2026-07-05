@@ -74,13 +74,14 @@ def _make_mock_st(config=None):
     mock_st.columns.side_effect = _columns_side_effect
 
     # Inputs
-    mock_st.radio.return_value = config.get('radio', '对比账户')
+    mock_st.selectbox.return_value = config.get('selectbox', '对比账户')
     mock_st.multiselect.return_value = config.get('multiselect', [])
     mock_st.number_input.return_value = config.get('number_input', 1_000_000.0)
     mock_st.date_input.return_value = config.get('date_input', pd.Timestamp('2026-06-29'))
     mock_st.text_input.return_value = config.get('text_input', '')
     mock_st.text_area.return_value = config.get('text_area', '')
-    mock_st.selectbox.return_value = config.get('selectbox', '')
+    # selectbox is also used for account-type and account-detail selection;
+    # callers that need a specific value must pass it explicitly.
     mock_st.button.return_value = config.get('button', False)
 
     submit_config = config.get('form_submit_button', {})
@@ -104,7 +105,7 @@ def test_page_renders_without_error():
 def test_create_account_passes_capital_unchanged():
     ui_service = _make_ui_service()
     mock_st = _make_mock_st({
-        'radio': '对比账户',
+        'selectbox': '对比账户',
         'multiselect': [_first_preset_name()],
         'number_input': 1_500_000.0,
         'date_input': pd.Timestamp('2026-06-30'),
@@ -158,6 +159,29 @@ def test_run_selected_accounts_calls_service_once_per_account():
         render_paper_trading_page(ui_service, _data_provider('2026-06-29'))
 
     ui_service.run_accounts.assert_called_once()
+
+
+def test_run_results_preserved_and_displayed_after_rerun():
+    """Results stored in session_state must remain visible after st.rerun()."""
+    ui_service = _make_ui_service()
+    ui_service.list_account_summaries.return_value = [
+        _summary('a1', 'A1', strategy_name='A'),
+    ]
+    mock_st = _make_mock_st({
+        'button': False,  # simulate post-rerun render without a new click
+        'multiselect': ['a1'],
+        'selectbox': 'A1 (a1)',
+    })
+    mock_st.session_state = {
+        'paper_trading_run_results': {
+            'success': {'a1': 'ok'},
+            'failure': {},
+        }
+    }
+    with patch('paper_trading.ui.st', mock_st):
+        render_paper_trading_page(ui_service, _data_provider('2026-06-29'))
+
+    mock_st.success.assert_called_once_with('成功运行 1 个账户')
 
 
 def test_run_blocked_when_trade_date_mismatches_data_date():
