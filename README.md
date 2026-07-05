@@ -11,6 +11,7 @@
 | 版本 | 日期 | 代号 | 核心变更 |
 |------|------|------|----------|
 | **v1.2.3** | 2026-06-21 | B0.4 Frozen Baseline | 18只ETF冻结基线B0.4、调仓引擎v2.5、数据准入v1.1、滑点压力测试 |
+| Paper Trading v0.3 | 2026-07-05 | 虚拟盘 | Streamlit虚拟盘页签、对比/影子账户、影子订单确认（独立版本号） |
 | v1.2.2 | 2026-06-16 | 空仓修复+统一入口 | 空仓机制、回测入口统一、动态池（历史工程版本，非当前基线） |
 | v1.2.1 | 2026-06-14~16 | 池治理与扩展 | 32只池框架、分层准入、相关性去重（研究框架，非当前基线） |
 | v1.2 | 2026-06-14 | 市场状态观察 | MarketRegimeDetector observer模式（历史版本） |
@@ -44,6 +45,15 @@
 - 滑点直接成本占NAV差异约34%~45%，其余来自持仓路径变化
 - **不改变0bp冻结基线**：滑点结果仅用于稳健性评估，不反向调优参数
 
+#### 5. Paper Trading v0.3 虚拟盘
+- `app.py` 新增第 7 个页签“虚拟盘”。
+- 五个子页面：账户总览、创建账户、今日运行、待确认订单、账户详情与策略对比。
+- 对比账户：从策略预设批量创建，自动运行并生成 FILLED 成交与 NAV 记录。
+- 影子账户：手动录入资产与持仓，运行后生成 PENDING 影子订单，用户确认后才更新状态。
+- 数据完整性检查：18 只 ETF 价格必须存在、有限且大于 0，`total_score` 必须有效。
+- 浏览器验收：Playwright 纯 UI 点击流程已通过。
+- 不修改 B0.4 策略、参数或冻结数据；虚拟实盘版本独立于策略版本。
+
 ---
 
 ## 项目结构
@@ -57,7 +67,16 @@ etf_rotation_model/
 │   ├── database.py                # 数据库操作封装（8张表）
 │   ├── data_fetcher.py            # 数据获取（iFinD主 + AKShare备）
 │   ├── strategy.py                # 策略引擎（3-tier评分：行业/宽基/防御）
-│   └── backtest.py                # 回测引擎（调仓引擎v2.5）
+│   ├── backtest.py                # 回测引擎（调仓引擎v2.5）
+│   └── paper_trading/             # 虚拟实盘模块（v0.3）
+│       ├── ui.py                  # Streamlit 虚拟盘页面
+│       ├── ui_service.py          # 页面业务逻辑
+│       ├── service.py             # 账户/订单服务
+│       ├── runner.py              # 每日运行引擎
+│       ├── store.py               # SQLite 持久化
+│       ├── models.py              # 数据模型与配置
+│       ├── metrics.py             # 绩效指标计算
+│       └── calendar.py            # 交易日历
 ├── reports/                       # 回测报告（CSV + MD，.gitignore 不纳入）
 ├── signals/                       # 交易信号（CSV，.gitignore 不纳入）
 ├── scripts/                       # 实验脚本（纳入版本控制）
@@ -69,7 +88,8 @@ etf_rotation_model/
 │   ├── test_app_b0_signature.py       # B0签名测试（6项）
 │   ├── test_b0_4_slippage.py         # 滑点测试（8项）
 │   ├── test_rebalance_planner.py     # 调仓规划器测试
-│   └── test_backtest_integration.py  # 回测集成测试
+│   ├── test_backtest_integration.py  # 回测集成测试
+│   └── test_paper_trading_*.py       # 虚拟实盘测试（runner/service/store/ui/browser等）
 ├── main.py                        # CLI主入口
 ├── app.py                         # Streamlit可视化界面（交互式调参）
 ├── requirements.txt               # Python依赖
@@ -149,6 +169,12 @@ python main.py status
 ```bash
 streamlit run app.py
 ```
+
+界面包含 7 个顶部页签，其中“虚拟盘”用于 Paper Trading v0.3：
+- 创建对比账户或影子账户
+- 运行选中账户生成订单与 NAV
+- 在“待确认订单”中确认影子订单
+- 查看账户详情、净值曲线与策略对比
 
 ---
 
