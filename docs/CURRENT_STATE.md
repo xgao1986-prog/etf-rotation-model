@@ -119,7 +119,7 @@
 - `tests/test_paper_trading_service.py`：6 passed（账户创建、NAV 勾稽、重复订单、对账）
 - `tests/test_paper_account_admin.py`：1 passed（命令行创建/列示）
 - 本轮 Task 8 新鲜验证结果：
-  - `python -m pytest tests/test_paper_trading_models.py tests/test_paper_trading_store.py tests/test_paper_trading_service.py tests/test_paper_trading_runner.py tests/test_paper_trading_ui.py tests/test_paper_trading_metrics.py tests/test_paper_trading_ui_service.py tests/test_paper_account_admin.py tests/test_strategy_presets.py tests/test_preset_loading.py tests/test_app_b0_signature.py tests/test_live_trading.py tests/test_live_daily_workflow.py -q`：**182 passed**
+  - `python -m pytest tests/test_paper_trading_models.py tests/test_paper_trading_store.py tests/test_paper_trading_service.py tests/test_paper_trading_runner.py tests/test_paper_trading_ui.py tests/test_paper_trading_metrics.py tests/test_paper_trading_ui_service.py tests/test_paper_account_admin.py tests/test_strategy_presets.py tests/test_preset_loading.py tests/test_app_b0_signature.py tests/test_live_trading.py tests/test_live_daily_workflow.py -q`：**182 passed**（该命令未运行 `tests/test_rebalance_planner.py`）
   - `.venv-browser-test/Scripts/python -m pytest tests/test_paper_trading_browser.py -v -s`：**1 passed**
   - `python -m py_compile app.py src/paper_trading/ui.py tests/test_paper_trading_browser.py`：通过
   - `git diff --check`：通过
@@ -154,8 +154,8 @@
 
 ## 7. 下一阶段
 
-- 版本说明补全
-- Paper Trading v0.3.1 账户生命周期（结束账户、删除账户等）
+- 完成版本说明补全修正（本次任务）。
+- Paper Trading v0.3.1 账户生命周期（结束账户、删除账户等）。
 
 ---
 

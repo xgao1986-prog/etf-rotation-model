@@ -28,7 +28,7 @@
   - 结论：每个交易日结束后，`cash + positions_value` 与 `nav` 严格相等。
 
 - **佣金已计入现金变化**
-  - 验证：`tests/test_paper_trading_runner.py::TestCodexFinalReview::test_friday_trade_updates_state_with_close_valuation` 与 `tests/test_paper_trading_service.py::test_confirm_updates_cash_and_positions`
+  - 验证：`tests/test_paper_trading_runner.py::TestCodexFinalReview::test_friday_trade_updates_state_with_close_valuation` 与 `tests/test_paper_trading_service.py::test_confirm_shadow_order_fills_trade_updates_state`
   - 结论：买入成交金额和佣金均从现金中扣减；例如影子账户确认买入 100 股 `512400.SH` @ 1.0 与 100 股 `515230.SH` @ 2.0 后，2 笔佣金各按最低 5 元计共 10 元，现金从 1,000,000 变为 999,690。
 
 - **买入不得造成负现金**
@@ -122,6 +122,7 @@
 python -m pytest tests/test_paper_trading_models.py tests/test_paper_trading_store.py tests/test_paper_trading_service.py tests/test_paper_trading_runner.py tests/test_paper_trading_ui.py tests/test_paper_trading_metrics.py tests/test_paper_trading_ui_service.py tests/test_paper_account_admin.py tests/test_strategy_presets.py tests/test_preset_loading.py tests/test_app_b0_signature.py tests/test_live_trading.py tests/test_live_daily_workflow.py -q
 ```
 结果：**182 passed**
+  - 注意：该命令未包含 `tests/test_rebalance_planner.py`；182 passed 来自上述 13 个文件中的 paper/store/service/runner/ui/metrics/ui_service/account_admin/preset/live/app_b0_signature 等测试。
 
 ```bash
 .venv-browser-test/Scripts/python -m pytest tests/test_paper_trading_browser.py -v -s
@@ -138,7 +139,49 @@ git diff --check
 ```
 结果：通过
 
+**Git 提交区分**：
+  - 功能提交：`6437484`（Task 1 共享预设）、`54c5a06`（Task 2 影子订单）、`092e733`（Task 4 对比/影子执行）、`93ef3bd`（Task 6 Streamlit 页面）、`e958f42`（Task 7 浏览器验收）。
+  - Task 8 文档收口提交：`035e344`, `890ce58`, `ac5bbbb`。
+  - 版本说明提交：`439c14c`（HEAD）。
+
 **不修改范围：** B0.4 策略、参数、ETF 池、冻结数据快照、`docs/B0_BASELINE_LOCK.md`、工作区无关未跟踪文件。
+
+---
+
+## 2026-07-05（版本说明补全修正）
+
+**目标：** 修正 `docs/CHANGES.md` 事实错误，重构 `VERSION_HISTORY.md` 为完整版本历史主文档，重新划分 `CURRENT_VERSION_NOTE.md` / `README.md` / `docs/CURRENT_STATE.md` 的文档职责。只修改文档，不修改代码、测试、数据库或 B0.4。
+
+### 修正 `docs/CHANGES.md` 错误
+
+1. 将佣金勾稽测试名 `test_confirm_updates_cash_and_positions` 改为真实测试名 `test_confirm_shadow_order_fills_trade_updates_state`。
+2. 明确 182 passed 的测试范围：该命令未运行 `tests/test_rebalance_planner.py`，来源为命令中列出的 13 个文件。
+3. Paper Trading v0.3 提交不再只写 `ac5bbbb`，而是区分为功能提交、Task 8 文档收口提交、版本说明提交，且只填写 `git log` 可确认的 SHA。
+
+### 重构 `VERSION_HISTORY.md`
+
+新增 **"四条版本线总览"** 独立章节，分别列出：
+
+| 版本线 | 版本 |
+|--------|------|
+| 策略版本 | v1.0, v1.1, v1.2, v1.2.1, v1.2.2, v1.2.3 |
+| 冻结基线 | B0, B0.1, B0.2, B0.3, B0.4 |
+| 调仓引擎 | v2.2, v2.3, v2.4, v2.5 |
+| 虚拟实盘 | v0.1, v0.2, v0.2.2, v0.3 |
+
+每个版本条目包含：日期、目的、主要变化、当前状态、前后关系、已验证指标/测试、对应提交/标签。证据不足处明确标注（如 B0 未记录绩效指标、v2.2/v2.3 仅作为设计文档存在、v2.4 无独立日期与测试）。
+
+### 调整其他文档职责
+
+- `CURRENT_VERSION_NOTE.md`：只说明当前版本和当前口径，历史细节引用 `VERSION_HISTORY.md`。
+- `README.md`：只保留简明版本概览，版本历史表格后增加"完整版本历史见 `VERSION_HISTORY.md`"。
+- `docs/CURRENT_STATE.md`：只记录当前现场；修正 182 passed 的测试范围描述；更新"下一阶段"为 v0.3.1。
+
+### 验证
+
+- `git diff --check`：通过。
+- `python -m py_compile app.py src/paper_trading/ui.py`：通过。
+- 四份文档当前版本口径一致：策略 v1.2.3 / 基线 B0.4 / 引擎 v2.5 / 数据准入 v1.1 / 滑点 v2 / 虚拟实盘 v0.3。
 
 ---
 
