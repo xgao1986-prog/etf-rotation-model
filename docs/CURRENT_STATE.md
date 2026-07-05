@@ -36,7 +36,7 @@
   - 账户创建表单反套用 `st.form`，避免 headless Chromium 中控件状态在 rerun 前丢失
   - 将账户类型切换从 `st.radio` 改为 `st.selectbox`，避免 headless Chromium 中 radio 无法交互
   - 运行结果写入 `st.session_state` 后再 `st.rerun()`，确保成功/失败详情在 rerun 后仍可见
-  - Task 7 浏览器验收为纯 UI 点击流程：创建对比账户 → 创建影子账户 → 今日运行 → 生成影子订单 → 确认成交 → 查看账户详情，并验证数据库产生新的 NAV 记录、PENDING/FILLED 状态订单以及 STOP_LOSS 成交记录
+  - Task 7 浏览器验收为纯 UI 点击流程：创建对比账户 → 创建影子账户 → 今日运行 → 生成影子订单 → 确认成交 → 查看账户详情，并验证数据库产生新的 NAV 记录、PENDING 或 FILLED 状态的订单，以及 STOP_LOSS 动作产生的成交记录
   - 本轮新鲜验证：182 项相关自动化测试通过（含 paper/store/service/runner/ui/metrics/ui_service/account_admin/preset/live/app_b0_signature 等）；1 项 Playwright 浏览器验收测试通过
   - 不修改 B0.4 策略、参数或冻结数据
 - **实盘助手 v0.2：已交付骨架**
@@ -141,7 +141,7 @@
 ### 资金勾稽（来自本轮真实测试）
 
 - **现金 + 持仓市值 = 总资产**：`tests/test_paper_trading_runner.py::TestUniqueFinalState::test_single_nav_per_day` 每日验证。
-- **佣金已计入现金变化**：`tests/test_paper_trading_service.py::test_confirm_updates_cash_and_positions` 验证，买入 2 笔共 300 元市值产生 10 元佣金，现金从 1,000,000 变为 999,690。
+- **佣金已计入现金变化**：`tests/test_paper_trading_service.py::test_confirm_shadow_order_fills_trade_updates_state` 验证，买入 2 笔共 300 元市值产生 10 元佣金，现金从 1,000,000 变为 999,690。
 - **买入不得造成负现金**：`tests/test_paper_trading_runner.py::TestUniqueFinalState::test_cash_never_negative` 验证。
 - **卖出不得超过实际持仓**：`tests/test_paper_trading_runner.py::TestOversell::test_oversell_skipped` 验证。
 
