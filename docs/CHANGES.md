@@ -5,6 +5,123 @@
 
 ---
 
+## 2026-07-05（Paper Trading UI v0.3 文档收口与交接）
+
+**目标：** 完成 Paper Trading UI v0.3 全部 Task 1~7 的文档收口与交接，只更新 `docs/CHANGES.md` 和 `docs/CURRENT_STATE.md`，不修改任何代码、测试、策略参数、数据库或冻结数据。
+
+### 一、Paper Trading v0.3 实际交付功能
+
+- 在 Streamlit 应用新增独立 "虚拟盘" 页签（`app.py` 第 7 个顶部页签）。
+- 提供五个子页面：
+  1. **账户总览**：展示所有账户的年化收益、夏普、最大回撤、Calmar、胜率、换手、佣金等指标。
+  2. **创建账户**：支持批量创建对比账户和手动创建影子账户。
+  3. **今日运行**：选择账户后运行当日策略，生成 NAV、订单和成交记录。
+  4. **待确认订单**：展示影子账户的 PENDING 订单，支持确认成交、标记未执行、取消。
+  5. **账户详情与策略对比**：查看历史订单、净值曲线、回撤曲线、持仓明细，并与同批次 B0.4 对比账户对比。
+
+### 二、Task 1~7 完成状态
+
+| Task | 内容 | 状态 |
+|------|------|------|
+| Task 1 | 共享策略预设读取（`src/strategy_presets.py`） | 完成 |
+| Task 2 | 影子订单生命周期（PENDING / FILLED / SKIPPED / CANCELLED / REJECTED / EXPIRED） | 完成 |
+| Task 3 | 账户创建与批量操作（`src/paper_trading/ui_service.py`） | 完成 |
+| Task 4 | 对比账户自动执行 vs 影子账户生成待确认订单 | 完成 |
+| Task 5 | 绩效指标计算（年化、夏普、最大回撤、Calmar、胜率、换手、佣金） | 完成 |
+| Task 6 | Streamlit 虚拟盘页面 | 完成 |
+| Task 7 | 浏览器与财务验收，改为纯 UI 点击流程 | 完成 |
+
+### 三、对比账户 vs 影子账户
+
+**对比账户：**
+- 从已保存的策略预设批量创建。
+- 同一次批量创建共享同一个 `group_id`、统一初始资金和起始日期。
+- 运行后自动生成 FILLED 成交记录和 NAV 记录，无需人工确认。
+- 用于与 B0.4 或其他策略预设做对照回测。
+
+**影子账户：**
+- 手动录入账户名称、总资产（现金 + 持仓市值）、现金、持仓明细和起始日期。
+- 运行后生成 PENDING 影子订单，**不会自动改变现金和持仓**。
+- 用户必须逐笔确认影子订单后，才会写入成交、持仓和 NAV 变化。
+- 用于跟踪用户自己的实盘或模拟账户。
+
+### 四、影子订单必须由用户确认
+
+- 影子账户运行后产生的所有订单初始状态为 `PENDING`。
+- 用户在 "待确认订单" 页签选择操作：
+  - **确认成交**：填写实际成交价格和股数，系统更新订单状态为 `FILLED`，并同步更新现金、持仓和 NAV。
+  - **标记未执行 / 拒绝**：必须填写原因，订单状态变为 `REJECTED` 或 `CANCELLED`。
+- 在确认之前，影子账户的现金和持仓不会发生变化。
+
+### 五、数据完整性检查和日期检查
+
+- 运行前检查 18 只 ETF 的开盘价、收盘价：必须存在、有限且大于 0。
+- 检查 `total_score` 必须存在且有限。
+- 检查行情数据日期是否与运行日期一致：日期不一致也阻止运行。
+- 任一项不通过即阻止账户运行，并返回明确错误信息。
+
+### 六、页面功能
+
+- **账户指标**：年化收益、总收益、夏普、最大回撤、Calmar、胜率、换手、佣金、交易次数。
+- **订单与成交**：历史订单列表展示状态、方向、代码、目标/实际价格和股数、原因。
+- **净值与回撤**：账户净值曲线和回撤曲线。
+- **策略对比**：同一批次（非空 group_id + start_date）的对比账户内查找 B0.4 参照，计算相对收益、超额收益等。
+
+### 七、Task 7 实际完成的网页流程
+
+已通过 Playwright 浏览器验收测试，流程全部为真实 UI 点击：
+
+1. 打开 "虚拟盘" 顶部页签。
+2. 在 "创建账户" 子页签选择 "对比账户"，勾选策略预设，输入初始资金和起始日期，点击 "批量创建"。
+3. 切换为 "影子账户"，填写名称、总资产、现金、持仓和起始日期，点击 "创建影子账户"。
+4. 在 "今日运行" 子页签选择账户，点击 "运行选中账户"。
+5. 在 "待确认订单" 子页签查看影子账户生成的 PENDING 订单。
+6. 点击 "确认" 并填写成交信息，订单状态变为 FILLED。
+7. 在 "账户详情与策略对比" 子页签查看账户的净值曲线、回撤曲线、历史订单和持仓。
+8. 断言数据库产生：
+   - 对比账户的 NAV 记录和 FILLED 订单。
+   - 影子账户的 PENDING 订单、确认后的 FILLED 订单以及可能的 STOP_LOSS 成交记录。
+
+### 八、当前已知限制
+
+- 尚无结束账户功能。
+- 尚无永久删除账户功能。
+- 尚未定时自动运行。
+- 不连接券商、不自动实盘下单。
+
+### 九、下一阶段
+
+- 版本说明补全。
+- Paper Trading v0.3.1 账户生命周期：结束账户、删除账户等。
+
+### 十、验证结果
+
+本轮 Task 8 新鲜验证命令及结果：
+
+```bash
+python -m pytest tests/test_paper_trading_models.py tests/test_paper_trading_store.py tests/test_paper_trading_service.py tests/test_paper_trading_runner.py tests/test_paper_trading_ui.py tests/test_paper_trading_metrics.py tests/test_paper_trading_ui_service.py tests/test_paper_account_admin.py tests/test_strategy_presets.py tests/test_preset_loading.py tests/test_app_b0_signature.py tests/test_live_trading.py tests/test_live_daily_workflow.py -q
+```
+结果：**182 passed**
+
+```bash
+.venv-browser-test/Scripts/python -m pytest tests/test_paper_trading_browser.py -v -s
+```
+结果：**1 passed**
+
+```bash
+python -m py_compile app.py src/paper_trading/ui.py tests/test_paper_trading_browser.py
+```
+结果：通过
+
+```bash
+git diff --check
+```
+结果：通过
+
+**不修改范围：** B0.4 策略、参数、ETF 池、冻结数据快照、`docs/B0_BASELINE_LOCK.md`、工作区无关未跟踪文件。
+
+---
+
 ## 2026-07-02（Phase 2 v0.2.2 最终收口）
 
 **目标：** 完成单个 B0.4 虚拟账户自动运行 Phase 2 的小版本收尾，修复日历假期、补齐订单状态测试，并恢复被误改的数据检查报告。

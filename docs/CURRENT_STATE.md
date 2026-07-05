@@ -1,6 +1,6 @@
 # 当前工程现场
 
-**最后更新**：2026-07-04
+**最后更新**：2026-07-05
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/paper-trading-ui-v0.3`
 **当前版本**：v1.2.3（虚拟盘 v0.3）
@@ -21,21 +21,23 @@
 - **Universe Time-Consistency Audit：已收口**
   - 7 只 ETF 已知早期覆盖不足，已量化并披露
   - 四组对照回测完成，结论：不足以推翻 B0.4
-- **Paper Trading v0.3：Task 6 已提交推送，Task 7 浏览器验收已改为纯 UI 点击流程**
+- **Paper Trading v0.3：Task 1~7 已完成并推送，Task 8 文档收口完成**
   - `src/paper_trading/ui.py` 提供 "虚拟盘" 独立页面：账户总览、批量创建对比账户、创建影子账户、今日运行、待确认订单、账户详情与策略对比
-  - 影子订单支持确认成交、标记未执行、取消；拒绝/取消必须填写原因
+  - 对比账户：由预设批量创建，同批次共享 group_id、初始资金和起始日期；运行后自动生成成交和 NAV 记录
+  - 影子账户：手动录入名称、总资产、现金、持仓和起始日期；运行后生成 PENDING 影子订单，不自动改变现金和持仓
+  - 影子订单必须由用户确认：支持确认成交、标记未执行、取消；拒绝/取消必须填写原因
   - `app.py` 已集成该页面作为第 7 个页签，并提供行情/评分数据入口
   - 数据完整性检查：18 只 ETF 开盘/收盘价必须存在、有限且大于 0；total_score 必须存在且有限；日期不一致也阻止运行
   - 账户总览展示年化收益、夏普、最大回撤、Calmar、胜率、换手、佣金
+  - 账户详情展示历史订单、净值曲线、回撤曲线、持仓明细
+  - B0.4 策略对比仅在同一非空批次（同 group_id + start_date）的对比账户内查找参照
   - 修复账户总览 DataFrame 混合类型导致的 Streamlit Arrow 序列化失败，统一转换为字符串列
   - 为兼容 Streamlit 1.41 与 1.58，将 `width='stretch'` 统一改为 `use_container_width=True`
   - 账户创建表单反套用 `st.form`，避免 headless Chromium 中控件状态在 rerun 前丢失
   - 将账户类型切换从 `st.radio` 改为 `st.selectbox`，避免 headless Chromium 中 radio 无法交互
-  - 账户详情展示历史订单、净值曲线、回撤曲线
-  - B0.4 策略对比仅在同一非空批次（同 group_id + start_date）的对比账户内查找参照
-  - 运行结果写入 `st.session_state` 后再 `st.rerun()`，确保成功/失败详情在 rerun 后仍可见；新增单元测试覆盖
-  - 23 项 paper_trading 自动化测试通过（含 22 个 UI 单元测试、1 个 Playwright 浏览器验收测试）
-  - 1 项 Playwright 浏览器验收测试通过：纯 UI 点击完成创建对比账户、创建影子账户、今日运行、确认成交，并验证数据库产生新的 NAV 记录、影子账户 PENDING 订单、FILLED 订单与 STOP_LOSS 成交记录
+  - 运行结果写入 `st.session_state` 后再 `st.rerun()`，确保成功/失败详情在 rerun 后仍可见
+  - Task 7 浏览器验收为纯 UI 点击流程：创建对比账户 → 创建影子账户 → 今日运行 → 生成影子订单 → 确认成交 → 查看账户详情，并验证数据库产生新的 NAV 记录、PENDING/FILLED/STOP_LOSS 订单
+  - 本轮新鲜验证：182 项相关自动化测试通过（含 paper/store/service/runner/ui/metrics/ui_service/account_admin/preset/live/app_b0_signature 等）；1 项 Playwright 浏览器验收测试通过
   - 不修改 B0.4 策略、参数或冻结数据
 - **实盘助手 v0.2：已交付骨架**
   - 持仓管理、止损检查、调仓建议、成交记录（不自动下单）
@@ -116,6 +118,11 @@
 - `tests/test_paper_trading_store.py`：4 passed（schema、重复事件、配置不可变）
 - `tests/test_paper_trading_service.py`：6 passed（账户创建、NAV 勾稽、重复订单、对账）
 - `tests/test_paper_account_admin.py`：1 passed（命令行创建/列示）
+- 本轮 Task 8 新鲜验证结果：
+  - `python -m pytest tests/test_paper_trading_models.py tests/test_paper_trading_store.py tests/test_paper_trading_service.py tests/test_paper_trading_runner.py tests/test_paper_trading_ui.py tests/test_paper_trading_metrics.py tests/test_paper_trading_ui_service.py tests/test_paper_account_admin.py tests/test_strategy_presets.py tests/test_preset_loading.py tests/test_app_b0_signature.py tests/test_live_trading.py tests/test_live_daily_workflow.py -q`：**182 passed**
+  - `.venv-browser-test/Scripts/python -m pytest tests/test_paper_trading_browser.py -v -s`：**1 passed**
+  - `python -m py_compile app.py src/paper_trading/ui.py tests/test_paper_trading_browser.py`：通过
+  - `git diff --check`：通过
 - `tests/test_paper_trading_ui.py`：22 passed（页面渲染、资金不变传递、无策略参数编辑器、运行按钮触发、rerun 后结果保留、日期/价格/评分异常阻止运行、价格空值/零/负值阻止运行、评分空值阻止运行、影子订单需确认、确认/拒绝/取消调用服务、拒绝需原因、总览展示绩效指标、详情展示订单与曲线、同一批次 B0.4 对比、排除无批次影子账户）
 - `tests/test_paper_trading_browser.py`：1 passed（纯 UI 点击完成对比账户/影子账户创建、运行、确认成交，并验证数据库变化）
 - `tests/test_paper_trading_metrics.py`：11 passed（含首日下跌回撤）
@@ -126,7 +133,20 @@
 ## 5. Task 7 浏览器验收
 
 - 实际启动 `streamlit run app.py` 打开 "虚拟盘" 页签，验证创建账户、运行、影子订单确认等真实交互
+- 已通过 Playwright 浏览器验收测试：纯 UI 点击完成创建对比账户、创建影子账户、今日运行、生成影子订单、确认成交、查看账户详情，并验证数据库变化
 - 未实际打开页面前不得声称浏览器工作流完成
+
+## 6. Paper Trading v0.3 已知限制
+
+- 尚无结束账户功能
+- 尚无永久删除账户功能
+- 尚未定时自动运行
+- 不连接券商、不自动实盘下单
+
+## 7. 下一阶段
+
+- 版本说明补全
+- Paper Trading v0.3.1 账户生命周期（结束账户、删除账户等）
 
 ---
 
@@ -141,7 +161,7 @@
 
 ---
 
-## 6. 禁止修改范围
+## 9. 禁止修改范围
 
 - B0.4 ETF 池、评分因子和阈值。
 - 动量/波动率开关的冻结状态。
@@ -155,7 +175,7 @@
 
 ---
 
-## 7. 新线程恢复方式
+## 10. 新线程恢复方式
 
 依次读取：
 
