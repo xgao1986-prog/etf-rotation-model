@@ -149,7 +149,7 @@ def _click_first_form_submit(page, panel_id):
 
 def _click_run_button(page, panel_id):
     """Click the '运行选中账户' button inside the active panel."""
-    btn = page.locator(f'#{panel_id} [data-testid="stBaseButton-secondary"]').first
+    btn = page.locator(f'#{panel_id} button:has-text("运行选中账户")')
     btn.click()
     time.sleep(15)
 
@@ -322,3 +322,143 @@ class TestStreamlitVirtualAccount:
         _open_inner_tab(page, 4)
         time.sleep(2)
         _take_screenshot(page, '05_account_details')
+
+    def test_permanent_delete_requires_confirmation(self, browser_page):
+        """软删除 → 显示已删除 → 输入账户名称 → 二次确认 → 永久删除。"""
+        page = browser_page
+        page.goto(BROWSER_URL, wait_until='networkidle', timeout=120000)
+        page.wait_for_selector('[role="tab"]:visible', timeout=60000)
+        time.sleep(5)
+
+        # 独立创建一个对比账户用于删除测试
+        _open_virtual_account_tab(page)
+        _open_inner_tab(page, 1)
+        create_panel_id = _active_top_panel_id(page)
+        _click_first_multiselect_option(page, create_panel_id)
+        _click_first_form_submit(page, create_panel_id)
+
+        accounts = _query_test_db("SELECT * FROM paper_accounts ORDER BY created_at DESC LIMIT 1")
+        assert len(accounts) >= 1, 'no account available for deletion test'
+        account = accounts[0]
+        account_id = account['account_id']
+        account_name = account['name']
+
+        # 1. 软删除
+        _open_virtual_account_tab(page)
+        _open_inner_tab(page, 0)
+        panel_id = _active_top_panel_id(page)
+        _click_button_in_overview(page, panel_id, account_id, "🗑️ 删除")
+        time.sleep(5)
+        account_after_soft = _query_test_db(
+            "SELECT * FROM paper_accounts WHERE account_id=?", (account_id,)
+        )[0]
+        assert account_after_soft['is_deleted'] == 1, 'account was not soft deleted'
+        _take_screenshot(page, '06_soft_deleted')
+
+        # 2. 显示已删除账户
+        _show_deleted_accounts(page)
+        time.sleep(3)
+        _take_screenshot(page, '07_show_deleted')
+
+        # 3. 点击彻底删除，进入确认流程
+        _open_virtual_account_tab(page)
+        _open_inner_tab(page, 0)
+        panel_id = _active_top_panel_id(page)
+        _click_button_in_overview(page, panel_id, account_id, "🧨 彻底删除")
+        time.sleep(3)
+        _take_screenshot(page, '08_purge_confirm_visible')
+
+        # 4. 初始状态下确认按钮必须禁用
+        confirm_btn = page.locator(f'#{panel_id} button:has-text("✅ 确认永久删除")').first
+        assert confirm_btn.is_disabled(), 'confirm purge button should be disabled initially'
+        _take_screenshot(page, '08_purge_button_disabled_initially')
+
+        # 5. 仅输入完整名称，按钮仍禁用（未勾选确认）
+        _fill_text_input_by_label(page, panel_id, f"请输入完整账户名称“{account_name}”以确认", account_name)
+        time.sleep(2)
+        assert confirm_btn.is_disabled(), 'confirm purge button should be disabled without checkbox'
+        _take_screenshot(page, '09_purge_still_disabled_without_checkbox')
+
+        # 6. 勾选确认后按钮变为可用
+        _check_checkbox_by_label(page, panel_id, "我已确认永久删除此账户及其所有数据")
+        time.sleep(2)
+        assert not confirm_btn.is_disabled(), 'confirm purge button should be enabled after confirmation'
+        _take_screenshot(page, '10_purge_enabled')
+
+        # 7. 点击永久删除并验证级联清理
+        confirm_btn.click()
+        time.sleep(5)
+        remaining = _query_test_db(
+            "SELECT 1 FROM paper_accounts WHERE account_id=?", (account_id,)
+        )
+        assert len(remaining) == 0, 'account was not permanently deleted'
+        child_records = _query_test_db(
+            "SELECT 1 FROM paper_trades WHERE account_id=?", (account_id,)
+        )
+        assert len(child_records) == 0, 'child trades were not cleaned up'
+        _take_screenshot(page, '11_purge_done')
+
+
+def _show_deleted_accounts(page):
+    """勾选页面顶部的'显示已删除账户'开关。"""
+    label = page.locator('label:has-text("显示已删除账户")')
+    if label.count() > 0:
+        checkbox = label.locator('input[type="checkbox"]')
+        if checkbox.count() > 0 and not checkbox.is_checked():
+            label.click()
+
+
+def _click_button_in_overview(page, panel_id, account_id, text):
+    """在账户总览的指定账户 expander 内点击包含指定文本的按钮。"""
+    expanders = page.locator(f'#{panel_id} [data-testid="stExpander"]')
+    count = expanders.count()
+    for i in range(count):
+        exp = expanders.nth(i)
+        exp_text = exp.inner_text()
+        if account_id[:8] in exp_text or account_id in exp_text:
+            # 展开 expander：点击 summary 标题区域
+            summary = exp.locator('summary')
+            if summary.count() > 0:
+                summary.click()
+                time.sleep(1)
+            btn = exp.locator(f'button:has-text("{text}")')
+            btn.click()
+            return
+    raise RuntimeError(f'button "{text}" for account {account_id} not found')
+
+
+def _account_name_for_expander(expander):
+    """从 expander 文本中提取账户名称。"""
+    text = expander.inner_text()
+    if ' (' in text:
+        return text.split(' (')[0]
+    return text
+
+
+def _click_button_by_text(page, panel_id, text):
+    """在当前 panel 内点击包含指定文本的按钮。"""
+    btn = page.locator(f'#{panel_id} button:has-text("{text}")')
+    btn.click()
+
+
+def _fill_text_input_by_label(page, panel_id, label, value):
+    """在当前 panel 内根据 label 找到文本输入框并填写。"""
+    input_el = page.locator(f'#{panel_id} label:has-text("{label}") + div input[type="text"]')
+    if input_el.count() == 0:
+        # Streamlit 包装结构可能不同，尝试更通用的方式
+        input_el = page.locator(f'#{panel_id} input[aria-label*="{label}"]')
+    if input_el.count() == 0:
+        raise RuntimeError(f'text input for label "{label}" not found')
+    input_el.first.fill(value)
+
+
+def _check_checkbox_by_label(page, panel_id, label):
+    """在当前 panel 内根据 label 找到复选框并勾选。"""
+    label_el = page.locator(f'#{panel_id} label:has-text("{label}")')
+    if label_el.count() == 0:
+        label_el = page.locator(f'#{panel_id} label:has-text("确认永久删除")')
+    if label_el.count() == 0:
+        raise RuntimeError(f'checkbox for label "{label}" not found')
+    checkbox = label_el.locator('input[type="checkbox"]')
+    if checkbox.count() > 0 and not checkbox.is_checked():
+        label_el.click()

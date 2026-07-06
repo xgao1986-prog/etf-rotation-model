@@ -27,6 +27,11 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     start_date TEXT NOT NULL,
     end_date TEXT,
     status TEXT NOT NULL,
+    is_hidden INTEGER NOT NULL DEFAULT 0 CHECK(is_hidden IN (0, 1)),
+    is_deleted INTEGER NOT NULL DEFAULT 0 CHECK(is_deleted IN (0, 1)),
+    closed_at TEXT,
+    deleted_at TEXT,
+    lifecycle_reason TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -135,7 +140,7 @@ END;
 
 
 class PaperTradingStore:
-    CURRENT_SCHEMA_VERSION = 2
+    CURRENT_SCHEMA_VERSION = 3
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -229,6 +234,48 @@ class PaperTradingStore:
             conn.execute("DROP TABLE paper_trades")
             conn.execute("ALTER TABLE paper_trades_new RENAME TO paper_trades")
 
+        # Phase 2 -> Phase 3：添加账户生命周期字段（幂等：先检查列是否存在）
+        if current < 3:
+            existing_cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(paper_accounts)").fetchall()
+            }
+            if "is_hidden" not in existing_cols:
+                conn.execute(
+                    """
+                    ALTER TABLE paper_accounts
+                    ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0 CHECK(is_hidden IN (0, 1))
+                    """
+                )
+            if "is_deleted" not in existing_cols:
+                conn.execute(
+                    """
+                    ALTER TABLE paper_accounts
+                    ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0 CHECK(is_deleted IN (0, 1))
+                    """
+                )
+            if "closed_at" not in existing_cols:
+                conn.execute(
+                    """
+                    ALTER TABLE paper_accounts
+                    ADD COLUMN closed_at TEXT
+                    """
+                )
+            if "deleted_at" not in existing_cols:
+                conn.execute(
+                    """
+                    ALTER TABLE paper_accounts
+                    ADD COLUMN deleted_at TEXT
+                    """
+                )
+            if "lifecycle_reason" not in existing_cols:
+                conn.execute(
+                    """
+                    ALTER TABLE paper_accounts
+                    ADD COLUMN lifecycle_reason TEXT
+                    """
+                )
+
         conn.execute(
             """
             INSERT OR REPLACE INTO paper_schema_version (version, updated_at)
@@ -320,12 +367,18 @@ class PaperTradingStore:
             rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
 
-    def list_accounts(self):
+    def list_accounts(self, include_hidden=False, include_deleted=False):
+        query = "SELECT * FROM paper_accounts WHERE 1=1"
+        params = []
+        if not include_deleted:
+            query += " AND is_deleted = 0"
+        if not include_hidden:
+            query += " AND is_hidden = 0"
+        query += " ORDER BY created_at, account_id"
         with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM paper_accounts ORDER BY created_at, account_id"
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
 
     def save_signals(self, account_id, signal_date, trade_date, scores_json, config_json):
         with self.connect() as conn:
@@ -496,17 +549,27 @@ class PaperTradingStore:
             )
 
     def create_account_snapshot(self, account_row, position_rows, nav_row, conn=None):
+        # 确保生命周期字段有默认值
+        account_row = dict(account_row)
+        account_row.setdefault("is_hidden", 0)
+        account_row.setdefault("is_deleted", 0)
+        account_row.setdefault("closed_at", None)
+        account_row.setdefault("deleted_at", None)
+        account_row.setdefault("lifecycle_reason", None)
+
         def _do_insert(_conn):
             _conn.execute(
                 """
                 INSERT INTO paper_accounts (
                     account_id, name, account_type, group_id, strategy_name,
                     config_json, config_hash, initial_capital, start_mode,
-                    start_date, end_date, status, created_at, updated_at
+                    start_date, end_date, status, is_hidden, is_deleted,
+                    closed_at, deleted_at, lifecycle_reason, created_at, updated_at
                 ) VALUES (
                     :account_id, :name, :account_type, :group_id, :strategy_name,
                     :config_json, :config_hash, :initial_capital, :start_mode,
-                    :start_date, :end_date, :status, :created_at, :updated_at
+                    :start_date, :end_date, :status, :is_hidden, :is_deleted,
+                    :closed_at, :deleted_at, :lifecycle_reason, :created_at, :updated_at
                 )
                 """,
                 account_row,
@@ -789,3 +852,150 @@ class PaperTradingStore:
         with self.connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+    # Lifecycle helpers
+
+    _UNSET = object()
+
+    def update_account_lifecycle(
+        self,
+        account_id,
+        status=_UNSET,
+        is_hidden=_UNSET,
+        is_deleted=_UNSET,
+        closed_at=_UNSET,
+        deleted_at=_UNSET,
+        lifecycle_reason=_UNSET,
+    ):
+        """原子更新账户生命周期字段。显式传入 ``None`` 会清空对应列。
+
+        返回是否实际更新了行。
+        """
+        with self.connect() as conn:
+            now = datetime.now().isoformat(timespec="seconds")
+            fields = ["updated_at = ?"]
+            params = [now]
+            if status is not self._UNSET:
+                fields.append("status = ?")
+                params.append(status)
+            if is_hidden is not self._UNSET:
+                fields.append("is_hidden = ?")
+                params.append(1 if is_hidden else 0)
+            if is_deleted is not self._UNSET:
+                fields.append("is_deleted = ?")
+                params.append(1 if is_deleted else 0)
+            if closed_at is not self._UNSET:
+                if closed_at is None:
+                    fields.append("closed_at = NULL")
+                else:
+                    fields.append("closed_at = ?")
+                    params.append(closed_at)
+            if deleted_at is not self._UNSET:
+                if deleted_at is None:
+                    fields.append("deleted_at = NULL")
+                else:
+                    fields.append("deleted_at = ?")
+                    params.append(deleted_at)
+            if lifecycle_reason is not self._UNSET:
+                if lifecycle_reason is None:
+                    fields.append("lifecycle_reason = NULL")
+                else:
+                    fields.append("lifecycle_reason = ?")
+                    params.append(lifecycle_reason)
+            params.append(account_id)
+            cur = conn.execute(
+                f"UPDATE paper_accounts SET {', '.join(fields)} WHERE account_id = ?",
+                params,
+            )
+            return cur.rowcount > 0
+
+    def close_account(self, account_id, reason=None):
+        """结束账户：在同一事务中更新账户状态并取消所有 PENDING 订单。"""
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE paper_accounts
+                SET status = ?, closed_at = ?, lifecycle_reason = ?, updated_at = ?
+                WHERE account_id = ?
+                """,
+                ("ENDED", now, reason or "closed", now, account_id),
+            )
+            conn.execute(
+                """
+                UPDATE paper_orders
+                SET status = 'CANCELLED', reason = 'ACCOUNT_CLOSED'
+                WHERE account_id = ? AND status = 'PENDING'
+                """,
+                (account_id,),
+            )
+
+    def soft_delete_account(self, account_id, reason=None):
+        """软删除账户：在同一事务中标记 is_deleted=1、status=ENDED 并取消所有 PENDING 订单。"""
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE paper_accounts
+                SET status = ?, is_deleted = 1, deleted_at = ?, lifecycle_reason = ?, updated_at = ?
+                WHERE account_id = ?
+                """,
+                ("ENDED", now, reason or "soft deleted", now, account_id),
+            )
+            conn.execute(
+                """
+                UPDATE paper_orders
+                SET status = 'CANCELLED', reason = 'ACCOUNT_DELETED'
+                WHERE account_id = ? AND status = 'PENDING'
+                """,
+                (account_id,),
+            )
+
+    def restore_account(self, account_id, status="READY", reason=None):
+        """恢复软删除账户到 READY 状态。
+
+        恢复时必须同时清空 closed_at 和 deleted_at，确保账户与全新 READY 账户字段一致。
+        """
+        return self.update_account_lifecycle(
+            account_id,
+            status=status,
+            is_deleted=False,
+            closed_at=None,
+            deleted_at=None,
+            lifecycle_reason=reason or "restored",
+        )
+
+    def permanently_delete_account(self, account_id):
+        """永久删除账户并级联清理所有子表数据。返回是否删除了账户行。
+
+        删除顺序受外键约束：先 trades（依赖 orders），再 orders，
+        最后其他子表和 paper_accounts。
+        """
+        with self.connect() as conn:
+            # 先删依赖 orders 的 trades
+            conn.execute(
+                "DELETE FROM paper_trades WHERE account_id = ?",
+                (account_id,),
+            )
+            # 再删 orders
+            conn.execute(
+                "DELETE FROM paper_orders WHERE account_id = ?",
+                (account_id,),
+            )
+            # 其他子表无相互外键依赖，顺序任意
+            for table in (
+                "paper_positions",
+                "paper_daily_nav",
+                "paper_runs",
+                "paper_signals",
+                "paper_skipped",
+            ):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE account_id = ?",
+                    (account_id,),
+                )
+            cur = conn.execute(
+                "DELETE FROM paper_accounts WHERE account_id = ?",
+                (account_id,),
+            )
+            return cur.rowcount > 0

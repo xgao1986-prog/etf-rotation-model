@@ -124,10 +124,14 @@ class PaperTradingUIService:
         self.service.create_account(request)
         return account_id
 
-    def list_account_summaries(self) -> List[Dict[str, Any]]:
-        """Return a summary row for every account."""
+    def list_account_summaries(
+        self, include_hidden: bool = False, include_deleted: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Return a summary row for every account matching the lifecycle filters."""
         summaries = []
-        for account in self.service.list_accounts():
+        for account in self.service.list_accounts(
+            include_hidden=include_hidden, include_deleted=include_deleted
+        ):
             latest_nav = self._latest_nav(account["account_id"])
             summaries.append({
                 "account_id": account["account_id"],
@@ -136,6 +140,11 @@ class PaperTradingUIService:
                 "strategy_name": account["strategy_name"],
                 "group_id": account["group_id"],
                 "status": account["status"],
+                "is_hidden": bool(account.get("is_hidden", 0)),
+                "is_deleted": bool(account.get("is_deleted", 0)),
+                "closed_at": account.get("closed_at"),
+                "deleted_at": account.get("deleted_at"),
+                "lifecycle_reason": account.get("lifecycle_reason"),
                 "initial_capital": account["initial_capital"],
                 "start_date": account["start_date"],
                 "cash": latest_nav["cash"] if latest_nav else account["initial_capital"],
@@ -153,9 +162,23 @@ class PaperTradingUIService:
         close_prices: Mapping[str, float],
         scores_df: pd.DataFrame,
     ) -> Dict[str, Dict[str, str]]:
-        """Run a trading day for each selected account, isolating failures."""
-        results: Dict[str, Dict[str, str]] = {"success": {}, "failure": {}}
+        """Run a trading day for each selected account, isolating failures.
+
+        Accounts that are ended or soft-deleted are skipped and reported under
+        ``failure`` so the UI does not attempt to run them silently.
+        """
+        results: Dict[str, Dict[str, str]] = {"success": {}, "skipped": {}, "failure": {}}
         for account_id in account_ids:
+            account = self.service.store.get_account(account_id)
+            if account is None:
+                results["failure"][account_id] = "account not found"
+                continue
+            if account.get("is_deleted"):
+                results["skipped"][account_id] = "account is deleted"
+                continue
+            if account["status"] == "ENDED":
+                results["skipped"][account_id] = "account is ended"
+                continue
             try:
                 self.runner.run_daily(
                     account_id,
@@ -170,9 +193,11 @@ class PaperTradingUIService:
         return results
 
     def list_pending_shadow_orders(self) -> List[Dict[str, Any]]:
-        """Return all PENDING orders belonging to shadow accounts."""
+        """Return all PENDING orders belonging to active shadow accounts."""
         pending = []
         for account in self.service.list_accounts():
+            if account.get("is_deleted") or account["status"] == "ENDED":
+                continue
             if account["account_type"] != AccountType.SHADOW.value:
                 continue
             pending.extend(

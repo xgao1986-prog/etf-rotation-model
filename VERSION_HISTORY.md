@@ -16,10 +16,68 @@
 | v1.2 | 2026-06-14 | 市场状态检测（observer模式） | 2019-06-03~2026-06-12 | 104.76% | 10.53% | 0.78 | -14.41% | 678 | 16只iFinD | observer不改变交易 |
 | v1.2.1 | 2026-06-14~16 | 标的池治理与扩展：32只池+分层准入+相关性去重+Walk-forward验证 | 2019-06-03~2026-06-12 | 104.76% | 10.53% | 0.78 | -14.41% | 678 | 32只标记adjust_type | 含池扩展+数据统一+池治理 |
 | v1.2.3 | 2026-06-21 | B0.4冻结基线+调仓引擎v2.5+数据准入v1.1+滑点测试 | 2019-08-13~2026-06-18 | 176.13% | 16.68% | 0.8816 | -17.75% | 804 | 18只+补齐+THS | **当前正式基线** |
+| Paper Trading v0.3.1 | 2026-07-05 | 账户生命周期：结束/重新打开、隐藏/显示、软删除/恢复、永久删除级联清理 | - | - | - | - | - | - | - | 独立版本号，不修改策略 |
 | Paper Trading v0.3 | 2026-07-05 | Streamlit虚拟盘页签+对比/影子账户+影子订单确认 | - | - | - | - | - | - | - | 独立版本号，不修改策略 |
 | v1.2.2 | 2026-06-16 | 空仓机制修复+统一回测入口+动态池 | 2019-06-03~2026-06-12 | 55.88% | 5.71% | 0.46 | -21.06% | 799 | 32只标记adjust_type | 修复空仓+统一入口+动态池（历史工程版） |
 
 > ⚠️ **重要**: 数据版本差异导致同一版本代码在不同数据上表现不同。数据版本标记为"32只标记adjust_type"表示数据库已增加adjust_type字段并清理了重复数据，与原始"16只iFinD"数据不同。
+
+---
+
+## Paper Trading v0.3.1 账户生命周期（2026-07-05）
+
+**核心变更**：
+- `src/paper_trading/store.py`：Schema 升级到 v3，`paper_accounts` 新增 `is_hidden`、`is_deleted`、`closed_at`、`deleted_at`、`lifecycle_reason` 字段；迁移逻辑兼容旧数据库。
+- Store 层新增生命周期方法：
+  - `update_account_lifecycle`：原子更新账户生命周期字段。
+  - `close_account`：在同一事务中更新账户状态并取消所有 `PENDING` 订单，原因 `ACCOUNT_CLOSED`。
+  - `soft_delete_account`：在同一事务中标记账户为已删除/已结束并取消所有 `PENDING` 订单，原因 `ACCOUNT_DELETED`。
+  - `restore_account`：恢复软删除账户。
+  - `permanently_delete_account`：在同一事务中按外键约束顺序清理子表：先 `paper_trades`，再 `paper_orders`，然后其他子表，最后 `paper_accounts`。
+- `src/paper_trading/service.py`：新增 `close_account`、`reopen_account`、`hide_account`、`unhide_account`、`soft_delete_account`、`restore_account`、`permanently_delete_account`；永久删除在 service 层再次校验完整账户名称匹配和显式确认标志。
+- `src/paper_trading/runner.py`：每日运行入口拒绝 `ENDED` 或 `is_deleted=1` 的账户。
+- `src/paper_trading/ui_service.py`：`list_account_summaries` 支持 `include_hidden`/`include_deleted`；`run_accounts` 返回 `skipped` 分区。
+- `src/paper_trading/ui.py`：页面顶部增加显示开关；账户总览表格下方提供结束/重新打开、隐藏/显示、删除/恢复、彻底删除操作按钮；永久删除需要输入完整账户名称并勾选"确认永久删除"。
+- `tests/test_paper_trading_lifecycle.py`：新增 19 项测试，覆盖关闭/软删除取消 PENDING、永久删除顺序、非空 `order_id` 成交、删除失败回滚、名称/确认校验、v2→v3 迁移等。
+- `tests/test_paper_trading_browser.py`：新增浏览器测试，覆盖软删除 → 显示已删除 → 输入账户名称 → 二次确认 → 永久删除的完整 UI 流程。
+
+**生命周期规则**：
+| 操作 | 可恢复 | 数据保留 | 运行影响 |
+|------|--------|----------|----------|
+| 结束（close） | 是 | 全部保留 | 不可运行；PENDING 订单取消，原因 ACCOUNT_CLOSED |
+| 隐藏（hide） | 是 | 全部保留 | 可运行，默认不可见 |
+| 软删除（soft delete） | 是 | 全部保留 | 不可运行；PENDING 订单取消，原因 ACCOUNT_DELETED |
+| 永久删除（permanent delete） | 否 | 级联清理 | 不可运行；需先软删除、匹配完整账户名称、显式确认 |
+
+**验证**：
+- `tests/test_paper_trading_lifecycle.py`：19 passed
+- Paper Trading 专项测试合计：127 passed
+- `tests/test_paper_trading_browser.py`：2 passed（含永久删除二次确认 UI 流程）
+- `python -m py_compile`：通过
+- `git diff --check`：当前修改文件通过
+
+**不修改**：B0.4 策略、参数、ETF 池、冻结数据快照。
+
+---
+
+## Paper Trading v0.3.1 终审修复（2026-07-06）
+
+**核心变更**：
+- `src/paper_trading/runner.py`：账户生命周期检查（`is_deleted`、`status == ENDED`）前移到幂等检查之前；即使当天已有运行记录，已结束/已删除账户再次运行仍被拒绝。
+- `src/paper_trading/store.py`：`restore_account` 恢复账户到 `READY` 时同时清空 `closed_at` 和 `deleted_at`。
+- `src/paper_trading/ui.py`：“确认永久删除”按钮仅在输入完整账户名称且勾选确认框时才启用；条件不满足时禁用。
+- `docs/DECISIONS.md`：新增 D-015，记录结束账户取消 PENDING 订单、永久删除必须先软删除、必须输入完整账户名称并二次确认、永久删除不可恢复。
+- `tests/test_paper_trading_lifecycle.py`：新增 2 项测试，覆盖已处理日期的结束账户拒绝、close→soft delete→restore 的字段一致性。
+- `tests/test_paper_trading_browser.py`：修改永久删除浏览器测试，断言按钮从禁用到启用，再验证级联清理。
+
+**验证**：
+- `tests/test_paper_trading_lifecycle.py`：21 passed
+- Paper Trading 专项测试合计：**129 passed**
+- `tests/test_paper_trading_browser.py`：2 passed（含按钮禁用/启用状态检查）
+- `python -m py_compile`：通过
+- `git diff --check`：当前修改文件通过
+
+**不修改**：B0.4 策略、参数、ETF 池、冻结数据快照。
 
 ---
 

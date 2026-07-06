@@ -23,10 +23,24 @@ def render_paper_trading_page(ui_service, data_provider):
     )
 
     presets = load_strategy_presets()
-    summaries = ui_service.list_account_summaries()
+
+    # Lifecycle display switches at page level
+    col_filter_1, col_filter_2, _ = st.columns(3)
+    with col_filter_1:
+        include_hidden = st.checkbox(
+            "显示已隐藏账户", value=False, key="pt_show_hidden"
+        )
+    with col_filter_2:
+        include_deleted = st.checkbox(
+            "显示已删除账户", value=False, key="pt_show_deleted"
+        )
+
+    summaries = ui_service.list_account_summaries(
+        include_hidden=include_hidden, include_deleted=include_deleted
+    )
 
     with tab_overview:
-        _render_account_overview(ui_service, summaries)
+        _render_account_overview(ui_service, summaries, include_hidden, include_deleted)
 
     with tab_create:
         _render_account_creation(ui_service, presets)
@@ -41,7 +55,12 @@ def render_paper_trading_page(ui_service, data_provider):
         _render_account_details(ui_service, summaries)
 
 
-def _render_account_overview(ui_service, summaries: List[Dict[str, Any]]):
+def _render_account_overview(
+    ui_service,
+    summaries: List[Dict[str, Any]],
+    include_hidden: bool = False,
+    include_deleted: bool = False,
+):
     st.subheader("账户总览")
     if not summaries:
         st.info("暂无虚拟账户，请先在“创建账户”页签新建。")
@@ -88,12 +107,151 @@ def _render_account_overview(ui_service, summaries: List[Dict[str, Any]]):
         'name', 'account_type', 'strategy_name', 'cash', 'positions_value',
         'nav', '收益', '年化收益', '夏普', '最大回撤', 'Calmar',
         '胜率', '换手', '佣金', 'latest_nav_date', 'status',
+        'is_hidden', 'is_deleted', 'closed_at', 'deleted_at', 'lifecycle_reason',
     ]
     display_df = df[[c for c in display_cols if c in df.columns]].copy()
     # Ensure consistent types so Streamlit's Arrow serialization does not fail
     # when numeric columns are mixed with formatted strings (e.g. "20%").
     display_df = display_df.astype(str)
     st.dataframe(display_df, use_container_width=True)
+
+    st.divider()
+    st.write("**账户操作**")
+    for s in summaries:
+        account_id = s['account_id']
+        status = s['status']
+        is_hidden = s.get('is_hidden', False)
+        is_deleted = s.get('is_deleted', False)
+        label = f"{s['name']} ({account_id[:8]}...)"
+        with st.expander(label, expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                if status != 'ENDED':
+                    if st.button("⏹️ 结束", key=f"close_{account_id}"):
+                        try:
+                            ui_service.service.close_account(account_id)
+                            st.success(f"已结束账户 {account_id}")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"结束失败：{exc}")
+                else:
+                    if st.button("▶️ 重新打开", key=f"reopen_{account_id}"):
+                        try:
+                            ui_service.service.reopen_account(account_id)
+                            st.success(f"已重新打开账户 {account_id}")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"重新打开失败：{exc}")
+            with c2:
+                if not is_hidden:
+                    if st.button("👁️ 隐藏", key=f"hide_{account_id}"):
+                        try:
+                            ui_service.service.hide_account(account_id)
+                            st.success(f"已隐藏账户 {account_id}")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"隐藏失败：{exc}")
+                else:
+                    if st.button("🔄 显示", key=f"unhide_{account_id}"):
+                        try:
+                            ui_service.service.unhide_account(account_id)
+                            st.success(f"已显示账户 {account_id}")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"显示失败：{exc}")
+            with c3:
+                if not is_deleted:
+                    if st.button("🗑️ 删除", key=f"soft_delete_{account_id}"):
+                        try:
+                            ui_service.service.soft_delete_account(account_id)
+                            st.success(f"已删除账户 {account_id}")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"删除失败：{exc}")
+                else:
+                    if st.button("♻️ 恢复", key=f"restore_{account_id}"):
+                        try:
+                            ui_service.service.restore_account(account_id)
+                            st.success(f"已恢复账户 {account_id}")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"恢复失败：{exc}")
+            with c4:
+                if is_deleted:
+                    confirm_key = f"confirm_purge_{account_id}"
+                    if st.session_state.get("confirm_purge_account_id") == account_id:
+                        st.warning("⚠️ 永久删除不可恢复，将级联清理所有关联数据")
+                        st.write(f"**账户名称**：{s['name']}")
+                        # 统计真实关联记录数
+                        with ui_service.service.store.connect() as conn:
+                            counts = {
+                                "positions": conn.execute(
+                                    "SELECT COUNT(*) FROM paper_positions WHERE account_id = ?", (account_id,)
+                                ).fetchone()[0],
+                                "orders": conn.execute(
+                                    "SELECT COUNT(*) FROM paper_orders WHERE account_id = ?", (account_id,)
+                                ).fetchone()[0],
+                                "trades": conn.execute(
+                                    "SELECT COUNT(*) FROM paper_trades WHERE account_id = ?", (account_id,)
+                                ).fetchone()[0],
+                                "nav": conn.execute(
+                                    "SELECT COUNT(*) FROM paper_daily_nav WHERE account_id = ?", (account_id,)
+                                ).fetchone()[0],
+                                "runs": conn.execute(
+                                    "SELECT COUNT(*) FROM paper_runs WHERE account_id = ?", (account_id,)
+                                ).fetchone()[0],
+                                "signals": conn.execute(
+                                    "SELECT COUNT(*) FROM paper_signals WHERE account_id = ?", (account_id,)
+                                ).fetchone()[0],
+                                "skipped": conn.execute(
+                                    "SELECT COUNT(*) FROM paper_skipped WHERE account_id = ?", (account_id,)
+                                ).fetchone()[0],
+                            }
+                        st.write(
+                            f"持仓 {counts['positions']} 条 / 订单 {counts['orders']} 条 / "
+                            f"成交 {counts['trades']} 条 / NAV {counts['nav']} 条 / "
+                            f"运行 {counts['runs']} 条 / 信号 {counts['signals']} 条 / "
+                            f"跳过 {counts['skipped']} 条"
+                        )
+                        name_input = st.text_input(
+                            f"请输入完整账户名称“{s['name']}”以确认",
+                            key=f"purge_name_{account_id}",
+                        )
+                        confirm_check = st.checkbox(
+                            "我已确认永久删除此账户及其所有数据",
+                            key=f"purge_check_{account_id}",
+                        )
+                        c4a, c4b = st.columns(2)
+                        with c4a:
+                            can_purge = (
+                                name_input == s['name'] and confirm_check
+                            )
+                            if st.button(
+                                "✅ 确认永久删除",
+                                key=f"do_purge_{account_id}",
+                                disabled=not can_purge,
+                            ):
+                                try:
+                                    ui_service.service.permanently_delete_account(
+                                        account_id,
+                                        account_name=name_input,
+                                        confirmed=confirm_check,
+                                    )
+                                    st.session_state.pop("confirm_purge_account_id", None)
+                                    st.success(f"已彻底删除账户 {account_id}")
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(f"彻底删除失败：{exc}")
+                        with c4b:
+                            if st.button("取消", key=f"cancel_purge_{account_id}"):
+                                st.session_state.pop("confirm_purge_account_id", None)
+                                st.rerun()
+                    else:
+                        if st.button("🧨 彻底删除", key=f"purge_{account_id}"):
+                            st.session_state["confirm_purge_account_id"] = account_id
+                            st.rerun()
+                else:
+                    st.caption("彻底删除前需先软删除")
 
 
 def _render_account_creation(ui_service, presets: Mapping[str, Mapping[str, Any]]):
@@ -218,12 +376,20 @@ def _render_daily_run(
         prev_results = st.session_state['paper_trading_run_results']
         if prev_results['success']:
             st.success(f"成功运行 {len(prev_results['success'])} 个账户")
+        if prev_results.get('skipped'):
+            st.warning(f"{len(prev_results['skipped'])} 个账户被跳过")
+            for account_id, reason in prev_results['skipped'].items():
+                st.warning(f"{account_id}: {reason}")
         if prev_results['failure']:
             st.error(f"{len(prev_results['failure'])} 个账户运行失败")
             for account_id, reason in prev_results['failure'].items():
                 st.error(f"{account_id}: {reason}")
 
-    if not summaries:
+    runnable = [
+        s for s in summaries
+        if not s.get('is_deleted') and s.get('status') != 'ENDED'
+    ]
+    if not runnable:
         st.info("暂无账户可运行。")
         return
 
@@ -235,7 +401,7 @@ def _render_daily_run(
     with col2:
         st.metric("评分数据行数", coverage['actual_score_count'])
     with col3:
-        st.metric("待运行账户数", len(summaries))
+        st.metric("待运行账户数", len(runnable))
 
     st.caption(f"行情与评分数据日期：{data_date or '未知'}")
 
@@ -260,9 +426,9 @@ def _render_daily_run(
 
     selected = st.multiselect(
         "选择要运行的账户",
-        options=[s['account_id'] for s in summaries],
-        default=[s['account_id'] for s in summaries],
-        format_func=lambda x: next((s['name'] for s in summaries if s['account_id'] == x), x),
+        options=[s['account_id'] for s in runnable],
+        default=[s['account_id'] for s in runnable],
+        format_func=lambda x: next((s['name'] for s in runnable if s['account_id'] == x), x),
     )
 
     if st.button("运行选中账户", use_container_width=True):

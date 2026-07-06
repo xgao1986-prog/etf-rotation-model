@@ -35,13 +35,14 @@ class PaperTradingRunner:
         持仓、总资产、运行结果和信号。中途不得单独写入账户状态。
 
         1. 检查 date 是否为交易日且在日历范围内。
-        2. 如果当天已处理，直接返回已有结果。
-        3. 获取上一交易日状态作为基线。
-        4. 执行今天到期的调仓信号（使用 open_prices，先卖后买）。
-        5. 止损检查与执行（使用 open_prices）。
-        6. 每日估值（使用 close_prices，只更新市值，不修改股数）。
-        7. 如果是调仓日，准备信号供下一交易日执行（使用账户冻结配置）。
-        8. 原子保存最终状态。
+        2. 获取账户并检查生命周期状态（已删除或已结束账户拒绝运行）。
+        3. 如果当天已处理，直接返回已有结果。
+        4. 获取上一交易日状态作为基线。
+        5. 执行今天到期的调仓信号（使用 open_prices，先卖后买）。
+        6. 止损检查与执行（使用 open_prices）。
+        7. 每日估值（使用 close_prices，只更新市值，不修改股数）。
+        8. 如果是调仓日，准备信号供下一交易日执行（使用账户冻结配置）。
+        9. 原子保存最终状态。
 
         返回：{"cash": float, "positions": dict, "nav": float, "trades": list, "skipped": list}
         """
@@ -57,22 +58,27 @@ class PaperTradingRunner:
         if not self.calendar.is_trading_day(date):
             raise ValueError(f"{date} is not a trading day")
 
-        # 2. 幂等检查
-        if self.service.store.is_day_processed(account_id, date):
-            return self._build_result_from_db(account_id, date)
-
-        # 2.5 获取账户类型
+        # 2. 获取账户并检查生命周期状态（必须在幂等检查之前）
         account = self.service.store.get_account(account_id)
         if account is None:
             raise KeyError(f"missing account: {account_id}")
+        if account.get("is_deleted"):
+            raise ValueError(f"account is deleted: {account_id}")
+        if account["status"] == "ENDED":
+            raise ValueError(f"account is ended: {account_id}")
+
+        # 3. 幂等检查
+        if self.service.store.is_day_processed(account_id, date):
+            return self._build_result_from_db(account_id, date)
+
         account_type = AccountType(account["account_type"])
         is_shadow = account_type is AccountType.SHADOW
 
-        # 3. 影子账户：先过期上一交易日的 PENDING 订单
+        # 4. 影子账户：先过期上一交易日的 PENDING 订单
         if is_shadow:
             self.service.store.expire_pending_orders(account_id, before_trade_date=date)
 
-        # 4. 获取基线状态
+        # 5. 获取基线状态
         prev_date = self.calendar.previous_trading_day(date)
         baseline = self._get_baseline_state(account_id, prev_date)
 
@@ -81,7 +87,7 @@ class PaperTradingRunner:
         orders: List[Dict] = []
         signals: List[Dict] = []
 
-        # 5. 执行今天到期的调仓信号
+        # 6. 执行今天到期的调仓信号
         pending_signals = self.service.store.load_pending_signals(account_id, date)
         for signal in pending_signals:
             if is_shadow:
@@ -98,7 +104,7 @@ class PaperTradingRunner:
                 orders.extend(signal_orders)
                 baseline = self._apply_trades_to_state(baseline, signal_trades, open_prices)
 
-        # 6. 止损检查与执行（使用开盘价）
+        # 7. 止损检查与执行（使用开盘价）
         sl_orders, sl_skipped = self._check_stop_loss(account_id, date, baseline, open_prices)
         skipped.extend(sl_skipped)
         if sl_orders:
@@ -115,16 +121,16 @@ class PaperTradingRunner:
                 orders.extend(sl_orders_out)
                 baseline = self._apply_trades_to_state(baseline, sl_trades, open_prices)
 
-        # 7. 每日估值（使用收盘价，只更新市值）
+        # 8. 每日估值（使用收盘价，只更新市值）
         baseline = self._apply_valuation(baseline, close_prices)
 
-        # 8. 如果是调仓日，准备信号（与当天状态一起保存）
+        # 9. 如果是调仓日，准备信号（与当天状态一起保存）
         if self.calendar.is_rebalance_day(date) and scores_df is not None:
             cfg = json.loads(account["config_json"])
             next_day = self.calendar.next_trading_day(date)
             signals.append(self._prepare_rebalance_signal(account_id, date, next_day, scores_df, cfg))
 
-        # 9. 原子保存最终状态
+        # 10. 原子保存最终状态
         self.service.store.save_daily_state(
             account_id, date,
             cash=baseline["cash"],

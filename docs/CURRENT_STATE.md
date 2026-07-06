@@ -1,9 +1,9 @@
 # 当前工程现场
 
-**最后更新**：2026-07-05
+**最后更新**：2026-07-06
 **工作目录**：`D:\etf_rotation_model`
 **当前分支**：`feature/paper-trading-ui-v0.3`
-**当前版本**：v1.2.3（虚拟盘 v0.3）
+**当前版本**：v1.2.3（虚拟盘 v0.3.1）
 **当前 HEAD**：以 `git status` 为准
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）
@@ -21,24 +21,19 @@
 - **Universe Time-Consistency Audit：已收口**
   - 7 只 ETF 已知早期覆盖不足，已量化并披露
   - 四组对照回测完成，结论：不足以推翻 B0.4
-- **Paper Trading v0.3：Task 1~7 已完成并推送，Task 8 文档收口完成**
-  - `src/paper_trading/ui.py` 提供 "虚拟盘" 独立页面：账户总览、批量创建对比账户、创建影子账户、今日运行、待确认订单、账户详情与策略对比
-  - 对比账户：由预设批量创建，同批次共享 group_id、初始资金和起始日期；运行后自动生成成交和 NAV 记录
-  - 影子账户：手动录入名称、总资产、现金、持仓和起始日期；运行后生成 PENDING 影子订单，不自动改变现金和持仓
-  - 影子订单必须由用户确认：支持确认成交、标记未执行、取消；拒绝/取消必须填写原因
-  - `app.py` 已集成该页面作为第 7 个页签，并提供行情/评分数据入口
-  - 数据完整性检查：18 只 ETF 开盘/收盘价必须存在、有限且大于 0；total_score 必须存在且有限；日期不一致也阻止运行
-  - 账户总览展示年化收益、夏普、最大回撤、Calmar、胜率、换手、佣金
-  - 账户详情展示历史订单、净值曲线、回撤曲线、持仓明细
-  - B0.4 策略对比仅在同一非空批次（同 group_id + start_date）的对比账户内查找参照，用于并行虚拟盘跟踪
-  - 修复账户总览 DataFrame 混合类型导致的 Streamlit Arrow 序列化失败，统一转换为字符串列
-  - 为兼容 Streamlit 1.41 与 1.58，将 `width='stretch'` 统一改为 `use_container_width=True`
-  - 账户创建表单反套用 `st.form`，避免 headless Chromium 中控件状态在 rerun 前丢失
-  - 将账户类型切换从 `st.radio` 改为 `st.selectbox`，避免 headless Chromium 中 radio 无法交互
-  - 运行结果写入 `st.session_state` 后再 `st.rerun()`，确保成功/失败详情在 rerun 后仍可见
-  - Task 7 浏览器验收为纯 UI 点击流程：创建对比账户 → 创建影子账户 → 今日运行 → 生成影子订单 → 确认成交 → 查看账户详情，并验证数据库产生新的 NAV 记录、PENDING 或 FILLED 状态的订单，以及 STOP_LOSS 动作产生的成交记录
-  - 本轮新鲜验证：182 项相关自动化测试通过（含 paper/store/service/runner/ui/metrics/ui_service/account_admin/preset/live/app_b0_signature 等）；1 项 Playwright 浏览器验收测试通过
-  - 不修改 B0.4 策略、参数或冻结数据
+- **Paper Trading v0.3.1：账户生命周期功能已完成，终审修复已应用**
+  - `paper_accounts` 表升级到 Schema v3，新增 `is_hidden`、`is_deleted`、`closed_at`、`deleted_at`、`lifecycle_reason` 字段
+  - Store 层新增 `update_account_lifecycle`、`soft_delete_account`、`restore_account`、`permanently_delete_account`
+  - Service 层新增 `close_account`、`reopen_account`、`hide_account`、`unhide_account`、`soft_delete_account`、`restore_account`、`permanently_delete_account`
+  - Runner 在每日运行入口**先于幂等检查**拒绝已结束（`ENDED`）或已软删除（`is_deleted=1`）账户；即使当天已有运行记录也不会绕过
+  - UI Service `list_account_summaries` 支持 `include_hidden`/`include_deleted` 过滤，`run_accounts` 跳过已结束/已删除账户并返回 `skipped` 分区
+  - UI 页面顶部增加"显示已隐藏账户"和"显示已删除账户"开关；账户总览表格下方为每个账户提供操作按钮：结束/重新打开、隐藏/显示、删除/恢复、彻底删除
+  - 永久删除前必须先软删除；确认按钮仅在输入完整账户名称并勾选二次确认后才启用；service 层继续保留同名/确认校验
+  - 永久删除会级联清理 `paper_positions/orders/trades/daily_nav/runs/signals/skipped` 子表数据
+  - `restore_account` 恢复账户到 `READY` 时同时清空 `closed_at` 和 `deleted_at`
+  - 新增 `tests/test_paper_trading_lifecycle.py`：21 项测试覆盖 schema v3、关闭/重新打开、隐藏/显示、软删除/恢复、永久删除级联、列表过滤、runner 拒绝（含已处理日期场景）、UI service 跳过、restore 字段一致性
+  - Paper Trading v0.3 原有功能保持不变：账户总览、创建账户、今日运行、待确认订单、账户详情与策略对比
+  - `docs/DECISIONS.md` 新增 D-015 记录账户生命周期长期规则
 - **实盘助手 v0.2：已交付骨架**
   - 持仓管理、止损检查、调仓建议、成交记录（不自动下单）
   - 22 项自动化测试全部通过
@@ -117,12 +112,13 @@
 - `tests/test_paper_trading_models.py`：4 passed（配置哈希、现金启动验证、导入验证）
 - `tests/test_paper_trading_store.py`：4 passed（schema、重复事件、配置不可变）
 - `tests/test_paper_trading_service.py`：6 passed（账户创建、NAV 勾稽、重复订单、对账）
+- `tests/test_paper_trading_lifecycle.py`：21 passed（schema v3、关闭/重新打开、隐藏/显示、软删除/恢复、永久删除级联/回滚/名称校验/确认校验、PENDING 订单取消、v2→v3 迁移、列表过滤、runner 拒绝（含已处理日期场景）、restore 字段一致性、UI service 跳过）
 - `tests/test_paper_account_admin.py`：1 passed（命令行创建/列示）
-- 本轮 Task 8 新鲜验证结果：
-  - `python -m pytest tests/test_paper_trading_models.py tests/test_paper_trading_store.py tests/test_paper_trading_service.py tests/test_paper_trading_runner.py tests/test_paper_trading_ui.py tests/test_paper_trading_metrics.py tests/test_paper_trading_ui_service.py tests/test_paper_account_admin.py tests/test_strategy_presets.py tests/test_preset_loading.py tests/test_app_b0_signature.py tests/test_live_trading.py tests/test_live_daily_workflow.py -q`：**182 passed**（该命令未运行 `tests/test_rebalance_planner.py`）
-  - `.venv-browser-test/Scripts/python -m pytest tests/test_paper_trading_browser.py -v -s`：**1 passed**
-  - `python -m py_compile app.py src/paper_trading/ui.py tests/test_paper_trading_browser.py`：通过
-  - `git diff --check`：通过
+- Paper Trading 专项（本次 v0.3.1 终审修复验证）：
+  - `python -m pytest tests/test_paper_trading_service.py tests/test_paper_trading_store.py tests/test_paper_trading_ui_service.py tests/test_paper_trading_runner.py tests/test_paper_trading_ui.py tests/test_paper_trading_lifecycle.py -q`：**129 passed**
+  - `.venv-browser-test/Scripts/python -m pytest tests/test_paper_trading_browser.py -v -s`：**2 passed**（含永久删除按钮禁用/启用状态检查）
+  - `python -m py_compile app.py src/paper_trading/ui.py src/paper_trading/store.py src/paper_trading/service.py src/paper_trading/runner.py src/paper_trading/ui_service.py tests/test_paper_trading_lifecycle.py tests/test_paper_trading_browser.py`：通过
+  - `git diff --check -- CURRENT_VERSION_NOTE.md README.md VERSION_HISTORY.md docs/CHANGES.md docs/CURRENT_STATE.md docs/DECISIONS.md src/paper_trading/runner.py src/paper_trading/service.py src/paper_trading/store.py src/paper_trading/ui.py src/paper_trading/ui_service.py tests/test_paper_trading_browser.py tests/test_paper_trading_lifecycle.py`：当前修改文件无 trailing whitespace；`docs/B0_DATA_ADMISSION_CHECK_v1.md` 由外部脚本更新，不在本次任务范围
 - `tests/test_paper_trading_ui.py`：22 passed（页面渲染、资金不变传递、无策略参数编辑器、运行按钮触发、rerun 后结果保留、日期/价格/评分异常阻止运行、价格空值/零/负值阻止运行、评分空值阻止运行、影子订单需确认、确认/拒绝/取消调用服务、拒绝需原因、总览展示绩效指标、详情展示订单与曲线、同一批次 B0.4 对比、排除无批次影子账户）
 - `tests/test_paper_trading_browser.py`：1 passed（纯 UI 点击完成对比账户/影子账户创建、运行、确认成交，并验证数据库变化）
 - `tests/test_paper_trading_metrics.py`：11 passed（含首日下跌回撤）
@@ -136,9 +132,28 @@
 - 已通过 Playwright 浏览器验收测试：纯 UI 点击完成创建对比账户、创建影子账户、今日运行、生成影子订单、确认成交、查看账户详情，并验证数据库变化
 - 未实际打开页面前不得声称浏览器工作流完成
 
-## 6. Paper Trading v0.3 资金勾稽与已知限制
+## 6. Paper Trading v0.3.1 账户生命周期
 
-### 资金勾稽（来自本轮真实测试）
+### 新增生命周期能力
+
+| 操作 | 可恢复 | 数据保留 | 能否运行 |
+|------|--------|----------|----------|
+| 结束账户（close） | 是（reopen） | 全部保留 | 否 |
+| 隐藏账户（hide） | 是（unhide） | 全部保留 | 是（默认列表不显示） |
+| 软删除账户（soft delete） | 是（restore） | 全部保留 | 否 |
+| 永久删除（permanent delete） | 否 | 级联清理子表 | 否 |
+
+### 关键规则
+
+- 结束账户会设置 `status = ENDED` 并记录 `closed_at`；同一事务中将所有 `PENDING` 订单改为 `CANCELLED`，原因 `ACCOUNT_CLOSED`；重新打开后恢复 `READY` 并清空 `closed_at`，旧订单保持 `CANCELLED`。
+- 隐藏账户只设置 `is_hidden=1`，不影响运行；取消隐藏后恢复可见。
+- 软删除账户同时设置 `is_deleted=1` 和 `status = ENDED`，记录 `deleted_at`；同一事务中将所有 `PENDING` 订单改为 `CANCELLED`，原因 `ACCOUNT_DELETED`；恢复后回到 `READY` 并清空 `deleted_at`，旧订单保持 `CANCELLED`。
+- 永久删除前必须先软删除；service 层再次校验完整账户名称匹配和显式确认标志；永久删除在同一事务中按外键约束顺序清理：先 `paper_trades`，再 `paper_orders`，然后其他子表，最后 `paper_accounts`。
+- Runner 拒绝为 `ENDED` 或 `is_deleted=1` 的账户运行。
+- UI Service `run_accounts` 返回结果新增 `skipped` 分区，用于报告被跳过的账户。
+- UI 默认不显示隐藏和已删除账户；用户可通过顶部开关临时显示。
+
+### 资金勾稽（来自真实测试）
 
 - **现金 + 持仓市值 = 总资产**：`tests/test_paper_trading_runner.py::TestUniqueFinalState::test_single_nav_per_day` 每日验证。
 - **佣金已计入现金变化**：`tests/test_paper_trading_service.py::test_confirm_shadow_order_fills_trade_updates_state` 验证，买入 2 笔共 300 元市值产生 10 元佣金，现金从 1,000,000 变为 999,690。
@@ -147,14 +162,12 @@
 
 ### 已知限制
 
-- 尚无结束账户功能
-- 尚无永久删除账户功能
 - 尚未定时自动运行
 - 不连接券商、不自动实盘下单
 
 ## 7. 下一阶段
 
-- Paper Trading v0.3.1 账户生命周期（结束账户、删除账户等）。
+- Paper Trading v0.3.2：定时自动运行、运行日志或邮件/通知提醒。
 
 ---
 
@@ -194,12 +207,12 @@
 
 ---
 
-**虚拟实盘状态**：Phase 2 每日运行流程、止损检查、每周调仓、模拟成交已完成；Task 6 Streamlit 虚拟盘页面已提交。
+**虚拟实盘状态**：Phase 2 每日运行流程、止损检查、每周调仓、模拟成交已完成；Task 6 Streamlit 虚拟盘页面已提交；v0.3.1 账户生命周期已完成。
 
 **版本口径**：
 - 策略版本：v1.2.3（B0.4 基线）
-- 冻结基线：B0.4
+- 基线版本：B0.4
 - 调仓引擎：v2.5
 - 数据准入：v1.1
 - 滑点测试：v2
-- 虚拟实盘：v0.3（Phase 2 运行流程 + Streamlit 虚拟盘页面 + 影子订单确认流程）
+- 虚拟实盘：v0.3.1

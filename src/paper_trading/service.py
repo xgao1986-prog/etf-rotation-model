@@ -116,14 +116,99 @@ class PaperTradingService:
             "ok": abs(difference) <= self.NAV_TOLERANCE,
         }
 
-    def list_accounts(self):
-        return self.store.list_accounts()
+    def list_accounts(self, include_hidden=False, include_deleted=False):
+        return self.store.list_accounts(
+            include_hidden=include_hidden, include_deleted=include_deleted
+        )
 
     def get_account(self, account_id):
         account = self.store.get_account(account_id)
         if account is None:
             raise KeyError(account_id)
         return account
+
+    def _require_active_account(self, account_id):
+        account = self.get_account(account_id)
+        if account.get("is_deleted"):
+            raise ValueError(f"account is deleted: {account_id}")
+        if account["status"] == AccountStatus.ENDED.value:
+            raise ValueError(f"account is ended: {account_id}")
+        return account
+
+    def close_account(self, account_id, reason=None):
+        """结束账户：停止运行但保留所有数据，可重新打开。"""
+        account = self.get_account(account_id)
+        if account["status"] == AccountStatus.ENDED.value:
+            raise ValueError("account is already ended")
+        self.store.close_account(account_id, reason=reason or "closed")
+        return self.store.get_account(account_id)
+
+    def reopen_account(self, account_id, reason=None):
+        """重新打开已结束账户，恢复到 READY 状态。"""
+        account = self.get_account(account_id)
+        if account["status"] != AccountStatus.ENDED.value:
+            raise ValueError("account is not ended")
+        if account.get("is_deleted"):
+            raise ValueError("cannot reopen a deleted account; restore it first")
+        self.store.update_account_lifecycle(
+            account_id,
+            status=AccountStatus.READY.value,
+            closed_at=None,
+            lifecycle_reason=reason or "reopened",
+        )
+        return self.store.get_account(account_id)
+
+    def hide_account(self, account_id, reason=None):
+        """隐藏账户：不在默认列表中显示，不影响运行。"""
+        self.get_account(account_id)
+        self.store.update_account_lifecycle(
+            account_id,
+            is_hidden=True,
+            lifecycle_reason=reason or "hidden",
+        )
+        return self.store.get_account(account_id)
+
+    def unhide_account(self, account_id, reason=None):
+        """取消隐藏账户。"""
+        self.get_account(account_id)
+        self.store.update_account_lifecycle(
+            account_id,
+            is_hidden=False,
+            lifecycle_reason=reason or "unhidden",
+        )
+        return self.store.get_account(account_id)
+
+    def soft_delete_account(self, account_id, reason=None):
+        """软删除账户：标记为已删除且已结束，可回收。"""
+        self.get_account(account_id)
+        self.store.soft_delete_account(account_id, reason=reason)
+        return self.store.get_account(account_id)
+
+    def restore_account(self, account_id, reason=None):
+        """恢复软删除的账户到 READY 状态。"""
+        account = self.get_account(account_id)
+        if not account.get("is_deleted"):
+            raise ValueError("account is not deleted")
+        self.store.restore_account(account_id, status="READY", reason=reason)
+        return self.store.get_account(account_id)
+
+    def permanently_delete_account(
+        self, account_id, account_name: str, confirmed: bool, reason=None
+    ):
+        """永久删除账户并级联清理所有数据。不可恢复。
+
+        页面虽已要求用户输入完整账户名称并勾选确认，但 service 层必须再次校验，
+        防止绕过 UI 直接调用。
+        """
+        account = self.get_account(account_id)
+        if not account.get("is_deleted"):
+            raise ValueError("account must be soft deleted before permanent deletion")
+        if account.get("name") != account_name:
+            raise ValueError("account name does not match; permanent deletion rejected")
+        if not confirmed:
+            raise ValueError("permanent deletion must be explicitly confirmed")
+        self.store.permanently_delete_account(account_id)
+        return True
 
     def confirm_shadow_order(self, fill: ManualFill):
         account = self.store.get_account(fill.account_id)
