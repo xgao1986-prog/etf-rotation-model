@@ -1791,41 +1791,120 @@ def render_data_management():
     actions, logs_col = st.columns([0.9, 1.5])
     with actions:
         st.subheader("数据操作")
-        if st.button("🔄 更新最新行情", type="primary", use_container_width=True):
+
+        # 数据源状态卡片
+        from data_fetcher import import_local_ifind_csvs
+        import glob
+        import os as _os
+
+        akshare_available = False
+        try:
+            import akshare as _ak
+            akshare_available = True
+        except ImportError:
+            akshare_available = False
+
+        ifind_csv_files = sorted(glob.glob(_os.path.join("data", "ifind_*.csv")))
+        has_ifind_csv = len(ifind_csv_files) > 0
+        latest_date = db.get_latest_date() or "N/A"
+
+        status_cols = st.columns(3)
+        status_cols[0].metric("AKShare", "可用" if akshare_available else "未安装")
+        status_cols[1].metric("本地 iFinD CSV", f"{len(ifind_csv_files)} 个")
+        status_cols[2].metric("数据库最新日期", latest_date)
+
+        st.caption(
+            "AKShare 为免费数据源但近期接口不稳定；iFinD 数据可通过 Kimi 对话获取 CSV 后放到 data/ifind_*.csv，"
+            "再点击下面按钮自动导入。"
+        )
+
+        st.divider()
+
+        if st.button("🔄 更新最新行情（AKShare，可能较慢）", use_container_width=True):
             with st.spinner("更新中..."):
                 from data_fetcher import update_latest_data
 
                 try:
-                    count = update_latest_data(db=db)
-                    if count > 0:
-                        st.success(f"✅ 已更新 {count} 条行情记录")
-                    else:
-                        st.info("暂无新行情数据或 AKShare 未安装")
+                    result = update_latest_data(db=db)
 
-                    # 方案 A：行情更新后自动重新计算评分
-                    scores_all = _recalculate_scores(
-                        db, cfg,
-                        st_info=lambda msg: st.info(msg),
-                        st_success=lambda msg: st.success(msg),
-                        st_error=lambda msg: st.error(msg)
-                    )
+                    if result["status"] == "akshare_not_installed":
+                        st.error(result["message"])
+                    elif result["status"] == "no_data":
+                        if result["failed_tickers"]:
+                            st.warning(result["message"])
+                            st.info("AKShare 全部超时，建议点击下方「自动导入本地 iFinD CSV」补齐数据。")
+                        else:
+                            st.info(result["message"])
+                    elif result["status"] == "partial":
+                        st.warning(result["message"])
+                        st.info("部分标的未更新，建议使用 iFinD CSV 导入补齐。")
+                    elif result["status"] == "success":
+                        st.success(result["message"])
+
+                    # 行情更新后自动重新计算评分
+                    if result["saved_count"] > 0:
+                        scores_all = _recalculate_scores(
+                            db, cfg,
+                            st_info=lambda msg: st.info(msg),
+                            st_success=lambda msg: st.success(msg),
+                            st_error=lambda msg: st.error(msg)
+                        )
 
                     load_market_data.clear()
                     load_scores.clear()
                     load_stats.clear()
                     st.rerun()
-                except ImportError as e:
-                    st.error(f"AKShare 未安装: {e}")
-                    st.info("请安装 AKShare: `pip install akshare`，或继续使用 iFinD CSV 导入方式")
                 except Exception as e:
                     st.error(f"更新失败: {e}")
-        st.caption("AKShare 增量更新。若未安装 AKShare，请使用 iFinD CSV 导入。")
-        st.caption("当前数据已更新至 2026-06-25。")
 
         st.divider()
 
-        # iFinD CSV 导入
-        uploaded = st.file_uploader("📥 导入 iFinD CSV", type=["csv"], key="ifind_upload")
+        # 自动导入本地 iFinD CSV
+        if st.button(
+            "📂 自动导入本地 iFinD CSV",
+            type="primary" if has_ifind_csv else "secondary",
+            use_container_width=True,
+            disabled=not has_ifind_csv,
+        ):
+            with st.spinner("扫描并导入 iFinD CSV..."):
+                try:
+                    import_result = import_local_ifind_csvs(db=db, csv_dir="data", pattern="ifind_*.csv")
+
+                    if import_result["status"] == "success":
+                        st.success(import_result["message"])
+                    elif import_result["status"] == "partial":
+                        st.warning(import_result["message"])
+                    else:
+                        st.error(import_result["message"])
+
+                    # 显示每个文件详情
+                    if import_result["files"]:
+                        st.write("导入详情：")
+                        st.json(import_result["files"])
+
+                    # 导入后自动重新计算评分
+                    if import_result["total_count"] > 0:
+                        scores_all = _recalculate_scores(
+                            db, cfg,
+                            st_info=lambda msg: st.info(msg),
+                            st_success=lambda msg: st.success(msg),
+                            st_error=lambda msg: st.error(msg)
+                        )
+
+                        load_market_data.clear()
+                        load_scores.clear()
+                        load_stats.clear()
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"自动导入失败: {e}")
+
+        if not has_ifind_csv:
+            st.caption("未检测到 data/ifind_*.csv，请将 iFinD CSV 文件放入 data/ 目录。")
+
+        st.divider()
+
+        # iFinD CSV 手动上传导入
+        uploaded = st.file_uploader("📥 手动上传 iFinD CSV", type=["csv"], key="ifind_upload")
         if uploaded is not None:
             with st.spinner("导入 iFinD 数据中..."):
                 from data_fetcher import import_from_kimi

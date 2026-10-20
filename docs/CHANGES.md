@@ -175,6 +175,83 @@ git diff --check -- CURRENT_VERSION_NOTE.md README.md VERSION_HISTORY.md docs/CH
 
 ---
 
+---
+
+## 2026-07-06（数据抓取 AKShare 超时修复与 iFinD fallback）
+
+**目标：** 修复 `app.py` "更新最新行情"按钮因 AKShare 批量超时导致的数据无法更新问题，并实现当 AKShare 失败时使用本地 iFinD CSV 自动导入的 fallback。不修改 B0.4 策略、参数、ETF 池或冻结数据。
+
+### 一、问题根因
+
+- `src/data_fetcher.py` 的 `update_latest_data()` 仅依赖 AKShare，批量更新时对每只 ticker 逐个请求东方财富接口。
+- 实测出现大量 `HTTPSConnectionPool(host='push2his.eastmoney.com', port=443): Read timed out. (read timeout=15)`，最终返回 0 条数据，UI 显示"暂无新行情数据或 AKShare 未安装"。
+- `src/config.py` 中 `DATA_SOURCE` 已配置 `primary='ifind_via_kimi'` / `backup='akshare'`，但 `data_fetcher.py` 未读取该配置，也没有 fallback 机制。
+
+### 二、AKShare 抓取优化
+
+- `DataFetcher` 构造函数默认 `timeout=3s`、`max_retries=1`，避免单只 ticker 卡住十几秒。
+- 新增 `_fetch_with_timeout`：使用 `ThreadPoolExecutor` 给 AKShare 调用加硬超时（因为 AKShare 内部 `requests` 的 `timeout` 参数实测不生效）。
+- 新增 `health_check(test_code='512480')`：在批量拉取前先请求一只 ETF 做快速预检；预检失败则立即返回，不再对所有 ticker 进行长时间超时等待。
+- `_fetch_with_retry`：指数退避重试（1s / 2s / 4s），单只 ticker 失败后继续下一只，避免整批中断；`max_retries=1` 时不进行重试等待。
+- `fetch_etf_history` / `fetch_index_history` 使用重试包装；对不支持 `timeout` 参数的旧版 AKShare 做兼容。
+- `fetch_latest` 改为只拉取数据库最新日期次日到今天的数据，不再固定请求 5 天窗口。
+- `update_latest_data` 返回字典：
+  - `saved_count`：实际保存记录数
+  - `fetched_count`：抓取记录数
+  - `success_tickers` / `failed_tickers`
+  - `status`：`no_data` | `success` | `partial` | `akshare_not_installed`
+  - `message`：人类可读说明
+
+### 三、iFinD CSV 自动导入 fallback
+
+- 新增 `data_fetcher.import_local_ifind_csvs(db, csv_dir='data', pattern='ifind_*.csv')`：
+  - 扫描指定目录下匹配文件；
+  - 对每个文件调用现有 `import_from_kimi` 标准化并导入；
+  - 返回总导入条数及每个文件状态。
+- 复用现有 `import_from_kimi` 列名映射（`thscode` → `ticker`、`time` → `date`、`CLOSE` → `close` 等）。
+
+### 四、app.py 数据管理页 UI 改进
+
+- 数据操作区顶部新增三列状态卡片：AKShare 是否可用、本地 iFinD CSV 数量、数据库最新日期。
+- "更新最新行情"按钮：根据 `update_latest_data` 返回状态显示成功/部分成功/全部失败/未安装提示；全部失败时明确建议用户使用 iFinD CSV 导入。
+- 新增"自动导入本地 iFinD CSV"按钮：调用 `import_local_ifind_csvs`，导入成功后自动重新计算评分并 rerun。
+- 保留"手动上传 iFinD CSV"入口，文案从"导入 iFinD CSV"改为"手动上传 iFinD CSV"以区分自动导入。
+
+### 五、新增测试
+
+- `tests/test_data_fetcher.py`：
+  - `test_update_latest_data_returns_zero_on_akshare_failure`：AKShare 全部失败时返回 `no_data`，不崩溃。
+  - `test_import_local_ifind_csvs`：自动扫描并导入本地 `ifind_*.csv`。
+  - `test_import_local_ifind_csvs_no_files`：无文件时返回 `no_files`。
+  - `test_partial_success_saves_data`：部分 ticker 成功、部分失败时，成功数据被保存且状态为 `partial`。
+
+### 六、验证结果
+
+```bash
+python -m pytest tests/test_data_fetcher.py -v
+```
+结果：**4 passed**
+
+```bash
+python -m py_compile app.py src/data_fetcher.py tests/test_data_fetcher.py
+```
+结果：通过
+
+```bash
+git diff --check -- app.py src/data_fetcher.py tests/test_data_fetcher.py docs/CHANGES.md docs/CURRENT_STATE.md
+```
+结果：通过
+
+实际调用 `update_latest_data(db=db)`：AKShare 接口不可用时约 **3.7 秒**内返回，并明确提示使用 iFinD CSV 导入；不再出现之前 300 秒超时的情况。
+
+### 七、不修改范围
+
+- B0.4 策略、参数、ETF 池、冻结数据快照。
+- `import_from_kimi` 列名映射逻辑。
+- 不引入外部 iFinD API 依赖；仍通过 CSV/Kimi 对话桥接。
+
+---
+
 ## 2026-07-05（Paper Trading UI v0.3 文档收口与交接）
 
 **目标：** 完成 Paper Trading UI v0.3 全部 Task 1~7 的文档收口与交接，只更新 `docs/CHANGES.md` 和 `docs/CURRENT_STATE.md`，不修改任何代码、测试、策略参数、数据库或冻结数据。

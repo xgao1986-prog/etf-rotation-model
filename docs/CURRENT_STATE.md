@@ -34,6 +34,14 @@
   - 新增 `tests/test_paper_trading_lifecycle.py`：21 项测试覆盖 schema v3、关闭/重新打开、隐藏/显示、软删除/恢复、永久删除级联、列表过滤、runner 拒绝（含已处理日期场景）、UI service 跳过、restore 字段一致性
   - Paper Trading v0.3 原有功能保持不变：账户总览、创建账户、今日运行、待确认订单、账户详情与策略对比
   - `docs/DECISIONS.md` 新增 D-015 记录账户生命周期长期规则
+- **数据抓取 AKShare 超时问题已修复，新增 iFinD CSV 自动导入 fallback**
+  - 根因：`data_fetcher.update_latest_data()` 对每只 ticker 逐个请求东方财富接口，批量调用下大量 `Read timed out. (read timeout=15)`，导致全部失败、无数据更新
+  - `src/data_fetcher.py`：`DataFetcher` 默认 `timeout=3s`、`max_retries=1`；新增 `_fetch_with_timeout` 使用 `ThreadPoolExecutor` 给 AKShare 调用加硬超时（AKShare 内部 `timeout` 参数实测不生效）；新增 `health_check()` 在批量拉取前做快速预检，失败立即返回
+  - `fetch_latest` 改为只拉取数据库最新日期次日到今天的窗口；`update_latest_data` 返回包含 `saved_count`/`failed_tickers`/`status`/`message` 的字典，区分"未安装"/"全部失败"/"部分成功"/"成功"
+  - `src/data_fetcher.py` 新增 `import_local_ifind_csvs()`：自动扫描 `data/ifind_*.csv` 并批量导入，复用现有 `import_from_kimi` 列名映射
+  - `app.py` 数据管理页：顶部显示 AKShare 可用状态、本地 iFinD CSV 数量、数据库最新日期；"更新最新行情"按钮明确标注"AKShare，可能较慢"；"自动导入本地 iFinD CSV"在有 CSV 时高亮为主按钮；失败后明确提示使用 iFinD CSV 导入
+  - 新增 `tests/test_data_fetcher.py`：4 项测试覆盖 AKShare 全部失败、部分成功保存、本地 iFinD CSV 自动导入、无文件场景
+  - 实测 `update_latest_data(db=db)` 在 AKShare 不可用时约 **3.7 秒**内返回并提示 fallback，不再出现 300 秒超时
 - **实盘助手 v0.2：已交付骨架**
   - 持仓管理、止损检查、调仓建议、成交记录（不自动下单）
   - 22 项自动化测试全部通过
@@ -114,6 +122,11 @@
 - `tests/test_paper_trading_service.py`：6 passed（账户创建、NAV 勾稽、重复订单、对账）
 - `tests/test_paper_trading_lifecycle.py`：21 passed（schema v3、关闭/重新打开、隐藏/显示、软删除/恢复、永久删除级联/回滚/名称校验/确认校验、PENDING 订单取消、v2→v3 迁移、列表过滤、runner 拒绝（含已处理日期场景）、restore 字段一致性、UI service 跳过）
 - `tests/test_paper_account_admin.py`：1 passed（命令行创建/列示）
+- 数据抓取修复验证：
+  - `python -m pytest tests/test_data_fetcher.py -v`：**4 passed**
+  - `python -m py_compile app.py src/data_fetcher.py tests/test_data_fetcher.py`：通过
+  - `git diff --check -- app.py src/data_fetcher.py tests/test_data_fetcher.py docs/CHANGES.md docs/CURRENT_STATE.md`：通过
+  - 实际调用 `update_latest_data(db=db)`：AKShare 不可用时约 **3.7 秒**返回并提示 iFinD fallback
 - Paper Trading 专项（本次 v0.3.1 终审修复验证）：
   - `python -m pytest tests/test_paper_trading_service.py tests/test_paper_trading_store.py tests/test_paper_trading_ui_service.py tests/test_paper_trading_runner.py tests/test_paper_trading_ui.py tests/test_paper_trading_lifecycle.py -q`：**129 passed**
   - `.venv-browser-test/Scripts/python -m pytest tests/test_paper_trading_browser.py -v -s`：**2 passed**（含永久删除按钮禁用/启用状态检查）
