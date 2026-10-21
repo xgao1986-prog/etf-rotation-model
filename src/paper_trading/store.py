@@ -518,7 +518,7 @@ class PaperTradingStore:
                 )
 
             # 保存未执行原因
-            for item in skipped:
+            for _skip_idx, item in enumerate(skipped):
                 if isinstance(item, dict):
                     order_id = item.get("order_id")
                     ticker = item.get("ticker")
@@ -530,7 +530,7 @@ class PaperTradingStore:
                     reason = item[1] if len(item) > 1 else None
                     ticker = None
                     action = None
-                skipped_id = f"skip-{account_id}-{date}-{order_id or 'na'}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+                skipped_id = f"skip-{account_id}-{date}-{order_id or 'na'}-{_skip_idx}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
                 conn.execute(
                     """
                     INSERT INTO paper_skipped (skipped_id, account_id, trade_date, order_id, ticker, action, reason, created_at)

@@ -27,7 +27,8 @@ class PaperTradingRunner:
 
     # ============== Daily Flow (single entry point) ==============
 
-    def run_daily(self, account_id, date, open_prices, close_prices, scores_df=None):
+    def run_daily(self, account_id, date, open_prices, close_prices, scores_df=None,
+                  corporate_actions=None):
         """
         完整每日流程（幂等）。
 
@@ -38,11 +39,15 @@ class PaperTradingRunner:
         2. 获取账户并检查生命周期状态（已删除或已结束账户拒绝运行）。
         3. 如果当天已处理，直接返回已有结果。
         4. 获取上一交易日状态作为基线。
-        5. 执行今天到期的调仓信号（使用 open_prices，先卖后买）。
-        6. 止损检查与执行（使用 open_prices）。
-        7. 每日估值（使用 close_prices，只更新市值，不修改股数）。
-        8. 如果是调仓日，准备信号供下一交易日执行（使用账户冻结配置）。
-        9. 原子保存最终状态。
+        5. 盘前公司行动调整（corporate_actions，如份额拆分：股数×ratio、成本÷ratio）。
+        6. 执行今天到期的调仓信号（使用 open_prices，先卖后买）。
+        7. 止损检查与执行（使用 open_prices）。
+        8. 每日估值（使用 close_prices，只更新市值，不修改股数）。
+        9. 如果是调仓日，准备信号供下一交易日执行（使用账户冻结配置）。
+        10. 原子保存最终状态。
+
+        corporate_actions: 可选 list[dict]，每项含 ticker/effective_date/action_type/ratio。
+        仅调整 effective_date == date 的行动；市值与总资产不变。幂等由第 3 步保证。
 
         返回：{"cash": float, "positions": dict, "nav": float, "trades": list, "skipped": list}
         """
@@ -82,6 +87,26 @@ class PaperTradingRunner:
         prev_date = self.calendar.previous_trading_day(date)
         baseline = self._get_baseline_state(account_id, prev_date)
 
+        # 5.4 跳期防护（ROUND6 补漏）：已确认公司行动的生效日若尚未在本账户
+        # 处理（如生效日因 pending 暂停、隔日确认后直接运行后续日期），禁止
+        # 带着旧股数恢复运行——否则真实价相对旧成本立刻产生虚假亏损和错误止损。
+        missed = self._find_missed_effective_date(
+            account_id, account, date, baseline, corporate_actions)
+        if missed is not None:
+            return self._build_paused_result(account_id, date, baseline, missed)
+
+        # 5.5 盘前公司行动处理（真实价格架构 v3 + ROUND3 确认闸门 + ROUND5 安全处理）
+        # confirmed 生效日：调整 shares/cost/last_price；pending 涉持仓：暂停账户运行
+        # （不生成交易、不估值、不保存当日状态，待确认后重跑）；pending 未持仓：
+        # 该标的当日禁止新买入（直到记录被确认为止）。
+        pause_info = None
+        suspended_buy: set = set()
+        if corporate_actions:
+            baseline, pause_info, suspended_buy = self._apply_corporate_actions(
+                baseline, date, corporate_actions)
+        if pause_info is not None:
+            return self._build_paused_result(account_id, date, baseline, pause_info)
+
         trades: List[Dict] = []
         skipped: List[Dict] = []
         orders: List[Dict] = []
@@ -91,21 +116,23 @@ class PaperTradingRunner:
         pending_signals = self.service.store.load_pending_signals(account_id, date)
         for signal in pending_signals:
             if is_shadow:
-                signal_orders = self._build_signal_orders(
-                    account_id, date, baseline, signal, open_prices
-                )
+                signal_orders, signal_skipped = self._build_signal_orders(
+                    account_id, date, baseline, signal, open_prices,
+                    blocked_buy_tickers=suspended_buy)
                 orders.extend(signal_orders)
+                skipped.extend(signal_skipped)
             else:
                 signal_trades, signal_skipped, signal_orders = self._execute_signal(
-                    account_id, date, baseline, signal, open_prices
-                )
+                    account_id, date, baseline, signal, open_prices,
+                    blocked_buy_tickers=suspended_buy)
                 trades.extend(signal_trades)
                 skipped.extend(signal_skipped)
                 orders.extend(signal_orders)
                 baseline = self._apply_trades_to_state(baseline, signal_trades, open_prices)
 
         # 7. 止损检查与执行（使用开盘价）
-        sl_orders, sl_skipped = self._check_stop_loss(account_id, date, baseline, open_prices)
+        sl_orders, sl_skipped = self._check_stop_loss(
+            account_id, date, baseline, open_prices)
         skipped.extend(sl_skipped)
         if sl_orders:
             if is_shadow:
@@ -168,6 +195,140 @@ class PaperTradingRunner:
             },
         }
 
+    def _apply_corporate_actions(self, state, date, actions):
+        """盘前公司行动处理（真实价格架构 v3 + 确认闸门 + ROUND5 安全处理）。
+
+        份额拆分生效日（effective_date == date 且 confirmed）：shares×=ratio、
+        cost_price÷=ratio、last_price÷=ratio。市值与总资产不变——不腰斩、不虚增；
+        成本价同比例调整使止损判断不受拆分影响。
+
+        确认闸门（硬规则）：
+        - 仅 status == 'confirmed'（基金正式公告核实）的记录可调整持仓；
+        - status 缺省按 pending 处理（老调用方兼容 = 不自动执行）。
+
+        ROUND5 安全处理（pending 且 effective_date <= date）：
+        - 涉及当前持仓（含 ratio 非法无法确认股数变化）：返回 pause_info，
+          run_daily 据此暂停整个账户运行——不生成交易、不估值、不保存当日
+          状态（当日保持未处理，确认后重跑同一日即可）；
+        - 未持有该标的：加入 suspended_buy，本次运行禁止其新买入订单
+          （直到记录被确认为止，跨交易日持续）。
+
+        幂等：同一只股票同一天的行动只应用一次；重复传入相同 actions
+        不会产生二次调整。返回 (state, pause_info, suspended_buy)。
+        """
+        pause_info = None
+        suspended_buy = set()
+        applied = set()
+        for action in actions:
+            if action.get("action_type") not in (None, "split"):
+                continue  # 目前仅支持份额拆分；其他行动类型显式跳过
+            ticker = action.get("ticker")
+            eff = str(action.get("effective_date", ""))[:10]
+            status = action.get("status") or "pending"
+            if status != "confirmed":
+                if eff > date:
+                    continue  # 未来生效的待确认记录暂不处理
+                pos = state["positions"].get(ticker)
+                if pos is not None:
+                    if pause_info is None:
+                        pause_info = {
+                            "ticker": ticker, "effective_date": eff,
+                            "note": action.get("note") or action.get("action_type"),
+                        }
+                else:
+                    suspended_buy.add(ticker)
+                continue
+            if eff != date:
+                continue  # confirmed 仅在生效日调整
+            pos = state["positions"].get(ticker)
+            if pos is None:
+                continue
+            if ticker in applied:
+                continue  # 同标的同日复式记录只应用一次
+            try:
+                ratio = float(action.get("ratio") or 1.0)
+            except (TypeError, ValueError):
+                # confirmed 但比例非法：股数变化无法确认，按涉持仓安全暂停
+                pause_info = {
+                    "ticker": ticker, "effective_date": eff,
+                    "note": f"invalid ratio: {action.get('ratio')!r}",
+                }
+                continue
+            if ratio <= 0 or abs(ratio - 1.0) < 1e-12:
+                continue
+            pos["shares"] = pos["shares"] * ratio
+            pos["cost_price"] = pos["cost_price"] / ratio
+            pos["last_price"] = pos["last_price"] / ratio
+            applied.add(ticker)
+        return state, pause_info, suspended_buy
+
+    def _find_missed_effective_date(self, account_id, account, date, state, actions):
+        """跳期防护（ROUND6 补漏①）：已确认公司行动的生效日若尚未在本账户
+        处理（当日无已保存状态），禁止直接运行后续日期。
+
+        场景：生效日因 pending 暂停 → 隔日确认 → 若直接运行隔日，基线仍是
+        生效前旧股数，面对拆后真实价会立刻产生虚假亏损与错误止损。必须先
+        补跑生效日（确认后重跑该日会正常调整股数），再续跑后续日期。
+
+        只在持仓该标的时阻止；生效日早于账户起点不阻止（起点持仓为人工
+        导入口径）；当日（date == 生效日）不阻止（5.5 步正常调整）。
+        返回 missed 信息 dict 或 None。
+        """
+        if not actions:
+            return None
+        start = str(account.get("start_date", ""))[:10]
+        for action in actions:
+            if action.get("action_type") not in (None, "split"):
+                continue
+            if (action.get("status") or "pending") != "confirmed":
+                continue
+            ticker = action.get("ticker")
+            if ticker not in state["positions"]:
+                continue
+            eff = str(action.get("effective_date", ""))[:10]
+            if not eff or eff >= date:
+                continue
+            if start and eff < start:
+                continue
+            if self.service.store.is_day_processed(account_id, eff):
+                continue
+            return {"kind": "missed_effective_date", "ticker": ticker,
+                    "effective_date": eff}
+        return None
+
+    def _build_paused_result(self, account_id, date, baseline, pause_info):
+        """安全暂停结果：明确提示原因，不包含任何交易/估值/保存动作。"""
+        if pause_info.get("kind") == "missed_effective_date":
+            reason = (
+                f"账户运行已暂停：{pause_info['ticker']} 的公司行动生效日 "
+                f"{pause_info['effective_date']} 尚未在本账户处理（当日未运行"
+                f"或曾暂停）。若直接续跑将带着旧股数面对拆后价格，产生虚假"
+                f"亏损与错误止损。请先补跑 {pause_info['effective_date']} "
+                f"（确认后重跑该日会正常调整股数），再运行 {date}。"
+            )
+        else:
+            reason = (
+                f"账户运行已暂停：{pause_info['ticker']} 存在待确认公司行动"
+                f"（生效日 {pause_info['effective_date']}，{pause_info['note']}），"
+                f"股数变化未经基金公告确认。请核实公告并置为 confirmed 后重跑本日。"
+            )
+        return {
+            "paused": True,
+            "date": date,
+            "account_id": account_id,
+            "reason": reason,
+            "pending_action": pause_info,
+            "cash": baseline["cash"],
+            "positions": baseline["positions"],
+            "nav": baseline["cash"] + sum(
+                p["shares"] * p["last_price"] for p in baseline["positions"].values()
+            ),
+            "trades": [],
+            "skipped": [],
+            "orders": [],
+            "signals": [],
+        }
+
     def _apply_valuation(self, state, prices):
         """更新持仓市值（不修改股数）。缺少价格时保留最近有效价格。"""
         for ticker, pos in state["positions"].items():
@@ -177,12 +338,26 @@ class PaperTradingRunner:
             pos["last_price"] = price
         return state
 
-    def _check_stop_loss(self, account_id, trade_date, state, prices, stop_loss=-0.08):
-        """检查持仓是否触发止损。缺少开盘价的记录未执行原因。"""
+    def _check_stop_loss(self, account_id, trade_date, state, prices,
+                         stop_loss=-0.08, skip_tickers=None):
+        """检查持仓是否触发止损。缺少开盘价的记录未执行原因。
+
+        skip_tickers: 当日有待确认公司行动的标的集合，跳过止损检查
+        （价差由未经确认的份额变动推测而来，不得据此自动卖出）。
+        """
         orders = []
         skipped = []
+        skip = skip_tickers or set()
         now = datetime.now().isoformat(timespec="seconds")
         for ticker, pos in state["positions"].items():
+            if ticker in skip:
+                skipped.append({
+                    "order_id": None,
+                    "ticker": ticker,
+                    "action": "STOP_LOSS",
+                    "reason": f"skipped: pending corporate action for {ticker}",
+                })
+                continue
             cost_price = pos["cost_price"]
             if cost_price <= 0:
                 continue
@@ -346,8 +521,13 @@ class PaperTradingRunner:
 
     # ============== Signal Execution ==============
 
-    def _build_signal_orders(self, account_id, trade_date, baseline, signal, open_prices):
-        """生成调仓信号对应的 PENDING 订单（用于影子账户，不执行）。"""
+    def _build_signal_orders(self, account_id, trade_date, baseline, signal, open_prices,
+                             blocked_buy_tickers=None):
+        """生成调仓信号对应的 PENDING 订单（用于影子账户，不执行）。
+
+        blocked_buy_tickers：存在待确认公司行动、暂停新买入资格的标的集合；
+        其 BUY 计划被剔除并留痕（ROUND5 安全处理）。
+        """
         from io import StringIO
         scores_df = pd.read_json(StringIO(signal["scores_json"]))
         signal_date = signal["signal_date"]
@@ -356,10 +536,19 @@ class PaperTradingRunner:
         cfg = json.loads(self.service.store.get_account(account_id)["config_json"])
         planner_trades, _ = self._run_planner(baseline, scores_df, open_prices, cfg)
 
+        blocked = blocked_buy_tickers or set()
         orders = []
+        blocked_skips = []
         for trade in planner_trades:
             action = trade["action"]
             ticker = trade["ticker"]
+            if action == "BUY" and ticker in blocked:
+                blocked_skips.append({
+                    "order_id": None, "ticker": ticker, "action": action,
+                    "reason": (f"new buy suspended: pending corporate action "
+                               f"for {ticker}, awaiting confirmation"),
+                })
+                continue
             shares = trade["shares"]
             delta = shares if action == "BUY" else -shares
             current_shares = baseline["positions"].get(ticker, {}).get("shares", 0)
@@ -381,12 +570,17 @@ class PaperTradingRunner:
                 "status": OrderStatus.PENDING.value,
                 "created_at": now,
             })
-        return orders
+        return orders, blocked_skips
 
-    def _execute_signal(self, account_id, trade_date, baseline, signal, open_prices):
+    def _execute_signal(self, account_id, trade_date, baseline, signal, open_prices,
+                        blocked_buy_tickers=None):
         """执行保存的信号：强制使用账户创建时保存的冻结配置。"""
-        orders = self._build_signal_orders(account_id, trade_date, baseline, signal, open_prices)
-        return self._execute_orders_in_memory(account_id, trade_date, baseline, orders, open_prices)
+        orders, blocked_skips = self._build_signal_orders(
+            account_id, trade_date, baseline, signal, open_prices,
+            blocked_buy_tickers=blocked_buy_tickers)
+        trades, skipped, orders_out = self._execute_orders_in_memory(
+            account_id, trade_date, baseline, orders, open_prices)
+        return trades, blocked_skips + skipped, orders_out
 
     # ============== Rebalance Planner ==============
 

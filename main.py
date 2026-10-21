@@ -12,10 +12,10 @@ from datetime import datetime
 sys.path.insert(0, 'src')
 
 from config import DB_PATH, ETF_UNIVERSE, BENCHMARK, BACKTEST_CONFIG, DEFENSE_UNIVERSE, FALLBACK_EQUITY_UNIVERSE, ALL_TRADABLE_ETFS
-from database import ETFDatabase
+from database import ETFDatabase, apply_adjustment_for_scoring
 from data_fetcher import download_all_data, update_latest_data
 from strategy import StrategyEngine
-from backtest import BacktestEngine
+from backtest import BacktestEngine, PendingCorporateActionError
 
 
 def cmd_update(args):
@@ -55,16 +55,29 @@ def cmd_backtest(args):
         return
     
     engine = BacktestEngine()
-    
-    if args.sample == 'in':
-        print("运行样本内回测 (2019-2023)...")
-        result = engine.run_in_sample(market_df, bench_df)
-    elif args.sample == 'out':
-        print("运行样本外验证 (2024-至今)...")
-        result = engine.run_out_sample(market_df, bench_df)
-    else:
-        print("运行全区间回测...")
-        result = engine.run(market_df, bench_df)
+    # 真实价格架构 v3：传入全量公司行动记录（confirmed 调整持仓；
+    # pending 涉持仓 → 引擎抛 PendingCorporateActionError 暂停回测——
+    # 不输出收益、不保存结果，明确提示待确认（ROUND5 安全处理））
+    _ca_df = db.get_corporate_actions()
+    _ca_records = _ca_df.to_dict('records') if _ca_df is not None else None
+
+    try:
+        if args.sample == 'in':
+            print("运行样本内回测 (2019-2023)...")
+            result = engine.run_in_sample(market_df, bench_df, corporate_actions=_ca_records)
+        elif args.sample == 'out':
+            print("运行样本外验证 (2024-至今)...")
+            result = engine.run_out_sample(market_df, bench_df, corporate_actions=_ca_records)
+        else:
+            print("运行全区间回测...")
+            result = engine.run(market_df, bench_df, corporate_actions=_ca_records)
+    except PendingCorporateActionError as exc:
+        print(f"\n{'='*50}")
+        print("回测已暂停（待确认公司行动）")
+        print(f"{'='*50}")
+        print(str(exc))
+        print("="*50)
+        return
     
     if 'error' in result:
         print(f"回测失败: {result['error']}")
@@ -174,7 +187,9 @@ def cmd_signal(args):
         ticker_df = stock_df[stock_df['ticker'] == ticker].copy()
         if len(ticker_df) < 50:
             continue
-        scored = engine.calculate_indicators_and_scores(ticker_df)
+        # 真实价格架构 v3：评分用调整后副本（adj_close 驱动），与页面 _recalculate_scores 同口径
+        scored = engine.calculate_indicators_and_scores(
+            apply_adjustment_for_scoring(ticker_df))
         stock_scores.append(scored)
     
     if not stock_scores:
@@ -195,7 +210,8 @@ def cmd_signal(args):
         ticker_df = fallback_df[fallback_df['ticker'] == ticker].copy()
         if len(ticker_df) < 50:
             continue
-        scored = engine.calculate_fallback_equity_score(ticker_df)
+        scored = engine.calculate_fallback_equity_score(
+            apply_adjustment_for_scoring(ticker_df))
         fallback_scores.append(scored)
     
     if fallback_scores:
@@ -210,7 +226,8 @@ def cmd_signal(args):
         ticker_df = defense_df[defense_df['ticker'] == ticker].copy()
         if len(ticker_df) < 50:
             continue
-        scored = engine.calculate_defense_score(ticker_df)
+        scored = engine.calculate_defense_score(
+            apply_adjustment_for_scoring(ticker_df))
         defense_scores.append(scored)
     
     if defense_scores:
@@ -278,6 +295,7 @@ def cmd_signal(args):
     
     # v1.2: 检测当前市场状态（使用 detect_history 确保状态确认逻辑正确）
     from market_regime import MarketRegimeDetector
+    from config import build_config
     regime_cfg = build_config()
     detector = MarketRegimeDetector(regime_cfg)
     stock_df = market_df[market_df['ticker'].isin(ETF_UNIVERSE.keys())].copy()

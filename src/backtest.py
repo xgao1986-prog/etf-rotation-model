@@ -15,7 +15,16 @@ import json
 from config import STRATEGY_CONFIG, ETF_UNIVERSE, CONCEPT_UNIVERSE, DEFENSE_UNIVERSE, DEFENSE_ALLOCATION, BACKTEST_CONFIG, CORE_UNIVERSE, CORRELATION_THRESHOLD, FALLBACK_EQUITY_UNIVERSE
 from strategy import StrategyEngine
 from rebalance_planner import plan_rebalance_v2_5
+from database import apply_adjustment_for_scoring
 
+
+class PendingCorporateActionError(RuntimeError):
+    """待确认公司行动涉及当前持仓：回测/账户必须暂停，不得输出结果。
+
+    股数变化未经基金正式公告确认时，任何继续运行都会把拆分价差误读为
+    盈亏（虚假亏损/错误止损）或按错误股数交易。抛出本异常即"安全暂停"：
+    调用方须明确提示待确认，不得输出正常收益、生成交易或保存账户状态。
+    """
 
 
 class BacktestEngine:
@@ -33,14 +42,20 @@ class BacktestEngine:
         self.initial_capital = self.cfg.get('initial_capital', BACKTEST_CONFIG['initial_capital'])
         self.slippage_bps = slippage_bps  # 实验性：滑点（基点），默认0不影响现有行为
     
-    def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame, universe_builder=None, eval_date=None, performance_start=None, early_exit_days=None, as_of_date=None) -> dict:
+    def run(self, market_df: pd.DataFrame, bench_df: pd.DataFrame, universe_builder=None, eval_date=None, performance_start=None, early_exit_days=None, as_of_date=None, corporate_actions=None) -> dict:
         """
         运行回测
-        
+
         v5 修正：统一截断到全标的共同截止日
         v6 修正：支持 performance_start，用于样本外/滚动窗口预热
         v6.1：支持 early_exit_days，用于测试3日失败退出规则
         v6.2：支持 as_of_date，显式指定回测截止日期
+        v6.3（Trae ROUND4）：支持 corporate_actions（份额拆分/合并同步）。
+            真实价格架构 v3 下 market_data 存真实价，拆分日价格 -50% 是口径变化
+            而非真实亏损；不传该参数时持仓份额/成本不调整，拆分日会被误读为
+            巨亏而错误止损（2026-07-03 512480 组合虚假下跌约 9.9% 的事故）。
+            仅 status=='confirmed'（基金正式公告核实）的记录可调整持仓；
+            pending 记录当日对该标的跳过止损，防止未确认拆分的价差误触发。
         """
         # v2: 初始化被跳过的BUY记录（用于滑点测试验证）
         self._skipped_buys = []
@@ -193,7 +208,8 @@ class BacktestEngine:
             ticker_df = core_df[core_df['ticker'] == ticker].copy()
             if len(ticker_df) < 51:  # 不足51个交易日，无法产生完整指标
                 continue
-            scored = self.strategy.calculate_total_score(ticker_df)
+            # 真实价格架构 v3：评分用调整后副本（adj_close 驱动），成交/NAV 仍用真实 close
+            scored = self.strategy.calculate_total_score(apply_adjustment_for_scoring(ticker_df))
             all_scores.append(scored)
         
         if not all_scores:
@@ -264,7 +280,7 @@ class BacktestEngine:
             ticker_df = fallback_df[fallback_df['ticker'] == ticker].copy()
             if len(ticker_df) < 50:
                 continue
-            scored = self.strategy.calculate_fallback_equity_score(ticker_df)
+            scored = self.strategy.calculate_fallback_equity_score(apply_adjustment_for_scoring(ticker_df))
             fallback_scores.append(scored)
         
         if fallback_scores:
@@ -281,7 +297,7 @@ class BacktestEngine:
             if len(ticker_df) < 50:
                 continue
             # 防御资产简化评分：只计算趋势指标
-            scored = self.strategy.calculate_defense_score(ticker_df)
+            scored = self.strategy.calculate_defense_score(apply_adjustment_for_scoring(ticker_df))
             defense_scores.append(scored)
         
         if defense_scores:
@@ -328,11 +344,12 @@ class BacktestEngine:
         else:
             _enhanced_tickers = set()
         result = self._execute_backtest(
-            signals_df, market_df, bench_df, corr_matrix, 
+            signals_df, market_df, bench_df, corr_matrix,
             _corr_threshold, _excluded_tickers, _enhanced_tickers,
             unified_start=unified_start, min_mature_count=min_mature_count,
             performance_start=performance_start,
-            early_exit_days=early_exit_days
+            early_exit_days=early_exit_days,
+            corporate_actions=corporate_actions,
         )
         
         # 记录排除信息（供审计）
@@ -697,14 +714,50 @@ class BacktestEngine:
         
         return corr_history
     
-    def _execute_backtest(self, signals_df, market_df, bench_df, corr_matrix=None, corr_threshold=0.70, excluded_tickers=None, enhanced_tickers=None, unified_start=None, min_mature_count=5, performance_start=None, early_exit_days=None) -> dict:
+    def _execute_backtest(self, signals_df, market_df, bench_df, corr_matrix=None, corr_threshold=0.70, excluded_tickers=None, enhanced_tickers=None, unified_start=None, min_mature_count=5, performance_start=None, early_exit_days=None, corporate_actions=None) -> dict:
         """执行回测逻辑（含相关性去重）
-        
+
         v6: 支持 performance_start，用于样本外/滚动窗口预热。
             指标计算在完整数据上进行，但交易和NAV记录从 performance_start 开始。
             performance_start 当天重置 portfolio 为初始资金。
         v6.1: 支持 early_exit_days，买入后N个交易日仍低于成本则强制退出。
+        v6.3: 支持 corporate_actions（Trae ROUND4）。真实价格架构 v3 下拆分日
+            价格 -50% 是口径变化而非亏损；仅 confirmed 记录调整持仓
+            （shares×=ratio、cost/=ratio、high_water/=ratio）。缺省 None 时行为
+            与 v6.2 完全一致（冻结基线路径）。
+        v6.4（ROUND5 安全处理）：pending 记录不再"当日跳止损继续跑"，升级为——
+            涉及当前持仓（含 ratio 非法无法确认股数变化）：抛
+            PendingCorporateActionError 暂停本次回测，不输出收益、不生成交易；
+            未持有该标的：暂停其新买入资格直至确认（运行期内持续禁买）。
         """
+
+        # v6.4: 公司行动按生效日索引（确认闸门 + 安全处理）
+        ca_by_date = {}       # confirmed：可调整持仓
+        pending_by_date = {}  # pending/非法ratio：安全处理对象
+        if corporate_actions is not None:
+            for a in corporate_actions:
+                eff = str(a.get('effective_date', ''))[:10]
+                ticker = a.get('ticker')
+                if not eff or not ticker:
+                    continue
+                if (a.get('status') or 'pending') != 'confirmed':
+                    pending_by_date.setdefault(eff, set()).add(ticker)
+                    continue
+                try:
+                    ratio = float(a.get('ratio') or 1.0)
+                except (TypeError, ValueError):
+                    # confirmed 但 ratio 非法：股数变化无法确认，按 pending 安全处理
+                    pending_by_date.setdefault(eff, set()).add(ticker)
+                    continue
+                if ratio <= 0 or abs(ratio - 1.0) < 1e-12:
+                    continue
+                ca_by_date.setdefault(eff, []).append({
+                    'ticker': ticker, 'ratio': ratio,
+                })
+
+        # v6.4: 待确认标的的买入禁名单（运行期内持续有效）
+        buy_suspended = set()
+
         
         excluded_tickers = set(excluded_tickers or [])
         enhanced_tickers = set(enhanced_tickers or [])
@@ -890,6 +943,39 @@ class BacktestEngine:
                     })
                 continue
             
+            # ========== v6.4: 盘前公司行动（确认闸门 + 安全处理）==========
+            # confirmed：shares×=ratio、cost/=ratio、high_water/=ratio、atr/=ratio。
+            # 市值与总资产不变（价格已是拆后真实口径）；成本同比例调整使止损
+            # 判断不受拆分影响。
+            # pending 安全处理（ROUND5）：
+            #   - 涉及当前持仓 → 抛 PendingCorporateActionError 暂停回测
+            #     （不输出收益、不生成交易、不保存状态）
+            #   - 未持有该标的 → 加入 buy_suspended，本次运行持续禁止新买入
+            for _ticker in pending_by_date.get(date_str, ()):
+                if _ticker in portfolio['positions']:
+                    raise PendingCorporateActionError(
+                        f"回测已暂停：{_ticker} 在 {date_str} 存在待确认公司行动，"
+                        f"股数变化未经基金公告确认，无法保证持仓/成本/资金正确。"
+                        f"请先以基金正式公告核实比例与生效日并置为 confirmed 后重跑。"
+                    )
+                buy_suspended.add(_ticker)
+            if buy_suspended:
+                # 从当日信号中剔除禁买标的（后续 BUY 信号、候选排名均不再包含）
+                day_signals = day_signals[~day_signals['ticker'].isin(buy_suspended)]
+
+            for _ca in ca_by_date.get(date_str, []):
+                _pos = portfolio['positions'].get(_ca['ticker'])
+                if _pos is None:
+                    continue
+                _r = _ca['ratio']
+                _pos['shares'] = _pos['shares'] * _r
+                if _pos.get('cost', 0) > 0:
+                    _pos['cost'] = _pos['cost'] / _r
+                if _pos.get('high_water', 0) > 0:
+                    _pos['high_water'] = _pos['high_water'] / _r
+                if _pos.get('atr_at_entry', 0) > 0:
+                    _pos['atr_at_entry'] = _pos['atr_at_entry'] / _r
+
             # ========== 每日止损检查（固定止损 + 动态止盈 + early_exit）==========
             # v6.1: 更新days_held
             for ticker, pos in portfolio['positions'].items():
@@ -1893,16 +1979,17 @@ class BacktestEngine:
         
         return result
     
-    def run_in_sample(self, market_df, bench_df) -> dict:
+    def run_in_sample(self, market_df, bench_df, corporate_actions=None) -> dict:
         """样本内回测
         
         v6: 传入到 in_sample_end 为止的数据，performance_start=None（从统一起点开始）。
         """
         end = BACKTEST_CONFIG['in_sample_end']
         mask = market_df['date'] <= end
-        return self.run(market_df[mask], bench_df[bench_df['date'] <= end])
+        return self.run(market_df[mask], bench_df[bench_df['date'] <= end],
+                        corporate_actions=corporate_actions)
 
-    def run_out_sample(self, market_df, bench_df) -> dict:
+    def run_out_sample(self, market_df, bench_df, corporate_actions=None) -> dict:
         """样本外验证
         
         v6: 传入完整数据，但指定 performance_start=2024-01-01。
@@ -1910,7 +1997,8 @@ class BacktestEngine:
             避免2024年开头因数据被切掉而重新空等51天。
         """
         start = BACKTEST_CONFIG['out_sample_start']
-        return self.run(market_df, bench_df, performance_start=start)
+        return self.run(market_df, bench_df, performance_start=start,
+                        corporate_actions=corporate_actions)
 
 
 if __name__ == '__main__':

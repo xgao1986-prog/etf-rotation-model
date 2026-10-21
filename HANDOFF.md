@@ -1,6 +1,20 @@
 # ETF Rotation Model - Context Summary
 
 ## Date
+2026-10-20
+
+## Branch
+`feature/paper-trading-ui-v0.3`（HEAD bbbd466）
+
+## 🔒 Current Work（2026-10-20，Codex 复核两轮问题修复）
+- **锁定文件**：`src/data_fetcher.py`、`src/database.py`、`src/backtest.py`、`app.py`、`src/paper_trading/runner.py`、`src/paper_trading/store.py`、`tests/test_real_price_adjustment.py`（新建）
+- **任务**：真实价格架构 v3——market_data 存真实价（评分用 adj_close 调整轨），成交量不再乘锚定因子，虚拟盘跨拆分持仓调整。设计文档 `docs/REAL_PRICE_ARCH_v3_DESIGN.md`
+- **约束**：B0.4 冻结快照/指标/交易规则不动；先副本验证再正式库；不提交不推送；完成后交 Trae 定向复审
+- **状态**：实施中（TDD：tests/test_real_price_adjustment.py 已写，生产代码未改）
+
+---
+
+## Date
 2026-06-13
 
 ## Branch

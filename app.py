@@ -18,11 +18,11 @@ from plotly.subplots import make_subplots
 
 sys.path.insert(0, "src")
 
-from backtest import BacktestEngine
+from backtest import BacktestEngine, PendingCorporateActionError
 from config import (BACKTEST_CONFIG, BENCHMARK, ETF_UNIVERSE, DEFENSE_UNIVERSE,
                     FALLBACK_EQUITY_UNIVERSE, ALL_TRADABLE_ETFS, STRATEGY_CONFIG,
                     TRADING_RULES_CONFIG, DEFENSE_CONFIG, build_config)
-from database import ETFDatabase
+from database import ETFDatabase, apply_adjustment_for_scoring
 from paper_trading.store import PaperTradingStore
 from paper_trading.service import PaperTradingService
 from paper_trading.runner import PaperTradingRunner
@@ -144,7 +144,36 @@ def get_paper_trading_ui_service():
     store = PaperTradingStore(db_path)
     service = PaperTradingService(store)
     runner = PaperTradingRunner(service)
-    return PaperTradingUIService(service, runner)
+    return PaperTradingUIService(service, runner, corporate_actions_provider=_load_corporate_actions)
+
+
+def _load_corporate_actions(date_str):
+    """查询某日公司行动（真实价格架构 v3：份额拆分盘前调整持仓）。
+
+    返回公司行动记录（ticker/effective_date/action_type/ratio/status）：
+    - 生效日 ≤ 当日的全部记录（含历史 confirmed——跳期防护检查遗漏生效日
+      必须能看到已确认的历史记录，不能只返回当天记录）；
+    - 所有 status='pending' 的记录（ROUND5 安全处理：未确认公司行动须跨
+      交易日持续暂停该标的新买入资格，直到确认为止）。
+
+    查询失败直接抛异常（ROUND6 补漏②）：ui_service 会停止本次运行并明确
+    报错，绝不当作"没有记录"继续——静默漏调整会让未确认拆分带着旧股数
+    面对拆后价格。
+    """
+    db = ETFDatabase()
+    all_ca = db.get_corporate_actions()
+    if all_ca is None or all_ca.empty:
+        return None
+    eff = all_ca["effective_date"].astype(str).str[:10]
+    status = all_ca["status"].fillna("pending")
+    # 生效日 ≤ 当日（历史+当日，confirmed/pending 都包括）| 全部 pending（跨日禁买）
+    mask = (eff <= date_str) | (status == "pending")
+    combined = all_ca[mask]
+    if {"ticker", "effective_date"}.issubset(combined.columns):
+        combined = combined.drop_duplicates(subset=["ticker", "effective_date"])
+    if combined.empty:
+        return None
+    return combined.to_dict("records")
 
 
 def _paper_trading_data_provider():
@@ -519,6 +548,24 @@ def format_pct(value, digits=2):
     return f"{value:.{digits}%}"
 
 
+def bench_return_in_range(nav_df):
+    """统一基准收益口径（ROUND5 修正）：按比较区间内 bench_price 首末比计算。
+
+    适用于任意比较区间——选定区间、单一年度、全期——均以各自区间首个
+    交易日为基期，互不借用外部基期。替代旧的两类错误口径：
+    - 选定区间图/指标卡曾用 bench_return 列（全期累计、基期为全期首日）；
+    - 年度表曾用 bench_return 列差分，基期错配全期首日，年度收益被系统性
+      扭曲（上涨年虚高、下跌年虚低）。
+    返回 None 表示区间内有效基准价格不足 2 个。
+    """
+    if nav_df is None or nav_df.empty or "bench_price" not in nav_df.columns:
+        return None
+    prices = nav_df["bench_price"].dropna()
+    if len(prices) < 2 or prices.iloc[0] <= 0:
+        return None
+    return float(prices.iloc[-1] / prices.iloc[0] - 1)
+
+
 def format_money(value):
     if pd.isna(value):
         return "N/A"
@@ -599,8 +646,16 @@ def run_weighted_backtest(cfg, sample_type):
         bench_df = bench_df[bench_df["date"] >= start]
 
     # 使用 BacktestEngine.run() 走完整的评分路径
+    # 真实价格架构 v3：传入全量公司行动记录（confirmed 调整持仓；
+    # pending 涉持仓 → 引擎抛 PendingCorporateActionError 暂停回测，这里
+    # 转为明确的错误提示，不输出正常收益——ROUND5 安全处理）
+    ca_df = db.get_corporate_actions()
+    ca_records = ca_df.to_dict('records') if ca_df is not None else None
     engine = BacktestEngine(cfg)
-    return engine.run(market_df, bench_df)
+    try:
+        return engine.run(market_df, bench_df, corporate_actions=ca_records)
+    except PendingCorporateActionError as exc:
+        return {"error": f"回测已暂停（待确认公司行动）：{exc}"}
 
 
 def make_score_bar(df):
@@ -700,11 +755,13 @@ def make_nav_figure(result):
         col=1,
     )
 
-    if "bench_return" in nav_df.columns and nav_df["bench_return"].notna().any():
+    # ROUND5 统一口径：基准按 bench_price 首末比归一（与合并图/年度表同源）
+    if "bench_price" in nav_df.columns and nav_df["bench_price"].dropna().shape[0] >= 2:
+        base_bench = nav_df["bench_price"].dropna().iloc[0]
         fig.add_trace(
             go.Scatter(
                 x=nav_df["date"],
-                y=1 + nav_df["bench_return"],
+                y=nav_df["bench_price"] / base_bench,
                 name="沪深300",
                 line=dict(color="#7d8793", width=1.6, dash="dash"),
             ),
@@ -790,10 +847,10 @@ def make_combined_figure(result, start_date=None, end_date=None):
         name="策略", line=dict(color="#1769aa", width=2.4),
     ), row=1, col=1)
 
-    # 基准也按选中区间重新归一化到1.0起始
-    if "bench_return" in nav_df.columns and nav_df["bench_return"].notna().any():
-        bench_start = nav_df["bench_return"].iloc[0]
-        normalized_bench = 1 + (nav_df["bench_return"] - bench_start)
+    # 基准也按选中区间重新归一化到1.0起始（ROUND5：统一用 bench_price 首末比口径）
+    if "bench_price" in nav_df.columns and nav_df["bench_price"].dropna().shape[0] >= 2:
+        base_bench = nav_df["bench_price"].dropna().iloc[0]
+        normalized_bench = nav_df["bench_price"] / base_bench
         fig.add_trace(go.Scatter(
             x=nav_df["date"], y=normalized_bench,
             name="沪深300", line=dict(color="#7d8793", width=1.6, dash="dash"),
@@ -1449,6 +1506,9 @@ def render_backtest(cfg, is_b0_18=True):
                     (pd.to_datetime(trades["date"]) >= pd.Timestamp(start_date)) &
                     (pd.to_datetime(trades["date"]) <= pd.Timestamp(end_date))
                 ])
+
+            # 同区间大盘收益（统一口径 bench_return_in_range：与图表/年度表同源）
+            bench_ret_in_range = bench_return_in_range(filtered_nav)
         else:
             total_return = result["total_return"]
             annual_return = result["annual_return"]
@@ -1462,6 +1522,13 @@ def render_backtest(cfg, is_b0_18=True):
         c3.metric("夏普比率", f"{sharpe:.2f}")
         c4.metric("最大回撤", format_pct(max_drawdown))
         c5.metric("交易次数", trades_in_range)
+
+        # 同区间大盘收益对比（选定区间后统一核对口径：与净值图同基期）
+        if bench_ret_in_range is not None:
+            b1, b2 = st.columns(2)
+            excess = total_return - bench_ret_in_range
+            b1.metric("沪深300收益（同时段）", format_pct(bench_ret_in_range))
+            b2.metric("超额收益（策略-大盘）", format_pct(excess))
 
         if not is_full_range:
             st.caption(f"⏱️ 当前显示：{start_date} ~ {end_date}（共 {len(filtered_nav)} 个交易日）")
@@ -1553,12 +1620,10 @@ def render_backtest(cfg, is_b0_18=True):
                 nav_end = group["nav"].iloc[-1]
                 strategy_return = (nav_end / nav_start) - 1 if nav_start > 0 else 0
 
-                # 基准收益
-                bench_return = 0
-                if "bench_return" in group.columns and group["bench_return"].notna().any():
-                    bench_start = group["bench_return"].iloc[0]
-                    bench_end = group["bench_return"].iloc[-1]
-                    bench_return = bench_end - bench_start
+                # 基准收益（ROUND5 修正：按本年份区间内 bench_price 首末比，
+                # 不再用全期累计 bench_return 列差分——旧口径基期错配全期首日）
+                bench_ret = bench_return_in_range(group)
+                bench_return = bench_ret if bench_ret is not None else 0
 
                 # 日收益率统计
                 daily_rets = group["daily_return"].dropna()
@@ -1711,7 +1776,8 @@ def _recalculate_scores(db, cfg, st_info=None, st_success=None, st_error=None):
     for ticker in stock_df['ticker'].unique():
         ticker_df = stock_df[stock_df['ticker'] == ticker].copy()
         if len(ticker_df) >= 50:
-            scored = engine_calc.calculate_total_score(ticker_df)
+            # 真实价格架构 v3：评分用调整后副本（adj_close 驱动），交易/估值仍用真实价
+            scored = engine_calc.calculate_total_score(apply_adjustment_for_scoring(ticker_df))
             stock_scores.append(scored)
 
     if not stock_scores:
@@ -1727,7 +1793,7 @@ def _recalculate_scores(db, cfg, st_info=None, st_success=None, st_error=None):
     for ticker in fallback_df['ticker'].unique():
         ticker_df = fallback_df[fallback_df['ticker'] == ticker].copy()
         if len(ticker_df) >= 50:
-            scored = engine_calc.calculate_fallback_equity_score(ticker_df)
+            scored = engine_calc.calculate_fallback_equity_score(apply_adjustment_for_scoring(ticker_df))
             fallback_scores.append(scored)
 
     if fallback_scores:
@@ -1740,7 +1806,7 @@ def _recalculate_scores(db, cfg, st_info=None, st_success=None, st_error=None):
     for ticker in defense_df['ticker'].unique():
         ticker_df = defense_df[defense_df['ticker'] == ticker].copy()
         if len(ticker_df) >= 50:
-            scored = engine_calc.calculate_defense_score(ticker_df)
+            scored = engine_calc.calculate_defense_score(apply_adjustment_for_scoring(ticker_df))
             defense_scores.append(scored)
 
     if defense_scores:
@@ -1756,6 +1822,112 @@ def _recalculate_scores(db, cfg, st_info=None, st_success=None, st_error=None):
         st_success(f"✅ 已计算并保存 {len(scores_all)} 条评分记录")
 
     return scores_all
+
+def _get_formal_pool_dates(db):
+    """正式池（行业ETF+防御资产+基准）的行情/评分日期统计（一次 GROUP BY 查询）。
+
+    Returns:
+        dict: {
+            "formal": 正式池代码列表,
+            "latest": 正式池 MAX(date)（最新行情日期）,
+            "common": MIN(per-ticker MAX(date))（全部正式标的共同完整日期）,
+            "per_ticker": {ticker: 该标的 MAX(date)},
+            "latest_score": MAX(daily_scores.date)（最新评分日期）,
+            "misaligned": [行情未对齐的 ticker 列表],
+        }
+    """
+    formal = list(ETF_UNIVERSE.keys()) + list(DEFENSE_UNIVERSE.keys()) + [BENCHMARK]
+    placeholders = ",".join(["?"] * len(formal))
+    with db._connect() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT MAX(date) FROM market_data WHERE ticker IN ({placeholders})",
+            formal,
+        )
+        latest = cursor.fetchone()[0]
+        cursor.execute(
+            f"SELECT ticker, MAX(date) AS m FROM market_data "
+            f"WHERE ticker IN ({placeholders}) GROUP BY ticker",
+            formal,
+        )
+        per_ticker = {row[0]: row[1] for row in cursor.fetchall()}
+        cursor.execute("SELECT MAX(date) FROM daily_scores")
+        latest_score = cursor.fetchone()[0]
+
+    common = min(per_ticker.values()) if per_ticker else None
+    misaligned = sorted(t for t, d in per_ticker.items() if latest and d < latest)
+    return {
+        "formal": formal,
+        "latest": latest,
+        "common": common,
+        "per_ticker": per_ticker,
+        "latest_score": latest_score,
+        "misaligned": misaligned,
+    }
+
+
+def _render_last_update_result(db):
+    """持久化展示最近一次 v2 更新结果（rerun 后不丢失），含完整性检查。"""
+    last_res = st.session_state.get("last_update_result")
+    if not last_res:
+        return
+
+    status = last_res.get("status", "")
+    message = last_res.get("message", "")
+    if status == "success":
+        st.success(f"✅ {message}")
+    elif status == "partial":
+        st.warning(f"⚠️ {message}")
+    elif status == "source_unavailable":
+        st.error(f"❌ {message}")
+    elif status in ("no_data", "error"):
+        if last_res.get("per_ticker"):
+            st.warning(f"⚠️ {message}")
+        else:
+            st.info(message)
+    else:
+        st.info(message)
+
+    # 逐只明细表
+    per_ticker = last_res.get("per_ticker") or {}
+    if per_ticker:
+        rows = []
+        for t, i in per_ticker.items():
+            name = ETF_UNIVERSE.get(t) or DEFENSE_UNIVERSE.get(t) \
+                or ("沪深300" if t == BENCHMARK else t)
+            rows.append({
+                "代码": t,
+                "名称": name,
+                "新增条数": i.get("new_rows", 0),
+                "最新日期": i.get("latest_date") or "N/A",
+                "缺口数": len(i.get("gaps") or []),
+                "缺口日期": ", ".join(i.get("gaps") or []) or "-",
+                "错误": i.get("error") or "-",
+            })
+        st.write("逐只更新明细：")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # 完整性检查：共同完整日期 < 最新行情日期 → 数据不完整警告
+    date_stats = _get_formal_pool_dates(db)
+    latest, common = date_stats["latest"], date_stats["common"]
+    if latest and common and common < latest:
+        n = len(date_stats["misaligned"])
+        st.warning(
+            f"⚠️ 数据不完整：{n} 只标的行情未对齐"
+            f"（共同完整日期 {common} < 最新行情日期 {latest}）："
+            f"{', '.join(date_stats['misaligned'][:6])}"
+            f"{' 等' if n > 6 else ''}。"
+        )
+    elif latest and common and common == latest:
+        st.success(f"✅ 数据完整：全部正式标的行情已对齐至 {common}")
+
+    # 数据不完整时提示用户确认后再手动重算评分
+    if last_res.get("_recalc_skipped"):
+        st.warning(
+            "⚠️ 数据不完整，已跳过自动评分重算。请确认行情对齐后，"
+            "点击下方「🧮 重新计算评分」手动触发。"
+        )
+
 
 def render_data_management():
     st.header("数据管理")
@@ -1788,44 +1960,165 @@ def render_data_management():
     c4.metric("最早日期", stats.get("earliest_date", "N/A"))
     c5.metric("最新日期", stats.get("latest_date", "N/A"))
 
+    # 行情更新修复 v2：三个日期指标卡（设计文档 3.3 节）
+    date_stats = _get_formal_pool_dates(db)
+    d1, d2, d3 = st.columns(3)
+    d1.metric("最新行情日期（正式池）", date_stats["latest"] or "N/A")
+    d2.metric("全部标的共同完整日期", date_stats["common"] or "N/A")
+    d3.metric("最新评分日期", date_stats["latest_score"] or "N/A")
+
     actions, logs_col = st.columns([0.9, 1.5])
     with actions:
         st.subheader("数据操作")
+
+        # 数据源状态卡片
+        from data_fetcher import import_local_ifind_csvs
+        import glob
+        import os as _os
+
+        akshare_available = False
+        try:
+            import akshare as _ak
+            akshare_available = True
+        except ImportError:
+            akshare_available = False
+
+        ifind_csv_files = sorted(glob.glob(_os.path.join("data", "ifind_*.csv")))
+        has_ifind_csv = len(ifind_csv_files) > 0
+        latest_date = db.get_latest_date() or "N/A"
+
+        # iFinD 网关可用状态（行情更新修复 v2，设计文档 3.3 节）
+        ifind_gateway_available = False
+        try:
+            import ifind_gateway as _ifind_gw
+            ifind_gateway_available = bool(_ifind_gw.is_available().get("available"))
+        except Exception:
+            ifind_gateway_available = False
+
+        status_cols = st.columns(4)
+        status_cols[0].metric("AKShare", "可用" if akshare_available else "未安装")
+        status_cols[1].metric("本地 iFinD CSV", f"{len(ifind_csv_files)} 个")
+        status_cols[2].metric("iFinD 网关", "可用" if ifind_gateway_available else "不可用")
+        status_cols[3].metric("数据库最新日期", latest_date)
+
+        st.caption(
+            "AKShare 为免费数据源但近期接口不稳定；iFinD 数据可通过 Kimi 对话获取 CSV 后放到 data/ifind_*.csv，"
+            "再点击下面按钮自动导入。"
+        )
+
+        st.divider()
+
+        # 更新最新行情（v2：iFinD 就近锚定拼接 / AKShare 回退，设计文档 3.3 节）
+        update_source = st.radio(
+            "更新数据源",
+            ["iFinD（就近锚定拼接，推荐）", "AKShare（免费回退）"],
+            horizontal=True,
+            key="update_source_v2",
+        )
         if st.button("🔄 更新最新行情", type="primary", use_container_width=True):
-            with st.spinner("更新中..."):
-                from data_fetcher import update_latest_data
+            with st.spinner("更新最新行情..."):
+                from data_fetcher import update_latest_data_v2
 
                 try:
-                    count = update_latest_data(db=db)
-                    if count > 0:
-                        st.success(f"✅ 已更新 {count} 条行情记录")
-                    else:
-                        st.info("暂无新行情数据或 AKShare 未安装")
+                    src = "ifind" if update_source.startswith("iFinD") else "akshare"
 
-                    # 方案 A：行情更新后自动重新计算评分
-                    scores_all = _recalculate_scores(
-                        db, cfg,
-                        st_info=lambda msg: st.info(msg),
-                        st_success=lambda msg: st.success(msg),
-                        st_error=lambda msg: st.error(msg)
+                    progress_bar = st.progress(0.0)
+                    progress_text = st.empty()
+
+                    def _on_progress(ticker, done, total, msg):
+                        progress_bar.progress(done / max(total, 1))
+                        progress_text.text(f"[{done}/{total}] {ticker} — {msg}")
+
+                    result = update_latest_data_v2(db=db, source=src, on_progress=_on_progress)
+
+                    # 数据完整性检查：不完整时跳过自动评分重算，提示用户确认
+                    fresh_stats = _get_formal_pool_dates(db)
+                    incomplete = bool(
+                        fresh_stats["latest"] and fresh_stats["common"]
+                        and fresh_stats["common"] < fresh_stats["latest"]
                     )
+                    result["_data_incomplete"] = incomplete
+                    if result.get("saved_count", 0) > 0 and incomplete:
+                        result["_recalc_skipped"] = True
+                    else:
+                        result["_recalc_skipped"] = False
+
+                    # 行情有效且数据完整 → 自动重新计算评分
+                    if result.get("saved_count", 0) > 0 and not incomplete:
+                        _recalculate_scores(
+                            db, cfg,
+                            st_info=lambda msg: st.info(msg),
+                            st_success=lambda msg: st.success(msg),
+                            st_error=lambda msg: st.error(msg)
+                        )
+
+                    # 结果持久化，rerun 后仍显示
+                    st.session_state["last_update_result"] = result
 
                     load_market_data.clear()
                     load_scores.clear()
                     load_stats.clear()
                     st.rerun()
-                except ImportError as e:
-                    st.error(f"AKShare 未安装: {e}")
-                    st.info("请安装 AKShare: `pip install akshare`，或继续使用 iFinD CSV 导入方式")
                 except Exception as e:
-                    st.error(f"更新失败: {e}")
-        st.caption("AKShare 增量更新。若未安装 AKShare，请使用 iFinD CSV 导入。")
-        st.caption("当前数据已更新至 2026-06-25。")
+                    st.session_state["last_update_result"] = {
+                        "status": "error",
+                        "message": f"更新失败: {e}",
+                        "saved_count": 0,
+                        "per_ticker": {},
+                    }
+                    st.rerun()
+
+        # 最近一次更新结果（持久化展示，含逐只明细与完整性检查）
+        _render_last_update_result(db)
 
         st.divider()
 
-        # iFinD CSV 导入
-        uploaded = st.file_uploader("📥 导入 iFinD CSV", type=["csv"], key="ifind_upload")
+        # 自动导入本地 iFinD CSV
+        if st.button(
+            "📂 自动导入本地 iFinD CSV",
+            type="primary" if has_ifind_csv else "secondary",
+            use_container_width=True,
+            disabled=not has_ifind_csv,
+        ):
+            with st.spinner("扫描并导入 iFinD CSV..."):
+                try:
+                    import_result = import_local_ifind_csvs(db=db, csv_dir="data", pattern="ifind_*.csv")
+
+                    if import_result["status"] == "success":
+                        st.success(import_result["message"])
+                    elif import_result["status"] == "partial":
+                        st.warning(import_result["message"])
+                    else:
+                        st.error(import_result["message"])
+
+                    # 显示每个文件详情
+                    if import_result["files"]:
+                        st.write("导入详情：")
+                        st.json(import_result["files"])
+
+                    # 导入后自动重新计算评分
+                    if import_result["total_count"] > 0:
+                        scores_all = _recalculate_scores(
+                            db, cfg,
+                            st_info=lambda msg: st.info(msg),
+                            st_success=lambda msg: st.success(msg),
+                            st_error=lambda msg: st.error(msg)
+                        )
+
+                        load_market_data.clear()
+                        load_scores.clear()
+                        load_stats.clear()
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"自动导入失败: {e}")
+
+        if not has_ifind_csv:
+            st.caption("未检测到 data/ifind_*.csv，请将 iFinD CSV 文件放入 data/ 目录。")
+
+        st.divider()
+
+        # iFinD CSV 手动上传导入
+        uploaded = st.file_uploader("📥 手动上传 iFinD CSV", type=["csv"], key="ifind_upload")
         if uploaded is not None:
             with st.spinner("导入 iFinD 数据中..."):
                 from data_fetcher import import_from_kimi
@@ -1866,12 +2159,12 @@ def render_data_management():
                     fallback_df = market_df_all[market_df_all['ticker'].isin(FALLBACK_EQUITY_UNIVERSE.keys())].copy()
                     defense_df = market_df_all[market_df_all['ticker'].isin(DEFENSE_UNIVERSE.keys())].copy()
 
-                    # 步骤1-2：行业ETF评分
+                    # 步骤1-2：行业ETF评分（真实价格架构 v3：评分用调整后副本）
                     stock_scores = []
                     for ticker in stock_df['ticker'].unique():
                         ticker_df = stock_df[stock_df['ticker'] == ticker].copy()
                         if len(ticker_df) >= 50:
-                            scored = engine_calc.calculate_total_score(ticker_df)
+                            scored = engine_calc.calculate_total_score(apply_adjustment_for_scoring(ticker_df))
                             stock_scores.append(scored)
 
                     if not stock_scores:
@@ -1889,7 +2182,7 @@ def render_data_management():
                     for ticker in fallback_df['ticker'].unique():
                         ticker_df = fallback_df[fallback_df['ticker'] == ticker].copy()
                         if len(ticker_df) >= 50:
-                            scored = engine_calc.calculate_fallback_equity_score(ticker_df)
+                            scored = engine_calc.calculate_fallback_equity_score(apply_adjustment_for_scoring(ticker_df))
                             fallback_scores.append(scored)
 
                     if fallback_scores:
@@ -1903,7 +2196,7 @@ def render_data_management():
                     for ticker in defense_df['ticker'].unique():
                         ticker_df = defense_df[defense_df['ticker'] == ticker].copy()
                         if len(ticker_df) >= 50:
-                            scored = engine_calc.calculate_defense_score(ticker_df)
+                            scored = engine_calc.calculate_defense_score(apply_adjustment_for_scoring(ticker_df))
                             defense_scores.append(scored)
 
                     if defense_scores:

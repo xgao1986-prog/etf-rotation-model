@@ -175,6 +175,83 @@ git diff --check -- CURRENT_VERSION_NOTE.md README.md VERSION_HISTORY.md docs/CH
 
 ---
 
+---
+
+## 2026-07-06（数据抓取 AKShare 超时修复与 iFinD fallback）
+
+**目标：** 修复 `app.py` "更新最新行情"按钮因 AKShare 批量超时导致的数据无法更新问题，并实现当 AKShare 失败时使用本地 iFinD CSV 自动导入的 fallback。不修改 B0.4 策略、参数、ETF 池或冻结数据。
+
+### 一、问题根因
+
+- `src/data_fetcher.py` 的 `update_latest_data()` 仅依赖 AKShare，批量更新时对每只 ticker 逐个请求东方财富接口。
+- 实测出现大量 `HTTPSConnectionPool(host='push2his.eastmoney.com', port=443): Read timed out. (read timeout=15)`，最终返回 0 条数据，UI 显示"暂无新行情数据或 AKShare 未安装"。
+- `src/config.py` 中 `DATA_SOURCE` 已配置 `primary='ifind_via_kimi'` / `backup='akshare'`，但 `data_fetcher.py` 未读取该配置，也没有 fallback 机制。
+
+### 二、AKShare 抓取优化
+
+- `DataFetcher` 构造函数默认 `timeout=3s`、`max_retries=1`，避免单只 ticker 卡住十几秒。
+- 新增 `_fetch_with_timeout`：使用 `ThreadPoolExecutor` 给 AKShare 调用加硬超时（因为 AKShare 内部 `requests` 的 `timeout` 参数实测不生效）。
+- 新增 `health_check(test_code='512480')`：在批量拉取前先请求一只 ETF 做快速预检；预检失败则立即返回，不再对所有 ticker 进行长时间超时等待。
+- `_fetch_with_retry`：指数退避重试（1s / 2s / 4s），单只 ticker 失败后继续下一只，避免整批中断；`max_retries=1` 时不进行重试等待。
+- `fetch_etf_history` / `fetch_index_history` 使用重试包装；对不支持 `timeout` 参数的旧版 AKShare 做兼容。
+- `fetch_latest` 改为只拉取数据库最新日期次日到今天的数据，不再固定请求 5 天窗口。
+- `update_latest_data` 返回字典：
+  - `saved_count`：实际保存记录数
+  - `fetched_count`：抓取记录数
+  - `success_tickers` / `failed_tickers`
+  - `status`：`no_data` | `success` | `partial` | `akshare_not_installed`
+  - `message`：人类可读说明
+
+### 三、iFinD CSV 自动导入 fallback
+
+- 新增 `data_fetcher.import_local_ifind_csvs(db, csv_dir='data', pattern='ifind_*.csv')`：
+  - 扫描指定目录下匹配文件；
+  - 对每个文件调用现有 `import_from_kimi` 标准化并导入；
+  - 返回总导入条数及每个文件状态。
+- 复用现有 `import_from_kimi` 列名映射（`thscode` → `ticker`、`time` → `date`、`CLOSE` → `close` 等）。
+
+### 四、app.py 数据管理页 UI 改进
+
+- 数据操作区顶部新增三列状态卡片：AKShare 是否可用、本地 iFinD CSV 数量、数据库最新日期。
+- "更新最新行情"按钮：根据 `update_latest_data` 返回状态显示成功/部分成功/全部失败/未安装提示；全部失败时明确建议用户使用 iFinD CSV 导入。
+- 新增"自动导入本地 iFinD CSV"按钮：调用 `import_local_ifind_csvs`，导入成功后自动重新计算评分并 rerun。
+- 保留"手动上传 iFinD CSV"入口，文案从"导入 iFinD CSV"改为"手动上传 iFinD CSV"以区分自动导入。
+
+### 五、新增测试
+
+- `tests/test_data_fetcher.py`：
+  - `test_update_latest_data_returns_zero_on_akshare_failure`：AKShare 全部失败时返回 `no_data`，不崩溃。
+  - `test_import_local_ifind_csvs`：自动扫描并导入本地 `ifind_*.csv`。
+  - `test_import_local_ifind_csvs_no_files`：无文件时返回 `no_files`。
+  - `test_partial_success_saves_data`：部分 ticker 成功、部分失败时，成功数据被保存且状态为 `partial`。
+
+### 六、验证结果
+
+```bash
+python -m pytest tests/test_data_fetcher.py -v
+```
+结果：**4 passed**
+
+```bash
+python -m py_compile app.py src/data_fetcher.py tests/test_data_fetcher.py
+```
+结果：通过
+
+```bash
+git diff --check -- app.py src/data_fetcher.py tests/test_data_fetcher.py docs/CHANGES.md docs/CURRENT_STATE.md
+```
+结果：通过
+
+实际调用 `update_latest_data(db=db)`：AKShare 接口不可用时约 **3.7 秒**内返回，并明确提示使用 iFinD CSV 导入；不再出现之前 300 秒超时的情况。
+
+### 七、不修改范围
+
+- B0.4 策略、参数、ETF 池、冻结数据快照。
+- `import_from_kimi` 列名映射逻辑。
+- 不引入外部 iFinD API 依赖；仍通过 CSV/Kimi 对话桥接。
+
+---
+
 ## 2026-07-05（Paper Trading UI v0.3 文档收口与交接）
 
 **目标：** 完成 Paper Trading UI v0.3 全部 Task 1~7 的文档收口与交接，只更新 `docs/CHANGES.md` 和 `docs/CURRENT_STATE.md`，不修改任何代码、测试、策略参数、数据库或冻结数据。
@@ -3497,3 +3574,138 @@ python scripts/phase6_7_holiday_rebalance_experiment.py
   幂等重复运行/止损清仓/超卖保护/交易日历/周四信号周五执行/防御资产门槛/
   开盘收盘分离/部分失败隔离/唯一最终状态/现金非负/止损调仓冲突
 - 28 Paper Trading + 30 live 测试无回归
+
+
+## 2026-10-20 — 行情更新修复 v2：iFinD 拼接链路 + 第二轮拼接错误数据修复（待验收）
+
+### 背景
+
+数据停更 3.5 个月（最后活动 2026-07-06）。第一轮修复"更新最新行情"七大工程问题（等待重试/单只失败不阻断/按标的补缺口/结果持久化/三日期显示/行情有效后重算评分/行业数据分开保存），备份提交至 `feature/data-update-recovery`（5247ff8，待验收）。第一轮补齐后 Trae 复审 BLOCKED：拼接把 512480 拆分锚定在错误历史价上、515880 库内已断裂未统一口径。第二轮按用户授权修复运行库错误数据（B0.4 冻结快照/冻结指标/交易规则不变）。
+
+### 修改文件
+
+- `src/data_fetcher.py`：`_splice_ticker_with_fwd` volume 改等效口径（×factor）；新增 `detect_splice_breaks`（35% 日收益阈值扫描口径断裂）；`update_latest_data_v2` 增加 `precheck_breaks` 预检，有断裂时 status 压至 partial 阻止误报成功；新增 `_official_pool_tickers`（19 只正式池）
+- `scripts/fix_splice_errors.py`（新建）：幂等修复脚本（iFinD 校验 → none 基准核对 → UPDATE 历史段 → DELETE 错误拼接段 → 重新拼接 → JSON 报告）
+- `tests/test_data_fetcher.py`：新增 TestDetectSpliceBreaks 4 项（intra-db 断裂检测/正常数据不误报/有断裂时 v2 不得 success/干净库正常 success），volume 断言改等效口径；15 passed
+- `docs/DATA_UPDATE_FIX_v2_DESIGN.md`：第二轮修订（修正"512480 偏差不修改"表述、新增 2.5 等效口径与断裂预检、新增第 5 章修复记录）
+- `app.py`、`src/ifind_gateway.py`：第一轮已备份提交（5247ff8），本轮未改
+
+### 数据修复内容（正式库，先副本验证后执行）
+
+- 512480.SH：6/22~6/29 旧数据与核验来源不一致，原因尚待确认（6/29: 2.78→2.909，Yahoo+iFinD 双源核验存在偏差）；UPDATE 126 行历史段；删 6/30~10-19 旧拼接段 1389 行按新锚点（factor 精确 2.0）重生成
+- 515880.SH：1:2 拆分（7/6 生效）前后口径混杂（6/29=1.7 拆前 → 7/7=0.761 拆后，-49% 假断裂）；6/29 锚点 1.7→1.715，7/7~7/10 四行 ×2，7/13 起经 7/10 锚定自动延续，全段统一拆前口径
+- 修复后评分全量重算 33877 条至 2026-10-19（B0.4 标准配置）
+- 备份：`database/backups/etf_model_20261020_141214_pre_splice_fix.db`（141013 文件为 0 字节坏文件）
+
+### 验证（全部实测）
+
+- B0.4 冻结段（19 只 <=2026-06-18）与修复前备份逐行比对：0 差异
+- 条数守恒：29078 → 29078（UPDATE 126 / DELETE 1389 / INSERT 1389）
+- 512480 拆分边界 7/2→7/3 仅 -1.41%；515880 7/6→7/7 仅 +0.59%
+- 评分拆分前后平滑无跳变；重复更新幂等 saved=0
+- 虚拟账户：512480/515880 无持仓无成交，不受影响
+- UI 浏览器实测（localhost:8502）：三日期卡均 2026-10-19；更新按钮端到端跑通；结果持久化
+- 修复报告：`reports/splice_fix_report_20261020_141215.json`
+
+### 遗留
+
+- AKShare fallback 路径未真实调用，标记"未独立验证"
+- ~~paper_trading 无拆分处理逻辑~~ → **真实价格架构 v3 已修复**（见下节）
+- ~~本轮不提交不推送，待 Trae 复审~~ → 第二轮复核发现两个必须解决的问题，已实施 v3（见下节），不提交不推送
+
+---
+
+## 2026-10-20 真实价格架构 v3（Codex 两轮复核问题的修复，不提交不推送）
+
+### 问题定性（Codex 两轮复核）
+
+1. **评分价与成交价混用**：`market_data.close` 存的是锚定换算后等效价，虚拟盘/实盘脚本/回测成交与估值全部使用换算价——"金额自洽但股数不真实"
+2. **成交量凭空放大**：`volume = iFinD volume × 锚定因子(2.0)`，512480 常态 8 亿份被存成 16~50 亿份，volume_ratio 虚高
+
+### 架构方案：价格双轨制（docs/REAL_PRICE_ARCH_v3_DESIGN.md）
+
+- `close/open/high/low/volume` = **iFinD none 真实值**（交易/估值唯一合法口径）
+- `adj_close` = **fwd × 校准因子**（评分唯一价格来源；校准因子=库内 adj_close(锚)/fwd(锚)，保持与库内 adj 尺度衔接）
+- 评分成倍规则（`database.apply_adjustment_for_scoring`）：评分价 `×= adj_close/close`，评分量 `÷= adj_close/close`（=拆后等效份数，volume_ratio 跨拆分连续）；无 adj_close 或因子恒 1 → 恒等（**B0.4 冻结路径零变化**）
+- 新表 `corporate_actions(ticker, effective_date, action_type, ratio, source, note)`：拆分自动登记（none/fwd 比率阶跃 >20% 检测），三路用途：adj 重算 / 虚拟盘盘前持仓调整 / detect_splice_breaks 排除真实拆分日
+
+### 代码改动
+
+- `src/database.py`：corporate_actions 建表 + `save_corporate_actions` / `get_corporate_actions` + `apply_adjustment_for_scoring(df)`
+- `src/data_fetcher.py`：双序列拉取（none+fwd）；`_detect_splits_from_none_fwd`；`_splice_ticker_real_prices`（存真实 OHLCV + 校准 adj_close，volume 不乘因子，拆分自动写库）；删除旧 `_splice_ticker_with_fwd`；新拼接行 `adjust_type='real_spliced'`；`detect_splice_breaks` 排除已登记拆分日
+- `src/backtest.py` `run()`：评分输入用 `apply_adjustment_for_scoring` 调整后副本；成交/NAV 仍用真实 close
+- `app.py`：`_recalculate_scores` 与页面内联重算共 6 处评分调用接入调整；`get_paper_trading_ui_service` 注入 `_load_corporate_actions` provider
+- `src/paper_trading/runner.py`：`run_daily(..., corporate_actions=None)` 新增参数 + 盘前 `_apply_corporate_actions`（拆分日 shares×=ratio、cost_price÷=ratio、last_price÷=ratio，市值与总资产不变、不触发止损误报）
+- `src/paper_trading/ui_service.py`：`run_accounts(..., corporate_actions=None)`，构造时可注入 provider
+- 实盘助手 `scripts/live_generate_trade_plan.py`：**无需改码**——候选来自评分（排序），价格取 `market_data.close`（迁移后为真实价），股数/佣金/现金自动正确
+- `scripts/migrate_real_prices_v3.py`：幂等迁移（备份→双序列拉取→拆分登记→删旧拼接行→515880 correction ÷2→生产路径重生成→全历史 adj_close 重算→重算 daily_scores→验证包）；支持 `--transport curl`（本机 Python TLS 对 agent-gw 握手失败期间的备用传输，curl + agent-gw 信封直连，数据同 iFinD）
+
+### 测试（TDD）
+
+- 新增 `tests/test_real_price_adjustment.py` 11 项全绿：评分调整规则（无 adj 恒等/因子 1 恒等/拆分边界价量调整/不改原 df）、拼接新语义（真实 OHLCV 存储、volume 不乘锚定因子）、detect_splice_breaks 排除已登记拆分、虚拟盘三场景（拆分后新建仓真实价成交/跨拆分持仓调整不腰斩不虚增/无拆分行为不变）
+- `tests/test_data_fetcher.py` 15 项更新转绿（双序列 mock、拆分测试改真实价语义：存 1.005 真实价 + adj 连续 + 拆分登记 + 断裂排除）
+- 全量回归：**388 passed**；2 failed 已用 git worktree 在 HEAD 干净副本复证为既有问题（test_missing_data_antipattern、test_v1_3_step6 regime 分布），与本轮无关
+
+### 表述修正
+
+- "盘中快照冒充收盘"确定性表述全部改为"**旧数据与核验来源不一致，原因尚待确认**"（CHANGES.md / CURRENT_STATE.md / DATA_UPDATE_FIX_v2_DESIGN.md / TRAe_REVIEW_REQUEST_ROUND2 / fix_splice_errors.py 注释）
+
+### 数据迁移
+
+- 先在副本 `tmp_migration/etf_model_copy.db` 验证，验证包通过后再执行正式库；验证项：B0.4 快照 SHA-256 不变、512480 6/29~7/3 存储值与 iFinD none 逐日对照、拆分边界 adj 收益率连续、volume 与 none 真实值零偏差、corporate_actions 内容、无 forward_spliced 残留
+
+### 遗留
+
+- 本机 Python TLS 栈（OpenSSL 1.1.1t/3.5.7 均复现）对 `agent-gw.kimi.com` 握手失败（curl/Schannel 正常）——外部端点问题，已用 curl 传输绕过；网关恢复后 `--transport auto` 自动优先走原生网关
+- AKShare fallback 未独立验证（不变）
+- 不提交不推送，待 Trae 定向复审
+
+### 迁移执行结果（2026-10-20 17:23，正式库已迁移）
+
+- 副本验证 → 正式库迁移均一次通过：删旧等效拼接行 1389 → 重生成 1408 行（19/19 成功，status=success）→ adj_close 重算 29530 行 → 评分重算 33895 条
+- 验证包全 PASS：B0.4 快照 SHA-256 前缀 dbdb041d 不变；512480 6/26~7/6 与 iFinD none 逐日对照 volume 0 不一致；拆分边界 adj 收益率 -1.41%；无 forward_spliced 残留；全库 OHLC 自相矛盾行 0
+- 备份：`database/backups/etf_model_20261020_172326_pre_real_price_v3.db`
+- 副本验证中实测捕获并修复两个迁移脚本 bug：
+  1. `_normalize_ifind_csv` 对插件 CSV 的 int 型 time 列（如 `20240102`）直接 `to_datetime` 被当成纳秒时间戳 → 全部变 1970-01-01；已改为先转字符串再嗅探（8 位数字走 `%Y%m%d`，其余 `format="mixed"`）
+  2. `halve_515880_corrections` 只 ÷2 close/volume/adj_close，漏 open/high/low → 拆分行 OHLC 自相矛盾（open 1.5 > close 0.761）；已改为 OHLCV 全部 ÷2
+- 预检误报修复：`detect_splice_breaks` 对已登记拆分日的排除从精确日期匹配改为 ±7 自然日窗口匹配——迁移中删行重建会在拆分日后留下空档，跳变显现为空档后第一交易日，精确匹配漏排造成 status=partial 误报
+
+---
+
+## 2026-10-21 — 拆分安全修复收口：回测同步 + 未确认行动保护 + 基准口径统一（提交推送）
+
+### 背景
+
+v3 迁移后 Trae ROUND4 验收发现回测引擎未同步拆分处理（2026-07-03 512480 被误读为 -51% 亏损错误止损，组合当日虚假下跌约 9.9%）；随后用户四轮收口意见（ROUND5/6）要求补齐未确认公司行动的安全处理与恢复路径。冻结快照（SHA-256 前缀 dbdb041d）与策略参数全程未动。
+
+### 一、回测引擎公司行动同步（ROUND4）
+
+- `src/backtest.py`：`run()` 新增 `corporate_actions` 参数（缺省 None = 冻结路径零变化）；盘前 confirmed 调整 shares×=ratio、cost/=ratio、high_water/=ratio、atr_at_entry/=ratio；`run_in_sample` / `run_out_sample` 透传
+- 复现脚本 `scripts/reproduce_bt_split_bug.py`：修复前 7/3 误止损 -51%、NAV -9.9%；修复后 7/3 从 -9.90%→+0.17%
+- 新增 `tests/test_backtest_corporate_actions.py` 10 项（真实窗口全链条：拆前持仓 → 拆后股数×2/成本÷2 → 真实下跌仍正常止损 → pending 新语义）
+
+### 二、未确认公司行动安全处理（ROUND5/6）
+
+- `src/backtest.py`：`PendingCorporateActionError`；pending 涉持仓（含 confirmed 但 ratio 非法）→ raise 整体暂停，不输出收益/交易；pending 未持仓 → `buy_suspended` 持续禁买直到确认；入口 `main.py cmd_backtest` / `app.py run_weighted_backtest` try/except 捕获并明确提示
+- `src/paper_trading/runner.py`：`_apply_corporate_actions` 返回 `(state, pause_info, suspended_buy)`；涉持仓 → `run_daily` 返回 paused 结果，**不生成交易、不估值、不保存当日状态**（当日不标记已处理，确认后重跑恢复）；未持仓 → BUY 订单剔除并留痕
+- 跳期防护 `_find_missed_effective_date`：已确认拆分生效日未处理时禁止直接续跑后续日期（提示先补跑生效日），不能带着旧股数恢复
+- `app.py _load_corporate_actions`：返回生效日 ≤ 当日的全部记录（含历史 confirmed——跳期防护必需）+ 全部 pending；查询失败抛异常
+- `src/paper_trading/ui_service.py`：paused 归入 skipped 显示原因；公司行动查询失败 → 全部账户停止并明确报错，绝不当作无记录继续
+- `src/paper_trading/store.py`：`save_daily_state` skipped_id 加序号+微秒后缀（修复同微秒撞 UNIQUE）
+- 测试：`tests/test_real_price_adjustment.py` 扩至 20 项——暂停幂等恢复、跨两日无虚假亏损/错误止损/错误资金分配、跳期阻止+补跑恢复、查询失败停止、页面入口完整流程（`app._load_corporate_actions` 原样驱动，不绕过）
+
+### 三、图表/年度表/区间卡基准收益口径统一（ROUND5）
+
+- `app.py bench_return_in_range(nav_df)`：基准收益 = 比较区间内 bench_price 首末比 - 1，各自独立基期；替换选定区间卡、合并图、净值图、年度表共 4 处旧口径
+- 年度表原差分算法（(年末-年初)/全期首日）确认有误，已废弃；新增 `tests/test_bench_return_unified.py` 5 项（含非全期区间回归锁定）
+
+### 验证范围（如实记录）
+
+- 本会话（Kimi）实测：虚拟盘 20 passed、回测拆分+基准口径 15 passed、全量回归 412 passed / 2 failed（2 个失败为基线既有问题：test_missing_data_antipattern、test_v1_3_step6 regime 分布，HEAD 干净副本可复现）、CLI 全样本回测正常完成（140.99%、927 笔、无暂停）
+- B0.4 冻结基线复现（test_b0_4_slippage 9 项）由 Codex 独立复跑通过：NAV 2,761,288.07、804 笔交易、冻结快照 SHA-256 前缀 dbdb041d 不变
+- 恢复流程（暂停→确认→补跑→恢复）由 Codex 独立验证
+- 早前各轮验证结果（388 passed 等）未在本次全部重跑，仅作历史记录保留
+
+### 提交
+
+- 分支 `feature/paper-trading-ui-v0.3`，推送远端同名分支；不合并 master、不移动发布标签、不升级正式策略版本

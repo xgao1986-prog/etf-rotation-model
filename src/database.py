@@ -181,11 +181,112 @@ class ETFDatabase:
                     PRIMARY KEY (ticker, date)
                 )
             ''')
-            
+
+            # 9. 公司行动（拆分/分红，真实价格架构 v3）
+            # effective_date = 行动后首个交易日；ratio = 1 旧股 → ratio 新股
+            # status: pending = 双序列比率推算的待确认记录（禁止直接调整持仓）
+            #         confirmed = 已用基金正式公告核实比例与生效日（evidence 存依据）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS corporate_actions (
+                    ticker TEXT NOT NULL,
+                    effective_date TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    ratio REAL NOT NULL,
+                    source TEXT,
+                    note TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    evidence TEXT,
+                    PRIMARY KEY (ticker, effective_date)
+                )
+            ''')
+            # 老库升级：补 status/evidence 两列
+            for col, ddl in (("status", "status TEXT NOT NULL DEFAULT 'pending'"),
+                             ("evidence", "evidence TEXT")):
+                try:
+                    cursor.execute(
+                        f"ALTER TABLE corporate_actions ADD COLUMN {ddl}")
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
+
             conn.commit()
     
+    # ==================== 公司行动操作（真实价格架构 v3） ====================
+
+    def save_corporate_actions(self, df: pd.DataFrame):
+        """登记拆分/分红事件（INSERT OR IGNORE 幂等）。
+
+        需要列: ticker, effective_date, action_type, ratio；
+        可选列: source, note, status, evidence。
+
+        注意：status 缺省为 'pending'（待确认）——比率推算记录禁止直接
+        调整账户持仓，须以基金正式公告核实后经 confirm_corporate_actions
+        置为 'confirmed'。持仓调整路径只读 confirmed 记录。
+        """
+        if df is None or df.empty:
+            return 0
+        required = ["ticker", "effective_date", "action_type", "ratio"]
+        for col in required:
+            if col not in df.columns:
+                raise ValueError(f"缺少必要列: {col}")
+        df = df.copy()
+        for col, default in [("source", None), ("note", None),
+                             ("status", "pending"), ("evidence", None)]:
+            if col not in df.columns:
+                df[col] = default
+        df = df[required + ["source", "note", "status", "evidence"]]
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                "INSERT OR IGNORE INTO corporate_actions "
+                "(ticker,effective_date,action_type,ratio,source,note,status,evidence) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                df.values.tolist(),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    def confirm_corporate_actions(self, ticker: str, effective_date: str,
+                                  ratio: float, evidence: str):
+        """用基金正式公告核实一条待确认记录。
+
+        以公告为准修正 ratio 与生效日口径，置 status='confirmed' 并保存
+        依据（公告标题/日期/来源）。这是唯一能产生 confirmed 记录的入口。
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE corporate_actions SET ratio=?, status='confirmed', "
+                "evidence=? WHERE ticker=? AND effective_date=?",
+                (ratio, evidence, ticker, str(effective_date)[:10]))
+            conn.commit()
+            if cur.rowcount == 0:
+                raise ValueError(
+                    f"无待确认记录: {ticker} {effective_date}（先用 "
+                    f"save_corporate_actions 登记 pending 记录）")
+            return cur.rowcount
+
+    def get_corporate_actions(self, ticker=None, on_date=None,
+                              status=None):
+        """查询公司行动。on_date 给定则返回 effective_date == on_date 的行动。
+
+        status: None 返回全部；'confirmed' 只返回已核实（持仓调整唯一合法来源）。
+        """
+        query = "SELECT * FROM corporate_actions WHERE 1=1"
+        params = []
+        if ticker:
+            query += " AND ticker = ?"
+            params.append(ticker)
+        if on_date:
+            query += " AND effective_date = ?"
+            params.append(on_date)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY ticker, effective_date"
+        with self._connect() as conn:
+            return pd.read_sql_query(query, conn, params=params)
+
     # ==================== 行情数据操作 ====================
-    
+
     def save_market_data(self, df: pd.DataFrame):
         """保存行情数据，自动去重（INSERT OR IGNORE）"""
         if df.empty:
@@ -635,6 +736,40 @@ class ETFDatabase:
             stats['ticker_count'] = cursor.fetchone()[0]
             
             return stats
+
+
+def apply_adjustment_for_scoring(df: pd.DataFrame) -> pd.DataFrame:
+    """评分成倍规则（真实价格架构 v3，设计文档 2.2 节）。
+
+    market_data 双轨语义：
+      - close/open/high/low/volume = 真实市场价/真实成交量（交易、估值用）
+      - adj_close                    = 前复权连续收盘价（评分专用）
+
+    本函数把真实轨换算成评分轨（返回副本，不修改入参）：
+      adj_factor = adj_close / close
+      评分价：open/high/low/close ×= adj_factor   （拆分前折半 → 跨拆分连续）
+      评分量：volume ÷= adj_factor                （拆分前 ×2 等效份数 → 量比连续，
+                                                    不制造虚假放量）
+
+    无 adj_close 列、或 adj_close 全等于 close 时恒等返回——冻结快照路径
+    （B0.4 测试只喂 7 列 CSV，无 adj_close）行为零变化。
+    """
+    if df is None or df.empty or "adj_close" not in df.columns:
+        return df
+    close = pd.to_numeric(df["close"], errors="coerce")
+    adj = pd.to_numeric(df["adj_close"], errors="coerce")
+    factor = (adj / close).where(close.notna() & (close != 0))
+    if factor.dropna().empty or ((factor.dropna() - 1).abs() < 1e-12).all():
+        return df  # 无拆分区间：恒等
+
+    out = df.copy()
+    for col in ["open", "high", "low", "close"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce") * factor
+    if "volume" in out.columns:
+        out["volume"] = pd.to_numeric(out["volume"], errors="coerce") / factor
+    out["adj_close"] = adj
+    return out
 
 
 # 单例模式，方便全局使用

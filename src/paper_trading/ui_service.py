@@ -14,9 +14,12 @@ from .models import AccountCreate, AccountType, OpeningPosition, StartMode, conf
 class PaperTradingUIService:
     """High-level workflows used by the virtual-account Streamlit page."""
 
-    def __init__(self, service, runner):
+    def __init__(self, service, runner, corporate_actions_provider=None):
         self.service = service
         self.runner = runner
+        # 可选：callable(date_str) -> list[dict] | None，查询当日公司行动（如份额拆分）。
+        # 由调用方注入以保持本包与行情库解耦；缺省时 run_daily 不调整持仓。
+        self._corporate_actions_provider = corporate_actions_provider
 
     def create_comparison_accounts(
         self,
@@ -161,12 +164,25 @@ class PaperTradingUIService:
         open_prices: Mapping[str, float],
         close_prices: Mapping[str, float],
         scores_df: pd.DataFrame,
+        corporate_actions=None,
     ) -> Dict[str, Dict[str, str]]:
         """Run a trading day for each selected account, isolating failures.
 
         Accounts that are ended or soft-deleted are skipped and reported under
         ``failure`` so the UI does not attempt to run them silently.
+
+        corporate_actions: 可选 list[dict]（ticker/effective_date/action_type/ratio）。
+        None 且构造时注入了 provider 时，按 trade_date 自动查询。
         """
+        if corporate_actions is None and self._corporate_actions_provider is not None:
+            try:
+                corporate_actions = self._corporate_actions_provider(trade_date)
+            except Exception as exc:
+                # ROUND6 补漏②：公司行动记录查询失败必须停止本次运行并明确
+                # 报错，不能当作"没有记录"继续——否则未确认拆分会静默漏调整。
+                err = f"公司行动记录查询失败，本次运行已停止：{exc}"
+                return {"success": {}, "skipped": {},
+                        "failure": {aid: err for aid in account_ids}}
         results: Dict[str, Dict[str, str]] = {"success": {}, "skipped": {}, "failure": {}}
         for account_id in account_ids:
             account = self.service.store.get_account(account_id)
@@ -180,14 +196,22 @@ class PaperTradingUIService:
                 results["skipped"][account_id] = "account is ended"
                 continue
             try:
-                self.runner.run_daily(
+                extra = {}
+                if corporate_actions is not None:
+                    extra["corporate_actions"] = corporate_actions
+                run_result = self.runner.run_daily(
                     account_id,
                     trade_date,
                     open_prices,
                     close_prices,
                     scores_df,
+                    **extra,
                 )
-                results["success"][account_id] = trade_date
+                if isinstance(run_result, dict) and run_result.get("paused"):
+                    # ROUND5 安全处理：待确认公司行动涉持仓——账户运行暂停
+                    results["skipped"][account_id] = run_result["reason"]
+                else:
+                    results["success"][account_id] = trade_date
             except Exception as exc:
                 results["failure"][account_id] = str(exc)
         return results
