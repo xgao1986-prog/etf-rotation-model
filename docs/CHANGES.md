@@ -5,6 +5,44 @@
 
 ---
 
+## 2026-10-21（iFinD 数据连接凭证链路收口，提交 fd20651）
+
+**目标：** 修复 Streamlit 网页环境中 iFinD 批量调用失败的问题。根因：网页启动环境不继承 Kimi 对话注入的临时环境变量，SDK 凭证链为 显式参数 > KIMI_API_KEY 环境变量 > ~/.kimi/agent-gw.json，而配置文件原本不存在。不修改历史行情或策略参数，凭证绝不写入代码/日志/GitHub。
+
+### 一、凭证持久化
+
+- 凭证（api_key + base_url，SDK 默认 base_url 是 dev 地址所以必须一并写入）持久化到用户主目录 `~/.kimi/agent-gw.json`，chmod 600。文件不在仓库内，未入 Git。
+- 无对话环境变量实测：剥离 KIMI_API_KEY/KIMI_BASE_URL 后仍能取到 512480.SH 真实行情，证明不依赖对话临时环境。
+
+### 二、网关层（src/ifind_gateway.py）
+
+- 新增 `check_credentials(force=False)`：分层检测 env > 配置文件 > 无/损坏（source = env/file/none/file_invalid），返回消息不含密钥全量；进程内缓存，force=True 可绕过。
+- `is_available(force=False)` 返回新增三个字段：`program_installed`（程序文件级检测）、`credentials`（凭证检测结果）、`credentials_configured`。顺带修复缺陷：force=True 时凭证缓存不刷新（`check_credentials()` 未透传 force）。
+- `get_price()` 在分组循环前做凭证预检：缺凭证全部标的直接标记 failed（消息含修复提示），零子进程、零重试。
+
+### 三、数据层（src/data_fetcher.py）
+
+- `update_latest_data_v2` 的 ifind 分支在 is_available 检查后新增 `check_credentials()` 预检：缺凭证返回 `status="credentials_missing"` + 修复提示，直接返回不写库、不发起批量请求。
+
+### 四、页面层（app.py）
+
+- 状态栏 5 列分开展示：AKShare / 本地 iFinD CSV / **iFinD 程序（已安装/未安装）** / **iFinD 数据连接** / 数据库最新日期。
+- "iFinD 数据连接"三态：**未配置**（无凭证）→ **凭证已配置**（有凭证但未实际取数）→ **连接验证成功**（仅当本次会话中 iFinD 实际取数并写入成功，session_state 标记；credentials_missing 时清除）。凭证存在 ≠ 连接可用。
+- 缺凭证时 `st.warning` 显示修复提示；更新结果渲染新增 `credentials_missing` 分支（st.error）。
+
+### 五、验证
+
+- `tests/test_data_fetcher.py` 新增 4 用例：缺凭证 get_price 零子进程零重试全部 failed、check_credentials 分层与消息不回显密钥、is_available 分层字段、update_v2 credentials_missing 不写库。该文件 19 passed。
+- 全量回归 416 passed / 2 failed（基线既有：test_missing_data_antipattern、test_v1_3_step6_dynamic_fifth_slot，与改动无关）。
+- Streamlit AppTest 无凭证环境实测网页流程：状态栏显示"凭证已配置"；iFinD 更新写入 19 条（成功 19 只失败 0 只）；数据库对齐 2026-10-21（19 只标的，source=iFinD-KimiGateway 真实价格，112,321→112,340 行）；评分自动重算至 2026-10-21。幂等重跑 no_data 不重复写入、不显示"连接成功"。
+
+### 六、边界
+
+- 未修改历史行情或策略参数；B0.4 冻结数据未动。
+- 凭证文件位于用户主目录，未上传仓库。
+
+---
+
 ## 2026-07-05（Paper Trading v0.3.1 账户生命周期）
 
 **目标：** 完成 Paper Trading v0.3.1 账户生命周期功能开发，包括结束/重新打开账户、隐藏/显示账户、软删除/恢复账户、永久删除（级联清理）。不修改 B0.4 策略、参数、ETF 池或冻结数据。

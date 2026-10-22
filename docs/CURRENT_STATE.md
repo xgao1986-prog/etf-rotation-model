@@ -2,7 +2,7 @@
 
 **最后更新**：2026-10-21
 **工作目录**：`D:\etf_rotation_model`
-**当前分支**：`feature/paper-trading-ui-v0.3`（HEAD `5308015`，已推送远端）
+**当前分支**：`feature/paper-trading-ui-v0.3`（HEAD `fd20651`，已推送远端）
 **当前版本**：v1.2.3（虚拟盘 v0.3.1）
 **发布锚点**：v1.2.3-b0.4 → 5e8eb78（标签保持不动）
 **正式基线**：B0.4（见 `docs/B0_BASELINE_LOCK.md`）
@@ -12,8 +12,8 @@
 | 口径 | 截止日 | 说明 |
 |------|--------|------|
 | **B0.4 冻结数据** | **2026-06-18** | 冻结段 ≤2026-06-18，快照 `data/snapshots/B0_4_candidate_data_20260621_210815.csv`，SHA-256 前缀 dbdb041d（全量 e0cf2993…），全轮未动 |
-| **当前数据库行情** | **2026-10-20** | market_data 最新日期（2026-10-21 查询确认，112,321 行） |
-| **当前评分** | **2026-10-20** | daily_scores 最新日期（同日查询确认） |
+| **当前数据库行情** | **2026-10-21** | market_data 最新日期（2026-10-21 网页实测 iFinD 追加，112,340 行） |
+| **当前评分** | **2026-10-21** | daily_scores 最新日期（行情更新后自动重算，同日确认） |
 
 corporate_actions 表 9 条拆分记录全部 confirmed（含公告依据）。旧分支 `feature/v1.2.1-regime-adaptive` 保留不动。
 
@@ -28,6 +28,7 @@ corporate_actions 表 9 条拆分记录全部 confirmed（含公告依据）。�
 - **实盘助手 v0.2：骨架已交付**（持仓/止损/调仓建议/成交记录，不自动下单，22 项测试）
 - **v1.3 Step 1~10：已完成，全部 observer-only**——无任何一步达到升级 B0.4 的预注册标准；B0.4 保留
 - **行情更新链路：已修复可用**——AKShare 超时治理 + iFinD CSV 自动导入 fallback + iFinD 双序列拉取
+- **iFinD 数据连接凭证链路：已收口**（提交 `fd20651`）——凭证持久化 + 三层状态展示 + 缺凭证快速失败，网页实测对齐至 2026-10-21
 
 历史细节见 `docs/CHANGES.md`。
 
@@ -67,6 +68,22 @@ corporate_actions 表 9 条拆分记录全部 confirmed（含公告依据）。�
 **迁移执行结果**（正式库，已验证）：删旧等效拼接行 1389 → 双序列重生成 1408 行 → 全历史 adj_close 重算 29,530 行 → 评分重算 33,895 条；B0.4 冻结段与修复前备份逐行比对 0 差异；拆分边界 adj 收益率平滑（512480 7/2→7/3 仅 -1.41%）；无 forward_spliced 残留。备份：`database/backups/etf_model_20261020_172326_pre_real_price_v3.db`。
 
 **遗留（如实）**：AKShare fallback 路径未真实调用（未独立验证）；512480 的 6/22~6/29 旧数据与核验来源不一致，**原因未确认**（不作"盘中快照"定性）。
+
+---
+
+## 3.1 iFinD 数据连接凭证链路收口（2026-10-21，提交 `fd20651`）
+
+**根因**：Streamlit 网页启动环境不继承 Kimi 对话注入的临时 `KIMI_API_KEY`/`KIMI_BASE_URL`，SDK 凭证链为 显式参数 > 环境变量 > `~/.kimi/agent-gw.json`，原配置文件不存在导致 iFinD 批量调用失败并重试。
+
+**修复**：
+- 凭证持久化至用户主目录 `~/.kimi/agent-gw.json`（含 `base_url`，SDK 默认是 dev 地址；文件不在仓库，未入 Git）
+- `ifind_gateway.check_credentials()` 分层检测（env > 文件 > 无/损坏），消息不回显密钥；`is_available()` 分开展示 `program_installed`/`credentials_configured`（顺带修复 force=True 时凭证缓存不刷新的缺陷）；`get_price()` 缺凭证零子进程零重试直接全部 failed
+- `update_latest_data_v2` 凭证预检，缺凭证返回 `status="credentials_missing"`，不写库
+- 页面状态栏三层展示：**iFinD 程序（已安装/未安装）**、**iFinD 数据连接（未配置/凭证已配置/连接验证成功）**——凭证存在 ≠ 连接可用，仅 iFinD 实际取数写入成功才显示"连接验证成功"（会话内标记）
+
+**验证**：`tests/test_data_fetcher.py` 新增 4 用例（缺凭证零子进程断言、凭证分层与不回显密钥、is_available 分层字段、credentials_missing 不写库），该文件 19 passed；全量回归 416 passed / 2 failed（基线既有，同前）。Streamlit AppTest 无凭证环境实测：状态栏显示"凭证已配置"、iFinD 更新写入 19 条（成功 19 只失败 0 只）、数据库对齐 2026-10-21（19 只，source=iFinD-KimiGateway 真实价格）、评分自动重算至 10-21；幂等重跑 no_data 不重复写入、不显示"连接成功"。
+
+**边界**：未修改历史行情或策略参数；B0.4 冻结未动；凭证文件未上传。
 
 ---
 
