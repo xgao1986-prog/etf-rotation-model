@@ -204,15 +204,24 @@ class _FakeIFindGateway:
     返回值；缺省时 none 与 forward 共用 df。
     """
 
-    def __init__(self, df, failed=None, available=True, none_df=None):
+    def __init__(self, df, failed=None, available=True, none_df=None,
+                 credentials_configured=True):
         self._df = df
         self._none_df = none_df
         self._failed = failed or {}
         self._available = available
+        self._credentials_configured = credentials_configured
         self.calls = []
 
     def is_available(self):
         return {"available": self._available, "message": "mock gateway"}
+
+    def check_credentials(self, force=False):
+        if self._credentials_configured:
+            return {"configured": True, "source": "env",
+                    "message": "mock credentials ok"}
+        return {"configured": False, "source": "none",
+                "message": "mock 缺少 Kimi 数据服务凭证（测试桩）"}
 
     def get_price(self, tickers, start_date, end_date, adjust="forward", **kwargs):
         self.calls.append({"tickers": list(tickers), "start": start_date,
@@ -231,8 +240,10 @@ def _bench_fwd_df():
     return pd.DataFrame(_make_fwd_rows(BENCH, TRADING_DAYS, closes))
 
 
-def _patch_gateway(monkeypatch, df, failed=None, available=True, none_df=None):
-    fake = _FakeIFindGateway(df, failed=failed, available=available, none_df=none_df)
+def _patch_gateway(monkeypatch, df, failed=None, available=True, none_df=None,
+                   credentials_configured=True):
+    fake = _FakeIFindGateway(df, failed=failed, available=available, none_df=none_df,
+                             credentials_configured=credentials_configured)
     monkeypatch.setattr(data_fetcher, "ifind_gateway", fake)
     return fake
 
@@ -267,6 +278,9 @@ class TestIFindGateway:
 
         monkeypatch.setattr(ifind_gateway, "_run_command", fake_run)
         monkeypatch.setattr(ifind_gateway.time, "sleep", lambda s: None)  # 跳过退避等待
+        monkeypatch.setattr(ifind_gateway, "check_credentials",
+                            lambda force=False: {"configured": True, "source": "env",
+                                                 "message": ""})
 
         res = ifind_gateway.get_price(["512480.SH"], "2026-06-01", "2026-06-05",
                                       timeout=10, max_retries=2)
@@ -285,6 +299,9 @@ class TestIFindGateway:
             return _subprocess_mod.CompletedProcess(cmd, 0)
 
         monkeypatch.setattr(ifind_gateway, "_run_command", fake_run)
+        monkeypatch.setattr(ifind_gateway, "check_credentials",
+                            lambda force=False: {"configured": True, "source": "env",
+                                                 "message": ""})
 
         res = ifind_gateway.get_price(["AAA.SH", "BBB.SH", "CCC.SH", "DDD.SH"],
                                       "2026-06-01", "2026-06-05",
@@ -305,12 +322,94 @@ class TestIFindGateway:
 
         monkeypatch.setattr(ifind_gateway, "_run_command", fake_run)
         monkeypatch.setattr(ifind_gateway.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ifind_gateway, "check_credentials",
+                            lambda force=False: {"configured": True, "source": "env",
+                                                 "message": ""})
 
         res = ifind_gateway.get_price(["AAA.SH", "BBB.SH", "CCC.SH", "DDD.SH"],
                                       "2026-06-01", "2026-06-05", max_retries=0)
         assert sorted(res["failed"].keys()) == ["AAA.SH", "BBB.SH", "CCC.SH"]
         assert res["succeeded"] == ["DDD.SH"]
         assert res["df"]["ticker"].unique().tolist() == ["DDD.SH"]
+
+    def test_missing_credentials_fails_fast_without_subprocess(self, monkeypatch):
+        """缺凭证：全部标的直接标记失败，零子进程调用、零重试，消息含修复提示。"""
+        calls = []
+        monkeypatch.setattr(ifind_gateway, "_run_command",
+                            lambda cmd, timeout: calls.append(cmd))
+        monkeypatch.setattr(ifind_gateway, "check_credentials", lambda force=False: {
+            "configured": False, "source": "none",
+            "message": "缺少 Kimi 数据服务凭证；请写入 ~/.kimi/agent-gw.json（测试消息）"})
+
+        res = ifind_gateway.get_price(["AAA.SH", "BBB.SH"], "2026-06-01",
+                                      "2026-06-05", max_retries=3)
+        assert calls == []  # 零子进程、零重试
+        assert sorted(res["failed"].keys()) == ["AAA.SH", "BBB.SH"]
+        assert res["succeeded"] == []
+        assert res["df"].empty
+        assert "凭证" in res["message"]
+        assert "凭证" in res["failed"]["AAA.SH"]
+
+    def test_check_credentials_prefers_env_and_never_echoes_key(self, monkeypatch, tmp_path):
+        """凭证检测分层：env > 配置文件；返回值不回显密钥。"""
+        cred_file = tmp_path / "agent-gw.json"
+        monkeypatch.setattr(ifind_gateway, "_CRED_FILE", str(cred_file))
+        monkeypatch.delenv(ifind_gateway._CRED_ENV_VAR, raising=False)
+        monkeypatch.setattr(ifind_gateway, "_credentials_cache", None)
+
+        # 无 env 无文件 → none
+        res = ifind_gateway.check_credentials(force=True)
+        assert res["configured"] is False and res["source"] == "none"
+        assert "KIMI_API_KEY" in res["message"] or "agent-gw.json" in res["message"]
+
+        # 仅文件 → file，消息不回显密钥
+        cred_file.write_text(json.dumps({"api_key": "sk-TESTSECRET-0123456789",
+                                         "base_url": "https://example.com/coding"}),
+                             encoding="utf-8")
+        res = ifind_gateway.check_credentials(force=True)
+        assert res["configured"] is True and res["source"] == "file"
+        assert "sk-TESTSECRET" not in json.dumps(res, ensure_ascii=False)
+
+        # env 优先于文件
+        monkeypatch.setenv(ifind_gateway._CRED_ENV_VAR, "sk-ENVSECRET-0123456789")
+        res = ifind_gateway.check_credentials(force=True)
+        assert res["configured"] is True and res["source"] == "env"
+        assert "sk-ENVSECRET" not in json.dumps(res, ensure_ascii=False)
+
+        # 文件损坏/无 api_key → file_invalid
+        monkeypatch.delenv(ifind_gateway._CRED_ENV_VAR, raising=False)
+        cred_file.write_text('{"base_url": "https://example.com/coding"}', encoding="utf-8")
+        res = ifind_gateway.check_credentials(force=True)
+        assert res["configured"] is False and res["source"] == "file_invalid"
+
+    def test_is_available_reports_program_and_credentials_separately(self, monkeypatch, tmp_path):
+        """is_available 分开展示：程序安装状态与凭证配置状态。"""
+        plugin_dir = tmp_path / "plugin"
+        scripts_dir = plugin_dir / "scripts"
+        scripts_dir.mkdir(parents=True)
+        tool_script = scripts_dir / "ifind_tool.py"
+        tool_script.write_text("# mock", encoding="utf-8")
+        python = tmp_path / "python.exe"
+        python.write_text("# mock", encoding="utf-8")
+        monkeypatch.setattr(ifind_gateway, "get_plugin_dir", lambda: str(plugin_dir))
+        monkeypatch.setattr(ifind_gateway, "get_python_path", lambda: str(python))
+        monkeypatch.setattr(ifind_gateway, "get_tool_script", lambda: str(tool_script))
+
+        cred_file = tmp_path / "agent-gw.json"
+        monkeypatch.setattr(ifind_gateway, "_CRED_FILE", str(cred_file))
+        monkeypatch.delenv(ifind_gateway._CRED_ENV_VAR, raising=False)
+        monkeypatch.setattr(ifind_gateway, "_credentials_cache", None)
+
+        res = ifind_gateway.is_available(force=True)
+        assert res["program_installed"] is True
+        assert res["credentials_configured"] is False
+        assert res["credentials"]["source"] == "none"
+
+        cred_file.write_text(json.dumps({"api_key": "sk-X", "base_url": "https://b/c"}),
+                             encoding="utf-8")
+        res = ifind_gateway.is_available(force=True)
+        assert res["credentials_configured"] is True
+        assert res["credentials"]["source"] == "file"
 
 
 class TestUpdateLatestDataV2:
@@ -592,3 +691,19 @@ class TestDetectSpliceBreaks:
         result = update_latest_data_v2(db=db, tickers=["512480.SH", BENCH], source="ifind")
         assert result["status"] == "success"
         assert result["precheck_breaks"] == {}
+
+    def test_update_v2_credentials_missing_fails_fast(self, monkeypatch, tmp_path):
+        """缺凭证：直接返回 credentials_missing，不发起任何网关请求、不写库。"""
+        db = ETFDatabase(str(tmp_path / "test.db"))
+        _seed_ticker(db, "512480.SH", ["2026-06-29"], [2.03])
+        _seed_ticker(db, BENCH, ["2026-06-29"], [4.03])
+
+        fake = _patch_gateway(monkeypatch, pd.DataFrame(),
+                              credentials_configured=False)
+
+        result = update_latest_data_v2(db=db, tickers=["512480.SH", BENCH],
+                                       source="ifind")
+        assert result["status"] == "credentials_missing"
+        assert "凭证" in result["message"]
+        assert fake.calls == []  # 零网关请求、零批量重试
+        assert db.get_latest_date() == "2026-06-29"  # 未写入任何新数据

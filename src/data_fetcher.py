@@ -1153,6 +1153,16 @@ def update_latest_data_v2(db=None, tickers=None, source='ifind', end_date=None,
         result["elapsed_seconds"] = time.time() - t0
         return result
 
+    # 凭证预检（网页环境不继承对话临时环境变量）：缺少凭证直接返回，
+    # 明确提示修复方式，不做批量重试
+    cred = ifind_gateway.check_credentials()
+    if not cred.get("configured"):
+        result["status"] = "credentials_missing"
+        result["message"] = ("iFinD 数据连接未就绪：" + cred.get("message", "") +
+                             "。修复后重试；也可改用 AKShare 或 iFinD CSV 导入。")
+        result["elapsed_seconds"] = time.time() - t0
+        return result
+
     # 库内口径断裂预检：发现疑似断裂时不允许误报"全部成功"
     precheck_breaks = detect_splice_breaks(db, tickers)
     result["precheck_breaks"] = precheck_breaks

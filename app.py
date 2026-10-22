@@ -1880,6 +1880,8 @@ def _render_last_update_result(db):
         st.warning(f"⚠️ {message}")
     elif status == "source_unavailable":
         st.error(f"❌ {message}")
+    elif status == "credentials_missing":
+        st.error(f"🔑 {message}")
     elif status in ("no_data", "error"):
         if last_res.get("per_ticker"):
             st.warning(f"⚠️ {message}")
@@ -1987,19 +1989,43 @@ def render_data_management():
         has_ifind_csv = len(ifind_csv_files) > 0
         latest_date = db.get_latest_date() or "N/A"
 
-        # iFinD 网关可用状态（行情更新修复 v2，设计文档 3.3 节）
-        ifind_gateway_available = False
+        # iFinD 网关状态（分层展示：程序已安装 ≠ 凭证已配置 ≠ 连接验证成功）
+        # 网页启动环境不继承 Kimi 对话注入的临时环境变量，数据连接依赖
+        # 持久化的 ~/.kimi/agent-gw.json（SDK 官方配置路径）
+        ifind_program_ok = False
+        ifind_cred_ok = False
+        ifind_cred_msg = ""
         try:
             import ifind_gateway as _ifind_gw
-            ifind_gateway_available = bool(_ifind_gw.is_available().get("available"))
+            _avail = _ifind_gw.is_available(force=True)
+            ifind_program_ok = bool(_avail.get("program_installed",
+                                               _avail.get("available")))
+            _cred = _ifind_gw.check_credentials(force=True)
+            ifind_cred_ok = bool(_cred.get("configured"))
+            ifind_cred_msg = _cred.get("message", "")
         except Exception:
-            ifind_gateway_available = False
+            ifind_program_ok = False
+            ifind_cred_ok = False
 
-        status_cols = st.columns(4)
+        # 凭证存在 ≠ 连接可用："连接验证成功"仅在本次会话中实际取数成功后显示
+        conn_verified = bool(st.session_state.get("ifind_conn_verified", False))
+        if not ifind_cred_ok:
+            conn_status = "未配置"
+        elif conn_verified:
+            conn_status = "连接验证成功"
+        else:
+            conn_status = "凭证已配置"
+
+        status_cols = st.columns(5)
         status_cols[0].metric("AKShare", "可用" if akshare_available else "未安装")
         status_cols[1].metric("本地 iFinD CSV", f"{len(ifind_csv_files)} 个")
-        status_cols[2].metric("iFinD 网关", "可用" if ifind_gateway_available else "不可用")
-        status_cols[3].metric("数据库最新日期", latest_date)
+        status_cols[2].metric("iFinD 程序", "已安装" if ifind_program_ok else "未安装")
+        status_cols[3].metric("iFinD 数据连接", conn_status)
+        status_cols[4].metric("数据库最新日期", latest_date)
+
+        if ifind_program_ok and not ifind_cred_ok:
+            st.warning("iFinD 程序已安装但凭证未配置（网页环境不继承 Kimi 对话的临时环境变量）。"
+                       + ifind_cred_msg)
 
         st.caption(
             "AKShare 为免费数据源但近期接口不稳定；iFinD 数据可通过 Kimi 对话获取 CSV 后放到 data/ifind_*.csv，"
@@ -2030,6 +2056,14 @@ def render_data_management():
                         progress_text.text(f"[{done}/{total}] {ticker} — {msg}")
 
                     result = update_latest_data_v2(db=db, source=src, on_progress=_on_progress)
+
+                    # 凭证存在 ≠ 连接可用：仅当 iFinD 实际取数并写入成功，
+                    # 才标记"连接验证成功"（credentials_missing 则清除标记）
+                    if src == "ifind":
+                        if result.get("saved_count", 0) > 0:
+                            st.session_state["ifind_conn_verified"] = True
+                        elif result.get("status") == "credentials_missing":
+                            st.session_state["ifind_conn_verified"] = False
 
                     # 数据完整性检查：不完整时跳过自动评分重算，提示用户确认
                     fresh_stats = _get_formal_pool_dates(db)

@@ -44,6 +44,78 @@ GROUP_SIZE = 3  # ifind_get_price 单次最多 3 只 ticker
 
 # is_available() 结果缓存（进程内）
 _availability_cache = None
+# check_credentials() 结果缓存（进程内）
+_credentials_cache = None
+
+_CRED_ENV_VAR = "KIMI_API_KEY"
+_CRED_FILE = os.path.join(
+    os.path.expanduser("~"), ".kimi", "agent-gw.json",
+)
+
+
+def check_credentials(force=False):
+    """检查 Kimi 数据服务凭证是否已配置（不回显密钥内容）。
+
+    解析顺序与 agent_gw SDK 一致：KIMI_API_KEY 环境变量 >
+    ~/.kimi/agent-gw.json（JSON 的 api_key 字段）。
+
+    背景：Streamlit 网页启动环境不继承 Kimi 对话注入的临时环境变量，
+    网页环境必须依赖持久化的 ~/.kimi/agent-gw.json（SDK 官方配置路径，
+    位于用户主目录，不在仓库内）。缺少凭证时调用方应直接提示并停止
+    批量重试，而不是让每组请求反复失败。
+
+    Returns:
+        dict: {
+            "configured": bool,
+            "source": "env" | "file" | "none" | "file_invalid",
+            "message": str,   # 面向用户的修复提示，不含密钥
+        }
+    """
+    global _credentials_cache
+    if _credentials_cache is not None and not force:
+        return _credentials_cache
+
+    env_val = os.environ.get(_CRED_ENV_VAR, "").strip()
+    if env_val:
+        _credentials_cache = {
+            "configured": True, "source": "env",
+            "message": f"凭证已配置（环境变量 {_CRED_ENV_VAR}）",
+        }
+        return _credentials_cache
+
+    if not os.path.isfile(_CRED_FILE):
+        _credentials_cache = {
+            "configured": False, "source": "none",
+            "message": (
+                f"缺少 Kimi 数据服务凭证：未设置 {_CRED_ENV_VAR} 环境变量，且 "
+                f"{_CRED_FILE} 不存在。请在该文件写入 JSON 对象，包含 "
+                "api_key（及 base_url）字段（SDK 官方配置路径，勿写入仓库/日志）。"
+            ),
+        }
+        return _credentials_cache
+
+    try:
+        with open(_CRED_FILE, encoding="utf-8") as f:
+            cfg = json.load(f)
+        key = str(cfg.get("api_key", "")).strip() if isinstance(cfg, dict) else ""
+        if key:
+            base = str(cfg.get("base_url", "")).strip() if isinstance(cfg, dict) else ""
+            _credentials_cache = {
+                "configured": True, "source": "file",
+                "message": (f"凭证已配置（{_CRED_FILE}"
+                            + (f"，base_url={base}）" if base else "）")),
+            }
+        else:
+            _credentials_cache = {
+                "configured": False, "source": "file_invalid",
+                "message": f"{_CRED_FILE} 缺少 api_key 字段，请检查文件内容。",
+            }
+    except (OSError, ValueError) as e:
+        _credentials_cache = {
+            "configured": False, "source": "file_invalid",
+            "message": f"{_CRED_FILE} 读取/解析失败：{type(e).__name__}: {e}",
+        }
+    return _credentials_cache
 
 
 def get_plugin_dir():
@@ -90,6 +162,7 @@ def is_available(force=False):
         problems.append(f"Python 解释器不存在: {python}")
 
     available = not problems
+    cred = check_credentials(force=force)
     _availability_cache = {
         "available": available,
         "message": ("iFinD 网关可用（文件级检测通过）" if available
@@ -97,6 +170,10 @@ def is_available(force=False):
         "plugin_dir": plugin_dir,
         "python": python,
         "tool_script": tool_script,
+        # 分层状态：程序已安装（文件级）与数据连接（凭证级）分开
+        "program_installed": available,
+        "credentials": cred,
+        "credentials_configured": bool(cred.get("configured")),
     }
     return _availability_cache
 
@@ -232,6 +309,18 @@ def get_price(tickers, start_date, end_date, adjust="forward",
     tickers = [t for t in (tickers or []) if t]
     if not tickers:
         result["message"] = "无有效 ticker"
+        return result
+
+    # 凭证预检：缺少 Kimi 数据服务凭证时直接失败返回，不做批量重试
+    # （网页启动环境不继承对话临时环境变量，必须依赖持久化配置文件；
+    # 每组重试只会以同样原因失败，纯属浪费调用）
+    cred = check_credentials()
+    if not cred.get("configured"):
+        msg = "缺少 Kimi 数据服务凭证，已停止本次批量请求：" + cred.get("message", "")
+        for t in tickers:
+            result["failed"][t] = msg
+        result["message"] = msg
+        result["elapsed_seconds"] = time.time() - t0
         return result
 
     groups = [tickers[i:i + GROUP_SIZE] for i in range(0, len(tickers), GROUP_SIZE)]
