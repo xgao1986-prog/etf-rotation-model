@@ -280,7 +280,13 @@ class TestPaperTradingRealPrices:
             start_date="2026-07-01",  # 须早于信号日：建户已把 start_date 记为已处理
         ))
 
-        scores = pd.DataFrame({"ticker": [SPLIT_TICKER], "total_score": [65]})
+        # 复审补修 ①：完整 B0.4 入场字段（trend/confirm/均线/成熟期均达标）
+        scores = pd.DataFrame({
+            "ticker": [SPLIT_TICKER], "total_score": [65.0],
+            "trend_score": [20.0], "confirm_score": [10.0],
+            "ma20": [5.0], "ma20_slope": [0.01], "momentum_20": [0.10],
+            "prev_close": [5.5], "history_count": [100],
+        })
         runner.run_daily("ACC-BUY-1", "2026-07-02",
                          {SPLIT_TICKER: 5.40}, {SPLIT_TICKER: 5.40}, scores)
         result = runner.run_daily("ACC-BUY-1", "2026-07-03",
@@ -401,7 +407,13 @@ class TestCorporateActionConfirmationGate:
         # 7/1 建状态；7/2（周四调仓日）低分（10 < min 40）→ 准备 7/3 全卖信号
         runner.run_daily("ACC-SELL-SPLIT", "2026-07-01",
                          {SPLIT_TICKER: 5.40}, {SPLIT_TICKER: 5.40})
-        low = pd.DataFrame({"ticker": [SPLIT_TICKER], "total_score": [10]})
+        # 复审补修 ①：完整 B0.4 字段；total 10 < 40 仍保证不入选（卖出信号）
+        low = pd.DataFrame({
+            "ticker": [SPLIT_TICKER], "total_score": [10.0],
+            "trend_score": [0.0], "confirm_score": [0.0],
+            "ma20": [5.0], "ma20_slope": [-0.01], "momentum_20": [0.10],
+            "prev_close": [4.0], "history_count": [100],
+        })
         runner.run_daily("ACC-SELL-SPLIT", "2026-07-02",
                          {SPLIT_TICKER: 5.40}, {SPLIT_TICKER: 5.40}, low)
         # 7/3 拆分生效日：盘前调整 2000 股，执行昨日卖出信号，真实开盘价 2.70

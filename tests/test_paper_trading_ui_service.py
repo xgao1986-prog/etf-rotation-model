@@ -32,6 +32,23 @@ B0_4_PRESET = {
 }
 
 CONSERVATIVE_PRESET = {
+    # 复审补修 ③（2026-10-22）：weights 必须与统一评分管线兼容
+    # （关闭因子置零归一化后一致），否则创建被拒绝；保守型的差异由
+    # 逐账户执行的阈值参数（min_trend/min_total/max_holdings 等）体现。
+    "weights": {
+        "trend": 0.30, "confirm": 0.20, "momentum": 0.25,
+        "volume": 0.15, "volatility": 0.10,
+    },
+    "min_trend_score": 20,
+    "min_confirm_score": 8,
+    "min_total_score": 50,
+    "max_holdings": 3,
+    "max_position_per_etf": 0.10,
+    "stop_loss": -0.05,
+}
+
+INCOMPATIBLE_WEIGHTS_PRESET = {
+    # 与统一评分管线不兼容的权重（管线有效：趋势30/确认20/成交量15）
     "weights": {
         "trend": 0.40, "confirm": 0.30, "momentum": 0.15,
         "volume": 0.10, "volatility": 0.05,
@@ -100,6 +117,20 @@ def test_empty_preset_selection_rejected(ui_service):
             initial_capital=1_000_000,
             start_date="2026-06-29",
         )
+
+
+def test_incompatible_weights_preset_rejected(ui_service):
+    """复审补修 ③：权重与统一评分管线不兼容的预设，批量创建必须拒绝并指明 weights。"""
+    presets = {**_make_presets(), "不兼容型": INCOMPATIBLE_WEIGHTS_PRESET}
+    with pytest.raises(ValueError, match="不兼容"):
+        ui_service.create_comparison_accounts(
+            preset_names=["B0.4", "不兼容型"],
+            presets=presets,
+            initial_capital=1_000_000,
+            start_date="2026-06-29",
+        )
+    # 批量原子性：B0.4 也不应残留
+    assert ui_service.service.list_accounts() == []
 
 
 def test_non_positive_initial_capital_rejected(ui_service):

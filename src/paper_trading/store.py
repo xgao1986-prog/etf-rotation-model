@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     closed_at TEXT,
     deleted_at TEXT,
     lifecycle_reason TEXT,
+    behavior_ack_date TEXT,
+    behavior_ack_config_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -140,7 +142,7 @@ END;
 
 
 class PaperTradingStore:
-    CURRENT_SCHEMA_VERSION = 3
+    CURRENT_SCHEMA_VERSION = 4
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -273,6 +275,30 @@ class PaperTradingStore:
                     """
                     ALTER TABLE paper_accounts
                     ADD COLUMN lifecycle_reason TEXT
+                    """
+                )
+
+        # Phase 3 -> Phase 4：老账户执行口径确认字段（2026-10-22 复审补修 ④）
+        # behavior_ack_date：用户确认按新执行口径运行的生效日期；
+        # behavior_ack_config_json：确认时冻结的执行配置快照（含标的池），
+        # 不改写不可变的 config_json（触发器保护）。
+        if current < 4:
+            existing_cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(paper_accounts)").fetchall()
+            }
+            if "behavior_ack_date" not in existing_cols:
+                conn.execute(
+                    """
+                    ALTER TABLE paper_accounts
+                    ADD COLUMN behavior_ack_date TEXT
+                    """
+                )
+            if "behavior_ack_config_json" not in existing_cols:
+                conn.execute(
+                    """
+                    ALTER TABLE paper_accounts
+                    ADD COLUMN behavior_ack_config_json TEXT
                     """
                 )
 
@@ -964,6 +990,24 @@ class PaperTradingStore:
             deleted_at=None,
             lifecycle_reason=reason or "restored",
         )
+
+    def update_behavior_ack(self, account_id, ack_date, ack_config_json):
+        """写入老账户执行口径确认（生效日期 + 确认时冻结的执行配置快照）。
+
+        只更新 behavior_ack_* 与 updated_at；config_json/config_hash 由触发器
+        保护、保持不可变。返回是否更新成功。
+        """
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE paper_accounts
+                SET behavior_ack_date = ?, behavior_ack_config_json = ?, updated_at = ?
+                WHERE account_id = ?
+                """,
+                (ack_date, ack_config_json, now, account_id),
+            )
+            return cur.rowcount > 0
 
     def permanently_delete_account(self, account_id):
         """永久删除账户并级联清理所有子表数据。返回是否删除了账户行。

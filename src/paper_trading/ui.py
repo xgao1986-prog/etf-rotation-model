@@ -1,6 +1,7 @@
 # src/paper_trading/ui.py — Streamlit virtual-account page rendering only.
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 import numpy as np
@@ -8,7 +9,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from paper_trading.models import AccountType, ManualFill, OpeningPosition, OrderStatus
+from paper_trading.models import (
+    AccountType,
+    ManualFill,
+    OpeningPosition,
+    OrderStatus,
+    resolve_execution_config,
+)
 from paper_trading.metrics import build_account_comparison, calculate_account_metrics
 from strategy_presets import load_strategy_presets
 
@@ -124,6 +131,57 @@ def _render_account_overview(
         is_deleted = s.get('is_deleted', False)
         label = f"{s['name']} ({account_id[:8]}...)"
         with st.expander(label, expanded=False):
+            # 账户冻结参数（创建时快照）：与侧栏当前参数、预设明确区分
+            try:
+                _acct = ui_service.service.store.get_account(account_id)
+                _frozen = json.loads(_acct["config_json"]) if _acct else {}
+            except Exception:
+                _frozen = {}
+            if _frozen:
+                _weekday_names = {0: "周一", 1: "周二", 2: "周三", 3: "周四", 4: "周五"}
+                _rows = [
+                    {"参数": "总分最低分", "冻结值": _frozen.get("min_total_score", "缺省 40")},
+                    {"参数": "趋势最低分", "冻结值": _frozen.get("min_trend_score", "缺省 15")},
+                    {"参数": "确认最低分", "冻结值": _frozen.get("min_confirm_score", "缺省 4")},
+                    {"参数": "最大持仓数", "冻结值": _frozen.get("max_holdings", "缺省 5")},
+                    {"参数": "单只上限", "冻结值": _frozen.get("max_position_per_etf", "缺省 20%")},
+                    {"参数": "止损线", "冻结值": _frozen.get("stop_loss", "缺省 -8%")},
+                    {"参数": "防御开关", "冻结值": _frozen.get("defense_enabled", "缺省 开启")},
+                    {"参数": "调仓日", "冻结值": _weekday_names.get(_frozen.get("rebalance_weekday", 3), "缺省 周四")},
+                    {"参数": "标的池", "冻结值": (
+                        f"行业 {len(_frozen['industry_tickers'])} 只 / 防御 {len(_frozen['defense_tickers'])} 只"
+                        if "industry_tickers" in _frozen else "创建时未冻结（跟随全局，老账户）")},
+                    {"参数": "评分来源", "冻结值": _frozen.get("score_source", "未记录（老账户）")},
+                    {"参数": "执行口径", "冻结值": (
+                        "新口径 v2（完整 B0.4 入场条件）"
+                        if int(_frozen.get("config_version", 1) or 1) >= 2
+                        else "旧口径（仅总分过滤），待确认升级")},
+                ]
+                st.caption("❄️ 账户冻结参数（创建时快照，不受侧栏/预设后续修改影响）")
+                st.dataframe(pd.DataFrame(_rows).astype(str), use_container_width=True, hide_index=True)
+            # 老账户执行口径确认（2026-10-22 复审补修 ④）：未确认不得按新行为运行
+            try:
+                _needs_ack = _acct is not None and resolve_execution_config(_acct) is None
+            except Exception:
+                _needs_ack = False
+            if _needs_ack:
+                st.warning(
+                    "⚠️ 该账户创建于执行口径一致性修复之前，当前已暂停运行。\n\n"
+                    "确认后将按新口径执行：完整 B0.4 入场条件（趋势/确认/弱市55分门槛/"
+                    "收盘在MA20之上/均线斜率/数据成熟期），并在确认时刻冻结标的池快照"
+                    "（此后侧栏改动不再影响本账户）。确认日期将被记录为生效日期；"
+                    "确认前的历史运行结果保持不变。"
+                )
+                if st.button("✅ 确认按新执行口径运行", key=f"ack_behavior_{account_id}"):
+                    try:
+                        updated = ui_service.confirm_behavior_update(account_id)
+                        st.success(
+                            f"已确认，生效日期：{updated.get('behavior_ack_date')}。"
+                            "此后该账户按新口径运行。"
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"确认失败：{exc}")
             c1, c2, c3, c4 = st.columns(4)
             with c1:
                 if status != 'ENDED':
@@ -256,6 +314,30 @@ def _render_account_overview(
 
 def _render_account_creation(ui_service, presets: Mapping[str, Mapping[str, Any]]):
     st.subheader("创建账户")
+
+    with st.expander("📋 虚拟盘账户支持哪些参数？（创建即冻结）", expanded=False):
+        st.markdown(
+            """
+**逐账户生效（创建时冻结，之后修改侧栏或预设不影响已有账户）：**
+总分/趋势/确认最低分、最大持仓数、单只上限、固定止损线、防御开关、调仓日（周几）、标的池快照。
+
+**共享评分管线（不逐账户生效）：**
+预设中的评分权重 weights 不会改变账户运行——账户运行使用数据库统一评分（daily_scores 全局管线计算，当前口径：趋势30+确认20+成交量15，动量/波动率因子关闭）。
+与当前评分管线不兼容的 weights 预设会被**拒绝创建**（不同权重保存后仍按统一评分运行，无法构成真实策略对比）。
+
+**入场条件（正式 B0.4 完整口径，与回测生产信号路径一致）：**
+数据成熟期（history_count≥51）、趋势/确认/总分达标、弱市总分门槛升至 55 分、
+前一日收盘在 MA20 之上、MA20 斜率向上；防御资产按生产宽松档（趋势10/确认2/总分30 且 ≥ 总分门槛-10）。
+评分字段缺失或无效时停止生成交易并明确提示。
+
+**暂不支持（包含这些设置的配置会被阻止创建，不会静默忽略）：**
+大盘择时、ATR/不止损模式、动态止盈、冷静期、宽基补仓、双周/月度调仓。
+如需使用上述设置，请仅运行回测路径。
+
+**三类参数的区别：**
+侧栏参数 = 当前回测实验设置；预设 = 可复用的参数模板；账户冻结参数 = 创建瞬间从预设复制并冻结，之后互不干扰。
+            """
+        )
 
     creation_type = st.selectbox(
         "账户类型", ["对比账户", "影子账户"], key="account_creation_type"

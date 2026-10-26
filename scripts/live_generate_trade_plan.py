@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Dict, Tuple, Optional
 from live_trading_assistant import LiveTradingAssistant
 from config import ETF_UNIVERSE, DEFENSE_UNIVERSE, build_config
-from database import ETFDatabase
+from database import ETFDatabase, apply_adjustment_for_scoring
 from rebalance_planner import plan_rebalance_v2_5
 import pandas as pd
 
@@ -63,17 +63,61 @@ def get_b0_4_signals(assistant, date, cfg, db=None):
     latest_date = eligible['date'].max()
     latest = eligible[eligible['date'] == latest_date].copy()
 
-    # 筛选行业ETF候选（来自 ETF_UNIVERSE）
-    industry_scores = latest[latest['ticker'].isin(ETF_UNIVERSE.keys())]
-    min_score = cfg.get('min_total_score', 40)
-    qualified_industry = industry_scores[industry_scores['total_score'] >= min_score].sort_values('total_score', ascending=False)
-    industry_candidates = [(row['ticker'], float(row['total_score'])) for _, row in qualified_industry.iterrows()]
+    # 筛选候选（账户设置一致性复审补修 ①②，2026-10-22）：
+    # 走共享模块 entry_filter.select_candidates，与正式 B0.4 生产信号路径
+    # （generate_signals + _rebalance_v2 二次过滤）逐条对齐：弱市55分门槛、
+    # 防御资格宽松档、prev_close>ma20、ma20_slope、数据成熟期 history_count>=51。
+    # 评分字段缺失/无效时抛出 ValueError，停止生成交易计划（不再有宽松回退）。
+    from paper_trading.entry_filter import select_candidates
 
-    # 防御资产候选（来自 DEFENSE_UNIVERSE）
-    defense_scores = latest[latest['ticker'].isin(DEFENSE_UNIVERSE.keys())]
-    defense_candidates = [(row['ticker'], float(row['total_score'])) for _, row in defense_scores.iterrows()]
+    # 富化 prev_close / history_count：daily_scores 不含这两列，从行情表计算。
+    # prev_close = 评分日前一交易日收盘；history_count = 截至评分日的历史行数。
+    latest = latest.copy()
+    latest_ts = pd.to_datetime(latest_date)
+    prev_close_map = {}
+    history_count_map = {}
+    for t in latest['ticker'].unique():
+        try:
+            hist = db.get_market_data(ticker=t, end_date=latest_ts.strftime('%Y-%m-%d'))
+        except Exception as exc:
+            raise ValueError(f"评分字段富化失败：{t} 行情查询出错（{exc}），已停止生成交易计划。")
+        if hist is None or hist.empty:
+            raise ValueError(
+                f"评分字段富化失败：{t} 无行情数据，无法核实 prev_close 与数据成熟期"
+                f"（history_count>=51），已停止生成交易计划（不猜测、不回退）。")
+        hist = hist.sort_values('date')
+        hist = hist[pd.to_datetime(hist['date']) <= latest_ts]
+        if hist.empty:
+            raise ValueError(
+                f"评分字段富化失败：{t} 在评分日 {latest_ts.strftime('%Y-%m-%d')} 及之前"
+                f"无行情数据，无法核实 prev_close 与数据成熟期，已停止生成交易计划。")
+        hist_dates = pd.to_datetime(hist['date'])
+        # 与正式评分引擎一致，入场判断使用评分调整价；price_map 仍读取真实收盘价。
+        hist = apply_adjustment_for_scoring(hist)
+        before = hist[hist_dates < latest_ts]
+        if before.empty:
+            raise ValueError(
+                f"评分字段富化失败：{t} 在评分日 {latest_ts.strftime('%Y-%m-%d')} 之前"
+                f"无行情数据，无法计算 prev_close，已停止生成交易计划。")
+        prev_close_map[t] = float(before['close'].iloc[-1])
+        history_count_map[t] = int(len(hist))
+    latest['prev_close'] = latest['ticker'].map(prev_close_map)
+    latest['history_count'] = latest['ticker'].map(history_count_map)
+
+    min_score = cfg.get('min_total_score', 40)
+    industry_candidates, defense_candidates, meta = select_candidates(
+        latest,
+        industry_tickers=set(ETF_UNIVERSE.keys()),
+        defense_tickers=set(DEFENSE_UNIVERSE.keys()),
+        min_total_score=min_score,
+        min_trend_score=cfg.get('min_trend_score', 15),
+        min_confirm_score=cfg.get('min_confirm_score', 4),
+        context="实盘调仓脚本",
+    )
 
     print(f"OK 评分日期: {latest_date} (请求日期上限: {date})")
+    if meta['market_quality_poor']:
+        print(f"OK 弱市判定成立（核心池动量中位数<0），行业总分门槛升至 {meta['effective_min_total']:.0f} 分")
     print(f"OK 行业候选: {len(industry_candidates)} 只")
     print(f"OK 防御候选: {len(defense_candidates)} 只")
 
@@ -173,7 +217,12 @@ def main():
         config=cfg,
     )
 
-    target_positions, price_map_signals = get_b0_4_signals(assistant, args.date, cfg)
+    try:
+        target_positions, price_map_signals = get_b0_4_signals(assistant, args.date, cfg)
+    except ValueError as exc:
+        # 评分字段缺失/无效或富化失败：明确提示并以非零码退出，不生成任何计划
+        print(f"ERROR {exc}")
+        sys.exit(1)
     if not target_positions:
         print("WARN No B0.4 signals today, generating empty plan.")
         target_positions = {}

@@ -216,6 +216,10 @@ class PaperTradingUIService:
                 results["failure"][account_id] = str(exc)
         return results
 
+    def confirm_behavior_update(self, account_id: str):
+        """老账户确认按新执行口径运行（生效日期=今天，一次性显式用户动作）。"""
+        return self.service.confirm_behavior_update(account_id)
+
     def list_pending_shadow_orders(self) -> List[Dict[str, Any]]:
         """Return all PENDING orders belonging to active shadow accounts."""
         pending = []

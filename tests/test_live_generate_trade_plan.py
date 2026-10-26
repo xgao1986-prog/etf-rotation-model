@@ -51,20 +51,41 @@ TICKER_OLD_HOLDING = '512980.SH'  # 传媒ETF，在 ETF_UNIVERSE 中
 
 
 def _make_scores(rows):
-    """创建评分 DataFrame，rows: [(date, ticker, total_score), ...]"""
+    """创建评分 DataFrame，rows: [(date, ticker, total_score), ...]
+
+    2026-10-22 复审补修 ①：补全 B0.4 完整入场字段——默认每行满足
+    trend 20≥15、confirm 10≥4、ma20_slope 0.01>0、momentum_20 0.05
+    （横截面中位数>0，好市场，行业总分门槛=40）。ma20=0.9 配合
+    _make_market_history 的收盘 1.0，使富化后的 prev_close(=1.0) > ma20。
+    """
     data = []
     for date, ticker, total_score in rows:
         data.append({
             'ticker': ticker, 'date': date,
-            'ma20': 10, 'ma50': 10, 'ma_ratio': 1.0,
-            'price_vs_ma20': 1.0, 'price_vs_ma50': 1.0,
-            'volume_ratio': 1.0, 'volatility': 0.1,
+            'ma20': 0.9, 'ma50': 0.85, 'ma20_slope': 0.01,
+            'above_ma20_days': 5,
+            'volatility_20': 0.02,
             'momentum_20': 0.05, 'momentum_rank': 5,
-            'trend_score': 10, 'confirm_score': 10,
-            'momentum_score': 10, 'volume_score': 10,
-            'volatility_score': 10, 'total_score': total_score,
+            'volume_ratio': 1.0,
+            'trend_score': 20, 'confirm_score': 10,
+            'volume_score': 10, 'vol_score': 0,
+            'total_score': total_score,
         })
     return pd.DataFrame(data)
+
+
+def _make_market_history(ticker, end_date, price=1.0, periods=60):
+    """创建 end_date 之前（含）periods 个工作日的行情历史。
+
+    复审补修 ①：实盘脚本入场判定需要 prev_close（评分日前一交易日收盘）
+    与 history_count（>=51 数据成熟期），单行行情已不够。
+    """
+    dates = pd.bdate_range(end=end_date, periods=periods).strftime('%Y-%m-%d')
+    return pd.DataFrame({
+        'ticker': ticker, 'date': dates,
+        'open': price, 'high': price, 'low': price,
+        'close': price, 'volume': 1000000,
+    })
 
 
 def _make_market_df(ticker, date, price):
@@ -109,7 +130,7 @@ def mock_db_5_industry():
     ])
     market = {}
     for t in TICKER_5_INDUSTRY + TICKER_DEFENSE:
-        market[t] = _make_market_df(t, '2026-06-29', 1.0)
+        market[t] = _make_market_history(t, '2026-06-29', 1.0)
     return MockETFDatabase(scores, market)
 
 
@@ -123,7 +144,7 @@ def mock_db_3_industry():
     ])
     market = {}
     for t in TICKER_3_INDUSTRY + TICKER_DEFENSE:
-        market[t] = _make_market_df(t, '2026-06-29', 1.0)
+        market[t] = _make_market_history(t, '2026-06-29', 1.0)
     return MockETFDatabase(scores, market)
 
 
@@ -136,15 +157,9 @@ def mock_db_multi_date():
         ('2026-06-29', '512480.SH', 60),  # 6/29 多一只
     ])
     market = {
-        '512400.SH': pd.concat([
-            _make_market_df('512400.SH', '2026-06-26', 1.0),
-            _make_market_df('512400.SH', '2026-06-29', 1.0),
-        ], ignore_index=True),
-        '515230.SH': pd.concat([
-            _make_market_df('515230.SH', '2026-06-26', 1.0),
-            _make_market_df('515230.SH', '2026-06-29', 1.0),
-        ], ignore_index=True),
-        '512480.SH': _make_market_df('512480.SH', '2026-06-29', 1.0),
+        '512400.SH': _make_market_history('512400.SH', '2026-06-29', 1.0),
+        '515230.SH': _make_market_history('515230.SH', '2026-06-29', 1.0),
+        '512480.SH': _make_market_history('512480.SH', '2026-06-29', 1.0),
     }
     return MockETFDatabase(scores, market)
 
@@ -264,7 +279,7 @@ class TestMainScript:
         ])
         market = {}
         for t in TICKER_5_INDUSTRY:
-            market[t] = _make_market_df(t, '2026-06-29', 1.0)
+            market[t] = _make_market_history(t, '2026-06-29', 1.0)
         mock_db = MockETFDatabase(scores, market)
         monkeypatch.setattr(lgtp, 'ETFDatabase', lambda: mock_db)
 
@@ -308,7 +323,7 @@ class TestMainScript:
         ])
         market = {}
         for t in TICKER_5_INDUSTRY + [TICKER_OLD_HOLDING]:
-            market[t] = _make_market_df(t, '2026-06-29', 1.0)
+            market[t] = _make_market_history(t, '2026-06-29', 1.0)
         mock_db = MockETFDatabase(scores, market)
         monkeypatch.setattr(lgtp, 'ETFDatabase', lambda: mock_db)
 

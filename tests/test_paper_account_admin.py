@@ -39,12 +39,16 @@ def test_create_and_list_cash_account():
             ],
             capture_output=True,
             text=True,
+            # 账户 config 含中文 score_source：子进程按 PYTHONIOENCODING=utf-8
+            # 输出，必须显式以 utf-8 解码（Windows 默认 GBK 会解码失败）
+            encoding="utf-8",
         )
         assert create.returncode == 0, create.stderr
         listed = subprocess.run(
             [sys.executable, SCRIPT, "--db", db_path, "list"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert listed.returncode == 0, listed.stderr
         assert "acct-cli" in listed.stdout

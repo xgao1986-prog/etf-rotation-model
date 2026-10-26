@@ -121,9 +121,9 @@ class ChinaTradingCalendar:
             dt -= timedelta(days=1)
         raise RuntimeError(f"no previous trading day found before {date}")
 
-    def is_rebalance_day(self, date: str) -> bool:
-        """Thursday is the rebalance day."""
-        return datetime.strptime(date, "%Y-%m-%d").weekday() == 3
+    def is_rebalance_day(self, date: str, weekday: int = 3) -> bool:
+        """检查 date 是否为调仓日。weekday: 0=周一 … 4=周五，默认周四（历史口径）。"""
+        return datetime.strptime(date, "%Y-%m-%d").weekday() == weekday
 
     @property
     def min_date(self) -> str:

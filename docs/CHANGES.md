@@ -5,6 +5,88 @@
 
 ---
 
+## 2026-10-22（账户设置一致性 · 第一检查点复审补修第二轮）
+
+**背景：** 第一检查点复审未通过，用户要求仅补四项，不启动页面样稿、不提交不推送。
+
+### 补1 缺字段/无效字段停止生成交易（删除宽松回退）
+
+- 新建 `src/paper_trading/entry_filter.py`：`validate_score_data()` 缺必需列（trend/confirm/total/momentum_20/ma20/ma20_slope/prev_close/history_count）或池内标的字段值 NaN/非数值 → 抛 ValueError 明确提示并停止；不再有"缺列退回仅看总分"路径。
+- `runner.py` 第 9 步（信号准备当日）与 `_run_planner`（执行日）双重校验；实盘脚本同样硬失败并以非零码退出。
+- `app.py::_paper_trading_data_provider` 富化 prev_close（评分日前一交易日收盘）与 history_count（截至评分日行情行数）；无法富化的标的进 invalid_scores 阻止运行。（app.py 为 Codex 所有，本轮仅加数据富化段，请 Codex 复核。）
+- 简化测试数据全部补全字段：`test_paper_trading_runner.py::_make_scores`、`test_live_generate_trade_plan.py::_make_scores`+`_make_market_history`、`test_real_price_adjustment.py` 两处、`test_settings_consistency.py` 全面重写。
+
+### 补2 落实正式 B0.4 完整入场条件 + 三路径走真实生产信号
+
+- `entry_filter.select_candidates()` 与生产信号路径逐条对齐：弱市55分门槛（核心池 momentum_20 横截面中位数<0 → effective_min_total=55，strategy.py:407-413）、数据成熟期 history_count>=51、prev_close>ma20、ma20_slope>0；防御资产硬编码宽松档（趋势10/确认2/总分30 且 ≥min_total-10，prev_close>ma20*0.98，slope>-0.001）。
+- 三路径一致性测试重写：路径 A 调真实 `StrategyEngine.generate_signals`（不再在测试中复制筛选冒充回测），断言生产买入信号集合，再过 plan_rebalance_v2_5；路径 B 虚拟盘 runner；路径 C 实盘脚本。好市场目标持仓三路径逐一数值相等；弱市 55 门槛、未成熟（50<51）、前收跌破 MA20 三个场景的排除行为与生产路径一致。
+
+### 补3 预设权重兼容性 + 评分来源记录
+
+- `models.py`：`effective_pipeline_weights()`（当前管线：动量/波动率因子关闭 → 趋势30/确认20/成交量15 归一化）；`weights_compatible_with_pipeline()`（关闭因子置零归一化后逐项比较，容差 0.005）；不兼容预设**拒绝创建**（保守型/激进型会被拒），错误信息说明原因；账户配置写入 `score_source`（统一评分 daily_scores，逐账户权重不生效）并在创建页说明与账户总览冻结参数表展示。
+
+### 补4 老账户执行口径确认门闩
+
+- `store.py` schema v4：`paper_accounts` 新增 `behavior_ack_date`/`behavior_ack_config_json`（幂等迁移；config_json 不可变触发器不动）。
+- `models.resolve_execution_config()`：config_version>=2（新口径创建）直接用创建配置；老账户仅在确认后用确认快照；否则 None。
+- `runner.run_daily` 门闩：老账户未确认 → 返回暂停结果（不交易不保存状态、不标记已处理），ui_service 归入 skipped 并说明原因；页面「账户操作」出现确认按钮与影响说明。
+- `service.confirm_behavior_update()`：记录生效日期 + 冻结确认时刻标的池快照（已有冻结池的账户保留原池不覆盖），不改写 config_json；重复确认/新账户确认拒绝。
+
+### 复审补修验证（本会话实测）
+
+- `tests/test_settings_consistency.py` 重写后 **36 passed**（补1×4、补2×3、补3×4、补4×7、F1-F8 回归）。
+- 虚拟盘+实盘 12 套件 **206 passed**（py）+ plotly 依赖与 UI 套件 **23 passed**（venv）。
+- B0.4 冻结基线 **9 passed**（NAV 2,761,288.07 / 804 笔未动）；准入套件 16 passed/1 failed（`test_missing_data_antipattern` 基线既有）。
+- 浏览器验收 2 项单独运行 **passed**（185s/224s）。附带修复两处测试基建：`test_paper_account_admin.py` 子进程显式 utf-8 解码（账户配置含中文 score_source）；`test_paper_trading_browser.py` 服务器改用 `sys.executable`（裸 `python` 会解析到无依赖的解释器；另发现 8501 端口曾长期被一台 Python3.10 旧 Streamlit 服务器占用，历史浏览器测试可能一直打在旧代码上，已终止该进程）。
+- `test_paper_trading_ui_service.py`：保守型测试预设权重改为管线兼容（差异由逐账户阈值体现），新增"不兼容预设批量创建拒绝+原子回滚"测试。
+- 未提交未推送，等待定向复审。
+
+---
+
+## 2026-10-22（账户设置与实际执行一致性审计及修复 · 第一检查点）
+
+**目标：** 对照回测、虚拟盘、实盘建议三条路径，审计已保存参数是否真正生效；已支持的修复执行，暂不支持的阻止创建并明确提示。不修改 B0.4 冻结口径、不碰 `src/backtest.py`/`src/strategy.py`/`src/config.py`/`src/rebalance_planner.py`/`app.py`、不迁移真实账户、不接自动下单。审计报告：`reports/settings_consistency_audit_20261022.md`。
+
+### 一、审计发现（修复前）
+
+- **F1** 虚拟盘止损线硬编码 -0.08（`runner.py` 未传账户配置），账户保存的 stop_loss 静默忽略。
+- **F2** 虚拟盘调仓日硬编码周四（`calendar.py:is_rebalance_day` 写死 weekday==3）。
+- **F3** 虚拟盘防御开关硬编码 True（`runner.py:_run_planner`）。
+- **F4** 虚拟盘入场只过滤 total_score，不过滤 trend/confirm/均线条件（回测路径有）。
+- **F5** 标的池运行时读全局 config 模块：侧栏"防御资产模式"改写全局 DEFENSE_UNIVERSE 会泄漏到所有已有账户。
+- **F6** `service.create_account` 不校验 strategy_config，不支持项保存后静默忽略。
+- **F7** 实盘助手止损检查符号 bug：cfg 的 stop_loss=-0.08（负值口径）经 `-stop_loss_pct` 变成 +8% 阈值，几乎全部持仓误报。
+- **F8** 实盘调仓脚本防御候选无评分门槛（虚拟盘/回测为 min_total-10）；行业候选只有总分过滤。
+- **F9** 页面未区分"侧栏当前参数 / 预设 / 账户冻结参数"。
+
+### 二、修复（按文件）
+
+- `src/paper_trading/models.py`：新增 `validate_account_strategy_config()`（未知键、market_timing=True、止损模式非 fixed、动态止盈、冷静期、宽基、非每周调仓等一律拒绝创建并给出中文明细；weights 属共享评分管线参数允许携带）+ `freeze_universe_into_config()`（创建即冻结标的池快照）。
+- `src/paper_trading/service.py`：`create_account` 先校验、再冻结标的池后落库（所有创建入口的统一收口点）。
+- `src/paper_trading/runner.py`：止损线取账户配置（缺省 -0.08）；调仓日取账户配置（缺省周四）；defense_enabled 取账户配置（缺省 True）；标的池用冻结快照（老账户无快照键时回退全局，行为不变）；评分列齐备时入场过滤补齐 trend/confirm/above_ma20/ma20_slope，与回测语义对齐。
+- `src/paper_trading/calendar.py`：`is_rebalance_day(date, weekday=3)` 支持参数化，默认周四不变。
+- `src/live_trading_assistant.py`：止损阈值取 `abs()`，修复负值口径误报。
+- `scripts/live_generate_trade_plan.py`：防御候选门槛对齐 min_total-10；行业候选补齐 trend/confirm/均线入场过滤。
+- `src/paper_trading/ui.py`：创建页新增"账户支持哪些参数"说明（逐账户生效 / 共享评分管线 / 暂不支持三类）；账户总览每个账户展示冻结参数表。
+
+### 三、验证（本会话实测）
+
+- TDD：`tests/test_settings_consistency.py` 19 项先在旧代码上复现失败（17 failed / 2 项守卫通过），修复后 **19 passed**。
+- 专项回归：paper/live 九文件 **129 passed**。
+- B0.4 冻结基线：`tests/test_b0_4_slippage.py` **9 passed**（NAV 2,761,288.07 / 804 笔口径未动）；`test_b0_data_admission.py` 16 passed / 1 failed（`test_missing_data_antipattern`，基线既有问题，与本轮无关）。
+- 全量回归（其余文件）：**430 passed / 6 failed**——4 项为 Codex 未提交的日期刻度 UI 测试（`test_analysis_date_range_ui.py`，app.py 未提交改动，非本轮范围）；1 项基线既有（`test_v1_3_step6_dynamic_fifth_slot`）；1 项浏览器测试全量并发下失败、单独重跑 **passed**（121s，验证冻结参数表未破坏永久删除流程）。
+- 三路径一致性：相同评分/价格/空仓状态下，回测规划器调用、虚拟盘 runner、实盘脚本产出**完全相同**的目标持仓（测试内含数值断言）。
+- `py_compile` 全部修改文件通过。
+
+### 四、行为变更警示与边界
+
+- F1 生效后，既有账户的下一次运行将真正按其保存的止损线执行（如按"保守型"创建的账户从实际 -8% 变为 -5%）——这是修复本意，但属既有账户行为变化，验收需知悉。
+- 允许差异（书面说明）：实盘建议用信号日收盘价估算（T 日出计划、T+1 手动执行），虚拟盘/回测用执行日开盘价；估算价不同会导致整手股数尾差。
+- weights（评分权重）不逐账户生效：账户运行使用数据库统一评分；创建页已明确提示，是否支持逐账户评分留待后续决策。
+- 未提交、未推送；未修改真实持仓、数据库、个人预设、B0.4 冻结快照；Codex 未提交改动（app.py 日期刻度、收益回吐诊断）原样保留。
+
+---
+
 ## 2026-10-21（iFinD 数据连接凭证链路收口，提交 fd20651）
 
 **目标：** 修复 Streamlit 网页环境中 iFinD 批量调用失败的问题。根因：网页启动环境不继承 Kimi 对话注入的临时环境变量，SDK 凭证链为 显式参数 > KIMI_API_KEY 环境变量 > ~/.kimi/agent-gw.json，而配置文件原本不存在。不修改历史行情或策略参数，凭证绝不写入代码/日志/GitHub。

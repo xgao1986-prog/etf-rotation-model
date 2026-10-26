@@ -174,7 +174,9 @@ def streamlit_server():
 
         proc = subprocess.Popen(
             [
-                'python',
+                # 必须用当前 pytest 解释器（含 streamlit/plotly 依赖）；
+                # 裸 'python' 在 Windows 上可能解析到无依赖的其他解释器
+                sys.executable,
                 '-m',
                 'streamlit',
                 'run',

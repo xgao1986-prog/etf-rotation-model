@@ -29,6 +29,7 @@ corporate_actions 表 9 条拆分记录全部 confirmed（含公告依据）。�
 - **v1.3 Step 1~10：已完成，全部 observer-only**——无任何一步达到升级 B0.4 的预注册标准；B0.4 保留
 - **行情更新链路：已修复可用**——AKShare 超时治理 + iFinD CSV 自动导入 fallback + iFinD 双序列拉取
 - **iFinD 数据连接凭证链路：已收口**（提交 `fd20651`）——凭证持久化 + 三层状态展示 + 缺凭证快速失败，网页实测对齐至 2026-10-21
+- **账户设置一致性第一检查点：按8.7验收报告已收口**——一致性39项、13套件223项及冻结9项通过为该轮报告结果；Playwright跳过与网页订单确认限制保留。本轮不冒充重新执行完整验收。
 
 历史细节见 `docs/CHANGES.md`。
 
@@ -87,6 +88,24 @@ corporate_actions 表 9 条拆分记录全部 confirmed（含公告依据）。�
 
 ---
 
+## 3.4 账户设置与实际执行一致性（2026-10-22，Kimi，第一检查点，第二轮补修已验收）
+
+- 审计报告：`reports/settings_consistency_audit_20261022.md`（三路径设置支持清单）。对照回测/虚拟盘/实盘建议逐参数追踪，发现 9 项问题（F1~F9）：虚拟盘止损线硬编码 -0.08、调仓日硬编码周四、防御开关硬编码 True、入场只过滤总分、标的池运行时读全局模块（侧栏改动泄漏到已有账户）、创建账户不校验配置（不支持项静默忽略）、实盘助手止损符号 bug（-0.08 变 +8% 阈值几乎全员误报）、实盘防御候选无门槛、页面未区分三类参数。
+- 第一轮修复：runner 止损线/调仓日/防御开关/标的池快照/入场过滤全部取账户创建时冻结配置（缺省值与旧行为一致）；`create_account` 统一校验+冻结标的池（market_timing=True、ATR/不止损、动态止盈、冷静期、宽基、非每周调仓、未知键一律拒绝创建并中文提示）；实盘助手止损取 abs()；实盘脚本防御门槛对齐 min_total-10 并补齐入场过滤；虚拟盘创建页列出支持/不支持清单，账户总览展示冻结参数表。
+- **复审补修第二轮（4 项，本会话已实施）**：
+  1. **评分字段硬性校验**：新建 `src/paper_trading/entry_filter.py::validate_score_data`——缺 prev_close/ma20_slope/trend_score/confirm_score/total_score 列或含 NaN 时抛 ValueError（中文指明字段与标的），虚拟盘当日报错不存信号不标记已处理、实盘脚本非零退出；删除"缺字段退回仅看总分"宽松路径，旧合成测试数据已补齐字段。
+  2. **B0.4 完整入场条件落实到三路径同一实现**：`entry_filter.select_candidates` 实现弱市 55 分门槛（核心池 momentum_20 中位数<0 判定）、防御资格（趋势≥10/确认≥2/总分≥max(30,min_total-10)/prev_close>ma20×0.98/slope>-0.001）、数据成熟期 history_count≥51、prev_close>ma20、slope>0；虚拟盘 `_run_planner` 与实盘脚本 `get_b0_4_signals`（富化 prev_close/history_count）均改走该函数，测试经真实 `generate_signals` 生产信号路径比较，不再复制筛选。
+  3. **评分来源与权重兼容**：`models.py` 新增 `PIPELINE_FACTOR_POINTS`/`effective_pipeline_weights`（动量/波动率关闭→趋势30/确认20/成交量15归一化）/`weights_compatible_with_pipeline`（容差0.005）/`describe_score_source`；`create_account` 拒绝与统一评分管线不兼容的 weights 预设（不落库），账户 config 记录 config_version=2 与 score_source，页面冻结参数表展示"评分来源/执行口径"两行。
+  4. **老账户行为变更确认门闩**：store schema v4 加 `behavior_ack_date`/`behavior_ack_config_json`（幂等迁移）；`resolve_execution_config` 对 config_version<2 且未确认账户返回 None → run_daily 暂停（新 result kind `behavior_ack_required`，不交易不估值不标记已处理），页面给 warning + "确认按新执行口径运行"按钮；`confirm_behavior_update` 只写 ack 列、不改 config_json、不覆盖已有冻结标的池；无冻结池的老账户不再受侧栏影响，无法可靠还原时提示确认而非猜测。
+- 验证（本会话实测）：`tests/test_settings_consistency.py` 全量重写为 36 项（F1~F8 + 补1×4 + 补2×3 + 补3×4 + 补4×7）全部通过；paper/live 12 套件 206 passed；venv 下 UI 23 passed；B0.4 冻结 9 passed（138s，NAV 2,761,288.07/804 笔未动）；准入 16 passed/1 failed（`test_missing_data_antipattern` 基线既有）；全量 429 passed（除 Codex `test_analysis_date_range_ui.py` 与两个基线既有失败）；浏览器 2 项单独跑各 passed（185s/224s）。三路径相同输入下目标持仓逐一相等，且经真实生产信号集合断言（弱市 meta['effective_min_total']==55.0）。
+- **行为变更警示**：①既有账户下次运行起将真正按保存的止损线执行（如"保守型"-5%，此前实际按 -8%）；②config_version<2 的老账户未确认前将暂停运行（页面确认后恢复）；③保守型/激进型等权重与统一管线不兼容的预设将被拒绝创建新账户。
+- **测试环境坦白**：8501 端口曾长期被一台 Python3.10 旧 Streamlit 残留服务器（PID 64004，已终止）占用——历史浏览器测试可能一直打在旧代码上；本轮浏览器 fixture 已改用 `sys.executable`，干净环境单跑通过。
+- 允许差异：实盘建议用信号日收盘价估算 vs 虚拟盘/回测用执行日开盘价，整手尾差已书面说明。
+- 边界：未提交未推送；未碰 backtest/strategy/config/rebalance_planner；`app.py` 本轮有触碰（仅 `_paper_trading_data_provider` 评分字段富化段，属 Codex 文件，需 Codex 复核）；未修改真实持仓、数据库、个人预设、冻结快照。
+- 下一检查点（待启动）："今日待办／策略模拟／真实账户"可点击样稿。
+
+---
+
 ## 4. 验证范围（如实记录，不夸大）
 
 **本会话（Kimi）实测**：
@@ -125,3 +144,12 @@ corporate_actions 表 9 条拆分记录全部 confirmed（含公告依据）。�
 ## 7. 新线程恢复方式
 
 依次读取：`AGENTS.md` → `docs/CURRENT_STATE.md` → `docs/DECISIONS.md` → `git status --short --branch`
+
+## 8.7 账户设置一致性第二轮独立验收（2026-10-26，Kimi，第一检查点已收口）
+
+- 验收报告：`reports/settings_consistency_acceptance_20261026.md`。六项必要检查通过；正式基线保持 v1.2.3 / B0.4，未启动下一检查点。
+- 新发现双轨价格边界：页面与实盘富化曾以真实 `close` 作为 `prev_close`，与正式评分调整价口径不一致。新增3项回归，修复前2 failed/1 passed；在 `app.py` 和 `scripts/live_generate_trade_plan.py` 的评分富化副本上统一 `apply_adjustment_for_scoring`，成交价格仍用真实 open/close。修复后3 passed。
+- 本轮实测：一致性39 passed；paper/live/账户管理/一致性13套件223 passed；B0.4冻结9项经拆分全部完成通过，0bp NAV 2,761,288.07、804笔。首次整组300秒超时仅完成4项，未计为通过或失败。
+- 当前代码在独立8517端口、临时账户库完成网页创建与运行，显示“成功运行1个账户”，截图位于 `reports/browser_acceptance/settings_consistency_20261026_run_success.png`（本地验收证据，未随仓库发布）；原8501进程未终止，隔离进程已关闭。Playwright两项因依赖缺失 skipped，未冒充通过；网页订单确认本轮未手工重复，自动测试已覆盖。
+- 本轮验收记录的起止行情库 SHA-256 均为 6063eecd…，期间未再变化。该指纹与迁移时的 95d10b8d… 不同；用户已确认主动点击更新行情，当前行情与评分截至 2026-10-26。两种指纹对应不同时间点，不应混作同一比较基准。
+- 本轮验收期间未修改正式行情库；真实账户、虚拟盘库、凭证、冻结快照及策略语义未修改，虚拟盘库与冻结 CSV 的验收前后指纹不变。未清理、提交、推送。

@@ -12,6 +12,10 @@ from .models import (
     StartMode,
     canonical_config,
     config_hash,
+    validate_account_strategy_config,
+    freeze_universe_into_config,
+    describe_score_source,
+    CURRENT_CONFIG_VERSION,
 )
 from .store import DuplicateLedgerEvent
 
@@ -25,6 +29,16 @@ class PaperTradingService:
     def create_account(self, request: AccountCreate, conn=None):
         if self.store.get_account(request.account_id):
             raise ValueError(f"account already exists: {request.account_id}")
+
+        # 账户设置一致性（2026-10-22）：创建前校验策略配置——不支持的设置
+        # 必须在此拒绝并明确提示，不得保存后静默忽略。
+        validate_account_strategy_config(request.strategy_config)
+        # 创建即冻结标的池：此后侧栏对全局 config 模块的改动不影响本账户。
+        frozen_config = freeze_universe_into_config(request.strategy_config)
+        # 新口径创建：写入执行口径版本与评分来源，视同创建时已确认当前执行行为
+        # （创建页明确展示完整入场条件与评分来源，无需再次确认）。
+        frozen_config["config_version"] = CURRENT_CONFIG_VERSION
+        frozen_config["score_source"] = describe_score_source()
 
         positions_value = sum(
             position.market_value for position in request.opening_positions
@@ -48,8 +62,8 @@ class PaperTradingService:
             "account_type": request.account_type.value,
             "group_id": request.group_id,
             "strategy_name": request.strategy_name,
-            "config_json": canonical_config(request.strategy_config),
-            "config_hash": config_hash(request.strategy_config),
+            "config_json": canonical_config(frozen_config),
+            "config_hash": config_hash(frozen_config),
             "initial_capital": request.initial_capital,
             "start_mode": request.start_mode.value,
             "start_date": request.start_date,
@@ -92,6 +106,42 @@ class PaperTradingService:
         raise RuntimeError(
             "account configuration is immutable; copy to a new account"
         )
+
+    def confirm_behavior_update(self, account_id, confirm_date=None):
+        """老账户确认按新执行口径运行（2026-10-22 复审补修 ④）。
+
+        确认内容（一次性、显式用户动作，写入 behavior_ack_* 列，不改写
+        不可变的 config_json）：
+        - 执行行为升级为新口径：完整 B0.4 入场条件（含弱市 55 分门槛、
+          prev_close>ma20、数据成熟期 history_count>=51、防御资格宽松档）；
+        - 标的池冻结：若创建时未冻结（老账户），以确认时刻的当前标的池
+          快照冻结——页面已明确提示这一点，由用户确认，绝不猜测还原；
+          已冻结的池尊重原值不覆盖；
+        - 生效日期：confirm_date（缺省今天），确认之前的运行仍按旧行为
+          的既有结果保留，确认后才允许继续运行。
+        """
+        import json
+
+        from .models import resolve_execution_config
+
+        account = self.store.get_account(account_id)
+        if account is None:
+            raise KeyError(account_id)
+        if account.get("is_deleted"):
+            raise ValueError("账户已删除，无法确认执行口径更新")
+        if resolve_execution_config(account) is not None:
+            raise ValueError("该账户已是新执行口径（或已确认），无需重复确认")
+
+        base = json.loads(account["config_json"])
+        snapshot = freeze_universe_into_config(base)
+        snapshot["config_version"] = CURRENT_CONFIG_VERSION
+        snapshot["score_source"] = describe_score_source()
+        validate_account_strategy_config(snapshot)
+
+        ack_date = confirm_date or datetime.now().date().isoformat()
+        self.store.update_behavior_ack(
+            account_id, ack_date, canonical_config(snapshot))
+        return self.store.get_account(account_id)
 
     def append_order(self, order):
         row = dict(order)

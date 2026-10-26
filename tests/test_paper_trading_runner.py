@@ -44,7 +44,24 @@ def _make_account(service, account_id='acct-test', start_mode=StartMode.CASH, ca
 
 
 def _make_scores(tickers, scores):
-    return pd.DataFrame({'ticker': tickers, 'total_score': scores})
+    """简化测试评分数据（2026-10-22 复审补修 ①：补全 B0.4 完整入场字段）。
+
+    每行默认满足完整入场条件：trend 20≥15、confirm 10≥4、prev_close 1.2>ma20 1.0、
+    ma20_slope 0.01>0、history_count 100≥51、momentum_20 0.10（横截面中位数>0，
+    好市场，行业总分门槛=40）。不满足条件的标的用更低 total_score 表达。
+    """
+    n = len(tickers)
+    return pd.DataFrame({
+        'ticker': tickers,
+        'total_score': scores,
+        'trend_score': [20.0] * n,
+        'confirm_score': [10.0] * n,
+        'ma20': [1.0] * n,
+        'ma20_slope': [0.01] * n,
+        'momentum_20': [0.10] * n,
+        'prev_close': [1.2] * n,
+        'history_count': [100] * n,
+    })
 
 
 @pytest.fixture

@@ -247,6 +247,43 @@ def _paper_trading_data_provider():
                     "reason": f"total_score 无效 ({total_score})",
                 })
 
+    if not scores.empty:
+        # 复审补修 ①②（2026-10-22）：虚拟盘/实盘入场判定需要完整 B0.4 字段。
+        # daily_scores 不含 prev_close（评分日前一交易日收盘）与 history_count
+        # （截至评分日的历史行数，数据成熟期需 >= 51），在此从行情表富化。
+        # 窗口 120 个自然日（约 80 个交易日）：窗口内行数 >= 51 即可确认成熟；
+        # 不足 51 行时再单独拉全量历史精确计数（仅新上市标的会走到）。
+        scores = scores.copy()
+        window_start = (pd.Timestamp(latest) - pd.Timedelta(days=120)).strftime("%Y-%m-%d")
+        hist = load_market_data(ticker=sorted(score_tickers),
+                                start_date=window_start, end_date=latest)
+        prev_close_map = {}
+        history_count_map = {}
+        if not hist.empty:
+            hist = hist.sort_values("date")
+            # 与 StrategyEngine 的评分口径一致：入场判断使用评分调整价。
+            # 页面成交价仍由上方原始 open/close 单独提供，不在此改写。
+            hist = apply_adjustment_for_scoring(hist)
+            for ticker, g in hist.groupby("ticker"):
+                before = g[g["date"].astype(str) < str(latest)]
+                if not before.empty:
+                    prev_close_map[ticker] = float(before["close"].iloc[-1])
+                count = int((g["date"].astype(str) <= str(latest)).sum())
+                if count < 51:
+                    full = load_market_data(ticker=[ticker], end_date=latest)
+                    if not full.empty:
+                        count = int((full["date"].astype(str) <= str(latest)).sum())
+                history_count_map[ticker] = count
+        scores["prev_close"] = scores["ticker"].map(prev_close_map)
+        scores["history_count"] = scores["ticker"].map(history_count_map)
+        for ticker in sorted(score_tickers & expected_tickers):
+            if ticker not in prev_close_map or ticker not in history_count_map:
+                invalid_scores.append({
+                    "ticker": ticker,
+                    "reason": "无法富化 prev_close/history_count（行情数据不足），"
+                              "无法核实完整入场条件",
+                })
+
     coverage = {
         "expected_price_count": len(expected_tickers),
         "actual_price_count": len(open_prices),

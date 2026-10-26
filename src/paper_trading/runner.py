@@ -8,7 +8,8 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from .calendar import ChinaTradingCalendar
-from .models import AccountType, OrderStatus
+from .models import AccountType, OrderStatus, resolve_execution_config
+from .entry_filter import select_candidates
 
 
 class PaperTradingRunner:
@@ -112,6 +113,14 @@ class PaperTradingRunner:
         orders: List[Dict] = []
         signals: List[Dict] = []
 
+        # 5.5 步之前：解析账户执行配置（止损线、调仓日、防御开关、标的池等均以此为准）。
+        # 执行口径门闩（2026-10-22 复审补修 ④）：老账户（创建时无 config_version）
+        # 在用户显式确认前不得按新行为运行——返回暂停结果，明确提示确认入口。
+        account_cfg = resolve_execution_config(account)
+        if account_cfg is None:
+            return self._build_paused_result(
+                account_id, date, baseline, {"kind": "behavior_ack_required"})
+
         # 6. 执行今天到期的调仓信号
         pending_signals = self.service.store.load_pending_signals(account_id, date)
         for signal in pending_signals:
@@ -130,9 +139,10 @@ class PaperTradingRunner:
                 orders.extend(signal_orders)
                 baseline = self._apply_trades_to_state(baseline, signal_trades, open_prices)
 
-        # 7. 止损检查与执行（使用开盘价）
+        # 7. 止损检查与执行（使用开盘价；止损线取账户冻结配置，缺省 -0.08）
         sl_orders, sl_skipped = self._check_stop_loss(
-            account_id, date, baseline, open_prices)
+            account_id, date, baseline, open_prices,
+            stop_loss=float(account_cfg.get("stop_loss", -0.08)))
         skipped.extend(sl_skipped)
         if sl_orders:
             if is_shadow:
@@ -151,9 +161,18 @@ class PaperTradingRunner:
         # 8. 每日估值（使用收盘价，只更新市值）
         baseline = self._apply_valuation(baseline, close_prices)
 
-        # 9. 如果是调仓日，准备信号（与当天状态一起保存）
-        if self.calendar.is_rebalance_day(date) and scores_df is not None:
-            cfg = json.loads(account["config_json"])
+        # 9. 如果是调仓日（取账户冻结配置的调仓日，缺省周四），准备信号供下一交易日执行
+        if self.calendar.is_rebalance_day(
+                date, int(account_cfg.get("rebalance_weekday", 3))) and scores_df is not None:
+            # 复审补修 ①：评分字段缺失/无效当日即失败，不保存将无法执行的信号
+            import config as config_module
+            from .entry_filter import validate_score_data
+            _pool = set(account_cfg.get("industry_tickers")
+                        or config_module.ETF_UNIVERSE.keys()) | set(
+                        account_cfg.get("defense_tickers")
+                        or config_module.DEFENSE_UNIVERSE.keys())
+            validate_score_data(scores_df, _pool, context="虚拟盘信号准备")
+            cfg = account_cfg
             next_day = self.calendar.next_trading_day(date)
             signals.append(self._prepare_rebalance_signal(account_id, date, next_day, scores_df, cfg))
 
@@ -298,7 +317,16 @@ class PaperTradingRunner:
 
     def _build_paused_result(self, account_id, date, baseline, pause_info):
         """安全暂停结果：明确提示原因，不包含任何交易/估值/保存动作。"""
-        if pause_info.get("kind") == "missed_effective_date":
+        if pause_info.get("kind") == "behavior_ack_required":
+            reason = (
+                "账户运行已暂停：该账户创建于执行口径一致性修复之前（旧行为："
+                "仅按总分过滤、标的池跟随侧栏全局变量）。为落实完整 B0.4 入场"
+                "条件（趋势/确认/弱市55分门槛/收盘在MA20之上/均线斜率/数据成熟期）"
+                "并冻结标的池，需要您在页面「账户操作」中显式确认按新口径运行；"
+                "确认时将记录生效日期并冻结确认时刻的标的池快照。"
+                "未确认前不生成任何交易、不保存当日状态。"
+            )
+        elif pause_info.get("kind") == "missed_effective_date":
             reason = (
                 f"账户运行已暂停：{pause_info['ticker']} 的公司行动生效日 "
                 f"{pause_info['effective_date']} 尚未在本账户处理（当日未运行"
@@ -533,7 +561,12 @@ class PaperTradingRunner:
         signal_date = signal["signal_date"]
         now = datetime.now().isoformat(timespec="seconds")
 
-        cfg = json.loads(self.service.store.get_account(account_id)["config_json"])
+        cfg = resolve_execution_config(self.service.store.get_account(account_id))
+        if cfg is None:
+            raise ValueError(
+                f"账户 {account_id} 尚未确认新执行口径，拒绝生成调仓订单；"
+                f"请先在页面「账户操作」中确认。"
+            )
         planner_trades, _ = self._run_planner(baseline, scores_df, open_prices, cfg)
 
         blocked = blocked_buy_tickers or set()
@@ -585,8 +618,20 @@ class PaperTradingRunner:
     # ============== Rebalance Planner ==============
 
     def _run_planner(self, state, scores_df, prices, cfg=None):
-        """使用 plan_rebalance_v2_5 生成调仓计划。NAV 使用当日开盘价重新计算。"""
-        from config import ETF_UNIVERSE, DEFENSE_UNIVERSE
+        """使用 plan_rebalance_v2_5 生成调仓计划。NAV 使用当日开盘价重新计算。
+
+        账户设置一致性修复（2026-10-22 + 复审补修）：
+        - 标的池优先使用账户创建时冻结的 industry_tickers/defense_tickers
+          （仅直接调用/测试的兼容路径回退 config 模块当前值；经 run_daily
+          进入的账户已由执行口径门闩保证持有冻结池）；
+        - defense_enabled 取账户冻结配置（缺省 True，与旧行为一致）；
+        - 入场过滤走共享模块 entry_filter.select_candidates，与正式 B0.4
+          生产信号路径（generate_signals + _rebalance_v2 二次过滤）逐条对齐：
+          弱市55分门槛、防御资格宽松档、prev_close>ma20、ma20_slope、
+          数据成熟期 history_count>=51；评分字段缺失或无效时抛出
+          ValueError 停止生成交易（不再有"缺列退回仅看总分"的宽松路径）。
+        """
+        import config as config_module
 
         cash = state["cash"]
         # 使用当日开盘价重新计算持仓总值，不再使用前一日收盘市值
@@ -600,23 +645,26 @@ class PaperTradingRunner:
         account_cfg = {}
         if cfg is not None:
             account_cfg = cfg
-        min_score = account_cfg.get("min_total_score", 40)
 
-        industry_scores = scores_df[scores_df["ticker"].isin(ETF_UNIVERSE.keys())]
-        qualified = industry_scores[industry_scores["total_score"] >= min_score].sort_values(
-            "total_score", ascending=False
-        )
-        industry_candidates = [(row["ticker"], float(row["total_score"])) for _, row in qualified.iterrows()]
+        # 标的池：账户创建时冻结优先，回退 config 模块（直接调用/测试兼容路径）
+        industry_tickers = set(account_cfg.get("industry_tickers")
+                               or config_module.ETF_UNIVERSE.keys())
+        defense_tickers = set(account_cfg.get("defense_tickers")
+                              or config_module.DEFENSE_UNIVERSE.keys())
 
-        defense_min_score = min_score - self.DEFENSE_THRESHOLD_DELTA
-        defense_scores = scores_df[scores_df["ticker"].isin(DEFENSE_UNIVERSE.keys())]
-        defense_qualified = defense_scores[defense_scores["total_score"] >= defense_min_score].sort_values(
-            "total_score", ascending=False
+        # B0.4 完整入场条件（缺字段/无效字段在此抛出 ValueError）
+        industry_candidates, defense_candidates, _meta = select_candidates(
+            scores_df,
+            industry_tickers=industry_tickers,
+            defense_tickers=defense_tickers,
+            min_total_score=account_cfg.get("min_total_score", 40),
+            min_trend_score=account_cfg.get("min_trend_score", 15),
+            min_confirm_score=account_cfg.get("min_confirm_score", 4),
+            context="虚拟盘调仓",
         )
-        defense_candidates = [(row["ticker"], float(row["total_score"])) for _, row in defense_qualified.iterrows()]
 
         price_map = {}
-        for t in set(ETF_UNIVERSE.keys()) | set(DEFENSE_UNIVERSE.keys()):
+        for t in industry_tickers | defense_tickers:
             price_map[t] = prices.get(t, 0.0)
         for t, p in state["positions"].items():
             if t not in price_map or price_map[t] <= 0:
@@ -630,8 +678,8 @@ class PaperTradingRunner:
             industry_candidates=industry_candidates,
             defense_candidates=defense_candidates,
             prices=price_map,
-            industry_tickers=set(ETF_UNIVERSE.keys()),
-            defense_tickers=set(DEFENSE_UNIVERSE.keys()),
+            industry_tickers=industry_tickers,
+            defense_tickers=defense_tickers,
             max_industry_holdings=account_cfg.get("max_holdings", 5),
             max_defense_holdings=2,
             max_total_holdings=account_cfg.get("max_holdings", 5),
@@ -640,7 +688,7 @@ class PaperTradingRunner:
             commission_rate=self.COMMISSION_RATE,
             min_commission=self.MIN_COMMISSION,
             lot_size=self.LOT_SIZE,
-            defense_enabled=True,
+            defense_enabled=account_cfg.get("defense_enabled", True),
         )
 
     def _default_planner(self, **kwargs):

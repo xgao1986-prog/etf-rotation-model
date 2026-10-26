@@ -246,7 +246,12 @@ class LiveTradingAssistant:
             return pd.DataFrame()
 
         if stop_loss_pct is None:
-            stop_loss_pct = self.config.get("stop_loss", 0.08)
+            # 口径修复（2026-10-22）：STRATEGY_CONFIG / 侧栏 cfg 中 stop_loss 为负值
+            # （-0.08 表示 -8%），此处必须先取绝对值；否则 `-stop_loss_pct` 会把
+            # 阈值变成 +8%，导致几乎全部持仓误报止损。
+            stop_loss_pct = abs(float(self.config.get("stop_loss", -0.08)))
+        else:
+            stop_loss_pct = abs(float(stop_loss_pct))
 
         holdings = df[df["ticker"] != CASH_TICKER].copy()
         if holdings.empty:
