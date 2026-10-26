@@ -55,3 +55,11 @@ venv/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 本地个人预设（缺失时程序使用内置默认参数）
+presets/strategy_presets.json
+
+# 迁移、浏览器验收与页面检查临时产物
+tmp_migration/
+reports/browser_acceptance/
+reports/ui_test/
