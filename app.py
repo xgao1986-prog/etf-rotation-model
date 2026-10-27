@@ -51,6 +51,49 @@ SCORE_MAX = {
 }
 
 
+def render_data_source_status(akshare_available, csv_count, ifind_program_ok,
+                              conn_status, latest_date):
+    """Keep full status text readable inside the narrow data-actions panel."""
+    from html import escape
+
+    items = [
+        ("AKShare", "可用" if akshare_available else "未安装"),
+        ("本地 iFinD CSV", f"{csv_count} 个"),
+        ("iFinD 程序", "已安装" if ifind_program_ok else "未安装"),
+        ("iFinD 数据连接", conn_status),
+        ("数据库最新日期", latest_date),
+    ]
+    cards = "".join(
+        f'<div class="data-source-card"><div class="data-source-label">{escape(label)}</div>'
+        f'<div class="data-source-value">{escape(str(value))}</div></div>'
+        for label, value in items
+    )
+    st.markdown("""
+<style>
+.data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+.data-source-card {
+    min-width: 0;
+    padding: 14px 16px;
+    border: 1px solid #e6edf5;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(20, 39, 68, 0.05);
+}
+.data-source-label, .data-source-value {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.5;
+}
+.data-source-label { font-size: 0.86rem; color: #506176; }
+.data-source-value { font-size: 1.2rem; font-weight: 600; margin-top: 4px; }
+</style>
+""" + f'<div class="data-source-grid">{cards}</div>', unsafe_allow_html=True)
+
+
 def inject_style():
     st.markdown(
         """
@@ -2053,12 +2096,10 @@ def render_data_management():
         else:
             conn_status = "凭证已配置"
 
-        status_cols = st.columns(5)
-        status_cols[0].metric("AKShare", "可用" if akshare_available else "未安装")
-        status_cols[1].metric("本地 iFinD CSV", f"{len(ifind_csv_files)} 个")
-        status_cols[2].metric("iFinD 程序", "已安装" if ifind_program_ok else "未安装")
-        status_cols[3].metric("iFinD 数据连接", conn_status)
-        status_cols[4].metric("数据库最新日期", latest_date)
+        render_data_source_status(
+            akshare_available, len(ifind_csv_files), ifind_program_ok,
+            conn_status, latest_date,
+        )
 
         if ifind_program_ok and not ifind_cred_ok:
             st.warning("iFinD 程序已安装但凭证未配置（网页环境不继承 Kimi 对话的临时环境变量）。"
