@@ -25,18 +25,21 @@ iFinD 数据网关 —— 通过 subprocess 调用 Kimi iFinD 插件获取行情
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 
 import pandas as pd
 
 DEFAULT_PLUGIN_DIR = os.path.join(
-    os.environ.get("USERPROFILE", r"C:\Users\Gao Xiang"),
+    os.environ.get("USERPROFILE") or os.path.expanduser("~"),
     "AppData", "Roaming", "kimi-desktop", "daimon-share", "daimon",
     "runtime", "kimi-code", "home", "plugins", "managed", "ifind",
 )
 DEFAULT_PYTHON = os.path.join(
-    os.environ.get("LOCALAPPDATA", r"C:\Users\Gao Xiang\AppData\Local"),
+    os.environ.get("LOCALAPPDATA") or os.path.join(
+        os.path.expanduser("~"), "AppData", "Local",
+    ),
     "Programs", "Python", "Python310", "python.exe",
 )
 
@@ -122,8 +125,23 @@ def get_plugin_dir():
     return os.environ.get("IFIND_PLUGIN_DIR", DEFAULT_PLUGIN_DIR)
 
 
+def _get_bundled_gateway_python():
+    """Kimi 插件配套的网关 Python，与运行 Streamlit 的环境分离。"""
+    runtime_dir = os.path.abspath(os.path.join(get_plugin_dir(), *([".."] * 5)))
+    return os.path.join(runtime_dir, "python", ".venv", "Scripts", "python.exe")
+
+
 def get_python_path():
-    return os.environ.get("IFIND_PYTHON", DEFAULT_PYTHON)
+    configured = os.environ.get("IFIND_PYTHON")
+    if configured:
+        return configured
+    if os.path.isfile(DEFAULT_PYTHON):
+        return DEFAULT_PYTHON
+    # 网页环境通常没有 agent_gw；优先使用插件配套且已含网关依赖的 Python。
+    bundled = _get_bundled_gateway_python()
+    if os.path.isfile(bundled):
+        return bundled
+    return sys.executable
 
 
 def get_tool_script():

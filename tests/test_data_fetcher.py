@@ -251,6 +251,53 @@ def _patch_gateway(monkeypatch, df, failed=None, available=True, none_df=None,
 class TestIFindGateway:
     """场景 1/2/7：网关层的超时重试、整体耗时预算、单组失败隔离。"""
 
+    def test_default_paths_discover_user_directories_without_env(self, monkeypatch, tmp_path):
+        """系统环境变量缺失时，默认路径也应基于当前用户目录而非个人硬编码。"""
+        from importlib import reload
+
+        home = tmp_path / "new-device-user"
+        monkeypatch.delenv("USERPROFILE", raising=False)
+        monkeypatch.delenv("LOCALAPPDATA", raising=False)
+        monkeypatch.setattr(ifind_gateway.os.path, "expanduser",
+                            lambda path: str(home) if path == "~" else path)
+        try:
+            reload(ifind_gateway)
+            assert (ifind_gateway.DEFAULT_PLUGIN_DIR, ifind_gateway.DEFAULT_PYTHON) == (
+                str(home / "AppData" / "Roaming" / "kimi-desktop" / "daimon-share" /
+                    "daimon" / "runtime" / "kimi-code" / "home" / "plugins" /
+                    "managed" / "ifind"),
+                str(home / "AppData" / "Local" / "Programs" / "Python" /
+                    "Python310" / "python.exe"),
+            )
+        finally:
+            monkeypatch.undo()
+            reload(ifind_gateway)
+
+    def test_missing_legacy_python_uses_available_gateway_interpreter(self, monkeypatch, tmp_path):
+        """旧机解释器缺失时优先用插件配套网关 Python；显式配置始终优先。"""
+        runtime_dir = tmp_path / "runtime"
+        plugin_dir = runtime_dir / "kimi-code" / "home" / "plugins" / "managed" / "ifind"
+        bundled = runtime_dir / "python" / ".venv" / "Scripts" / "python.exe"
+        bundled.parent.mkdir(parents=True)
+        bundled.write_text("# mock", encoding="utf-8")
+        monkeypatch.setenv("IFIND_PLUGIN_DIR", str(plugin_dir))
+        monkeypatch.setattr(ifind_gateway, "DEFAULT_PYTHON",
+                            str(tmp_path / "old-computer" / "Python310" / "python.exe"))
+        monkeypatch.delenv("IFIND_PYTHON", raising=False)
+        assert ifind_gateway.get_python_path() == str(bundled)
+
+        bundled.unlink()
+        assert ifind_gateway.get_python_path() == sys.executable
+
+        legacy = tmp_path / "legacy-python.exe"
+        legacy.write_text("# mock", encoding="utf-8")
+        monkeypatch.setattr(ifind_gateway, "DEFAULT_PYTHON", str(legacy))
+        assert ifind_gateway.get_python_path() == str(legacy)
+
+        configured = tmp_path / "configured-python.exe"
+        monkeypatch.setenv("IFIND_PYTHON", str(configured))
+        assert ifind_gateway.get_python_path() == str(configured)
+
     @staticmethod
     def _plugin_csv_rows(tickers_csv):
         """模拟插件写出的 CSV（iFinD 原始列名 thscode/time）。"""
