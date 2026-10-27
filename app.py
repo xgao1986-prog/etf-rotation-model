@@ -1485,6 +1485,49 @@ def render_dashboard(cfg, is_b0_18=True):
         st.info("当前无持仓，等待买入信号")
 
 
+def render_analysis_date_range(trading_dates):
+    dates = list(trading_dates)
+    if not dates:
+        return None, None
+    if len(dates) == 1:
+        st.caption(f"当前时段：{dates[0]} ~ {dates[0]}（共 1 个交易日）")
+        return dates[0], dates[0]
+
+    date_labels = [day.strftime("%Y-%m-%d") for day in dates]
+    start_label, end_label = st.select_slider(
+        "📅 拖动选择分析时段（交易日）",
+        options=date_labels,
+        value=(date_labels[0], date_labels[-1]),
+        key="backtest_trading_date_range",
+    )
+    start_index, end_index = date_labels.index(start_label), date_labels.index(end_label)
+    start_date, end_date = dates[start_index], dates[end_index]
+
+    # Tick positions follow trading-day spacing, just like the slider.
+    tick_indices = sorted({round(i * (len(dates) - 1) / 4) for i in range(5)})
+    ticks = []
+    for index in tick_indices:
+        position = index / (len(dates) - 1) * 100
+        anchor = "0" if index == 0 else "-100%" if index == len(dates) - 1 else "-50%"
+        alignment = "left" if index == 0 else "right" if index == len(dates) - 1 else "center"
+        tick_class = "date-tick-minor" if index not in (0, len(dates) - 1, tick_indices[len(tick_indices) // 2]) else ""
+        ticks.append(
+            f'<span class="{tick_class}" style="position:absolute;left:{position:.4f}%;'
+            f'transform:translateX({anchor});text-align:{alignment};white-space:nowrap">'
+            f'│<br>{dates[index]:%Y-%m-%d}</span>'
+        )
+    st.markdown(
+        '<style>@media(max-width:640px){.analysis-date-axis .date-tick-minor{display:none}}</style>'
+        '<div class="analysis-date-axis" style="position:relative;height:42px;'
+        'margin:0 8px;font-size:11px;line-height:16px;text-align:center;opacity:0.7">'
+        + "".join(ticks)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"当前时段：{start_date} ~ {end_date}（共 {end_index - start_index + 1} 个交易日）")
+    return start_date, end_date
+
+
 def render_backtest(cfg, is_b0_18=True):
     st.header("回测结果")
     st.markdown('<div class="section-note">回测会使用当前侧边栏阈值、仓位、风控与实时加权评分。</div>', unsafe_allow_html=True)
@@ -1534,25 +1577,7 @@ def render_backtest(cfg, is_b0_18=True):
         min_date = trading_dates[0] if num_trading_days > 0 else None
         max_date = trading_dates[-1] if num_trading_days > 0 else None
 
-        if num_trading_days < 2:
-            start_date = min_date
-            end_date = max_date
-        else:
-            # 使用交易日序号作为滑块刻度
-            slider_idx = st.slider(
-                "📅 拖动选择分析时段（交易日）",
-                min_value=0,
-                max_value=num_trading_days - 1,
-                value=(0, num_trading_days - 1),
-                step=1,
-                key="backtest_date_range_slider",
-            )
-
-            start_idx, end_idx = slider_idx
-            start_date = trading_dates[start_idx]
-            end_date = trading_dates[end_idx]
-
-            st.caption(f"当前时段：{start_date} ~ {end_date}（共 {end_idx - start_idx + 1} 个交易日）")
+        start_date, end_date = render_analysis_date_range(trading_dates)
 
         # 根据时段过滤数据并重算指标
         filtered_nav = nav_df_all[

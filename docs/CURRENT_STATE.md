@@ -88,6 +88,19 @@ corporate_actions 表 9 条拆分记录全部 confirmed（含公告依据）。�
 
 ---
 
+## 3.2 回测分析时段的日期刻度（2026-10-22，Codex）
+
+- `app.py` 的分析时段滑杆改为直接显示交易日期；拖动手柄显示 YYYY-MM-DD，底部增加随交易日位置分布的日期刻度。宽屏最多五个刻度，窄屏隐藏两个次要刻度。
+- 保留只选交易日及原有日期过滤；空数据、单日和两手柄同日均可处理。使用新的控件键，避免沿用旧整数序号状态。
+- 新增 `tests/test_analysis_date_range_ui.py`，Streamlit AppTest **4 passed**：跨周末范围、轴端点日期、空/单日、同日选择。
+- 用正式库只读取得 1890 个日期，在独立页面运行实际 `render_analysis_date_range`，Chrome 实测键盘选择、鼠标拖动及 1130px/390px 视口。拖动至 2023-08-28 后，手柄日期与当前时段一致；窄屏三个刻度无溢出。截图：`reports/ui_test/date_axis_desktop.png`、`reports/ui_test/date_axis_mobile.png`。
+- 本轮只验证日期控件，未重跑完整策略回测。未修改策略、行情或 `src/`。
+- 2026-10-27 按批次方案隔离暂存：仅 `app.py` 的 `render_analysis_date_range` 及旧整数滑块替换（44+/19-）、`tests/test_analysis_date_range_ui.py` 与本节说明，不含状态卡等其他改动；暂存未提交。
+- 2026-10-27 截图复核：Edge headless 直接视口下限约 496px，改用固定 1130/390px 容器渲染当前 helper；宽屏五刻度完整，窄屏媒体查询生效仅显三刻度、无横向裁切。截图 `reports/ui_test/date_axis_container_1130.png`、`reports/ui_test/date_axis_container_390.png`（本地验收证据，未随仓库发布）。
+- 本机原 Python 3.10 路径失效；验证使用 Codex 自带 Python 3.12 并加载 `.venv-browser-test` 中的 Streamlit 1.41，未安装或修改环境依赖。
+
+---
+
 ## 3.4 账户设置与实际执行一致性（2026-10-22，Kimi，第一检查点，第二轮补修已验收）
 
 - 审计报告：`reports/settings_consistency_audit_20261022.md`（三路径设置支持清单）。对照回测/虚拟盘/实盘建议逐参数追踪，发现 9 项问题（F1~F9）：虚拟盘止损线硬编码 -0.08、调仓日硬编码周四、防御开关硬编码 True、入场只过滤总分、标的池运行时读全局模块（侧栏改动泄漏到已有账户）、创建账户不校验配置（不支持项静默忽略）、实盘助手止损符号 bug（-0.08 变 +8% 阈值几乎全员误报）、实盘防御候选无门槛、页面未区分三类参数。
